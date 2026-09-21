@@ -5,13 +5,14 @@ import { Icon } from "./icon";
 import { Login, useAuth } from "./auth";
 import { pages } from "./pages";
 import type { Page } from "./pages";
+import logo from "./assets/msime.svg";
 
 export function Shell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const { authenticated, loading, error, session } = useAuth(); const path = useLocation({ select: value => value.pathname });
   if (loading) return <section className="login"><div className="login-panel" role="status">正在恢复登录状态…</div></section>;
   if (!authenticated) return <Login />;
-  return <div className="app-shell"><a className="skip-link" href="#main-content">跳转到主要内容</a><aside><Link className="brand" to="/"><span className="brand-icon">杉</span><div>水杉{session?.version && <span className="brand-version" title={`服务版本 ${session.version}`}>v{session.version}</span>}<small>管理控制台</small></div></Link><button type="button" className="mobile-menu" aria-expanded={menuOpen} aria-controls="admin-navigation" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X size={18} aria-hidden="true" /> : <Menu size={18} aria-hidden="true" />}导航</button>
+  return <div className="app-shell"><a className="skip-link" href="#main-content">跳转到主要内容</a><aside><Link className="brand" to="/"><img className="brand-icon" src={logo} alt="" /><div>水杉{session?.version && <span className="brand-version" title={`服务版本 ${session.version}`}>v{session.version}</span>}<small>管理控制台</small></div></Link><button type="button" className="mobile-menu" aria-expanded={menuOpen} aria-controls="admin-navigation" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X size={18} aria-hidden="true" /> : <Menu size={18} aria-hidden="true" />}导航</button>
     <nav id="admin-navigation" aria-label="后台导航" className={menuOpen ? "is-open" : ""}>{([
       ["数据与用户", ["overview", "users", "downloads", "crashes"]],
       ["社区内容", ["skins", "dictionaries", "replies"]],
