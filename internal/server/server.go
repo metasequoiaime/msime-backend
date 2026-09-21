@@ -11,6 +11,7 @@ import (
 	"github.com/metasequoiaime/MSIME-Backend/internal/contract"
 	"github.com/metasequoiaime/MSIME-Backend/internal/skins"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -275,12 +276,23 @@ func (s *Server) doUpstream(req *http.Request) ([]byte, error) {
 	}
 	return b, nil
 }
+// 每一条 502/504 都要留下痕迹。
+//
+// 这里此前只写响应、不记日志,而 502 对客户端来说只是「上游失败」四个字。一次真实排查为此翻遍了
+// 隧道、网关、上游、令牌和额度 —— 服务端明明握着原因(是传输错误,还是响应通过了但没过校验),
+// 却一个字都没留下。cause 为空恰恰是最需要说明的那一种:请求成功了,是我们自己拒绝了响应。
 func upstreamError(w http.ResponseWriter, r *http.Request, cause error) {
 	var networkError net.Error
 	timeout := errors.Is(cause, context.DeadlineExceeded) || (errors.As(cause, &networkError) && networkError.Timeout())
+	reason := "response rejected by validation"
+	if cause != nil {
+		reason = cause.Error()
+	}
 	if r.Context().Err() != nil || timeout {
+		slog.Warn("upstream timed out", "path", r.URL.Path, "reason", reason)
 		fail(w, 504, "upstream_timeout")
 	} else {
+		slog.Error("upstream failed", "path", r.URL.Path, "reason", reason)
 		fail(w, 502, "upstream_failure")
 	}
 }
