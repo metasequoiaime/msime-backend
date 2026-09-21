@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +25,10 @@ type skinArtworkJob struct {
 	cancel  context.CancelFunc
 	state   string
 	artwork json.RawMessage
+	// 失败的原因。此前只记 state="failed",而 generateSkinArtwork 已经算出过具体是哪一种
+	// (invalid_skin_artwork / upstream_failure / upstream_timeout),那一步把它丢了 —— 客户端
+	// 只知道「失败」,于是自己编了一个 502,而服务端日志里什么也没有。谁都查不下去。
+	reason string
 }
 
 func (s *Server) expireSkinJobs(now time.Time) {
@@ -112,6 +118,8 @@ func (s *Server) createSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 			job.artwork = append(json.RawMessage(nil), response.body.Bytes()...)
 		} else {
 			job.state = "failed"
+			job.reason = skinFailureReason(response, ctx.Err())
+			slog.Error("skin artwork job failed", "job", id, "status", response.status, "reason", job.reason)
 		}
 	}()
 	w.Header().Set("Location", "/v1/skins/jobs/"+id)
@@ -128,12 +136,16 @@ func (s *Server) getSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "skin_job_not_found")
 		return
 	}
-	state, artwork := job.state, job.artwork
+	state, artwork, reason := job.state, job.artwork, job.reason
 	s.mu.Unlock()
 	if state == "running" {
 		w.Header().Set("Retry-After", "5")
 	}
-	respond(w, 200, map[string]any{"id": r.PathValue("job"), "state": state, "artwork": artwork})
+	payload := map[string]any{"id": r.PathValue("job"), "state": state, "artwork": artwork}
+	if reason != "" {
+		payload["reason"] = reason
+	}
+	respond(w, 200, payload)
 }
 
 func (s *Server) deleteSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
@@ -160,3 +172,25 @@ type skinJobResponse struct {
 func (w *skinJobResponse) Header() http.Header            { return w.header }
 func (w *skinJobResponse) WriteHeader(status int)         { w.status = status }
 func (w *skinJobResponse) Write(data []byte) (int, error) { return w.body.Write(data) }
+
+// 把同步端点写出的错误体还原成一个可上报的原因码。
+//
+// generateSkinArtwork 通过 fail()/upstreamError() 写的是 {"error":{"code":...}},这里只取 code:
+// message 和 code 目前是同一个字符串,而 code 是稳定的、可以被客户端和日志一起认的那一个。
+func skinFailureReason(response *skinJobResponse, ctxErr error) string {
+	if ctxErr != nil {
+		return "cancelled"
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(response.body.Bytes(), &body) == nil && body.Error.Code != "" {
+		return body.Error.Code
+	}
+	if response.status != 0 {
+		return "upstream_status_" + strconv.Itoa(response.status)
+	}
+	return "unknown"
+}
