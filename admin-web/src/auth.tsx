@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { Icon } from "./icon";
 import { APIError, errorMessage, overviewSchema, requestAPI } from "./api";
-import logo from "./assets/msime.svg";
+import logo from "./assets/msime.png";
 
 const sessionSchema = z.object({ version: z.string().optional(), authenticated: z.boolean(), email: z.string(), google_enabled: z.boolean(), token_enabled: z.boolean(), can_manage_admins: z.boolean().default(false) });
 type Session = z.infer<typeof sessionSchema>;

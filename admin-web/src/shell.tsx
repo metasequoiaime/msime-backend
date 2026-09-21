@@ -5,7 +5,7 @@ import { Icon } from "./icon";
 import { Login, useAuth } from "./auth";
 import { pages } from "./pages";
 import type { Page } from "./pages";
-import logo from "./assets/msime.svg";
+import logo from "./assets/msime.png";
 
 export function Shell() {
   const [menuOpen, setMenuOpen] = useState(false);
