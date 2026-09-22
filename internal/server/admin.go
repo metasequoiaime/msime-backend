@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	msimebackend "github.com/metasequoiaime/MSIME-Backend"
 	adminweb "github.com/metasequoiaime/MSIME-Backend/admin-web"
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 )
@@ -100,6 +101,18 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) bool {
 				return true
 			}
 			s.accounts.AdminMembersHTTP(w, r.WithContext(account.WithAdminActor(ctx, actor)), s.config.Admin.Google.AllowedEmails)
+			return true
+		}
+		if r.URL.Path == "/api/system" {
+			if r.Method != "GET" {
+				fail(w, 405, "method_not_allowed")
+				return true
+			}
+			respond(w, 200, map[string]any{
+				"version": msimebackend.Version(), "server_time": time.Now().UTC(),
+				"auth": s.config.Auth.Enabled, "engine": s.config.Engine.Binary != "", "engine_resources": s.config.Engine.Resources != "",
+				"services": map[string]bool{"cloud": s.config.Cloud.URL != "", "chat": s.config.Chat.URL != "", "translation": s.config.Translation.URL != "", "transcription": s.config.Transcription.URL != "", "streaming_transcription": s.config.Streaming.URL != ""},
+			})
 			return true
 		}
 		s.accounts.AdminHTTP(w, r.WithContext(account.WithAdminActor(ctx, actor)))

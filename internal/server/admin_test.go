@@ -18,6 +18,7 @@ func TestAdminHostAuthAndIsolation(t *testing.T) {
 		{"ADMIN.MSIME.APP:8080", "/users", "", "", 200},
 		{"admin.msime.app", "/crashes", "", "", 200},
 		{"admin.msime.app", "/api/overview", "", "", 401},
+		{"admin.msime.app", "/api/system", strings.Repeat("a", 40), "", 200},
 		{"admin.msime.app", "/api/skins/example", "", "", 401},
 		{"admin.msime.app", "/api/dictionaries/example", testToken, "", 401},
 		{"admin.msime.app", "/api/replies/example", strings.Repeat("a", 40), "https://evil.test", 403},
@@ -39,6 +40,9 @@ func TestAdminHostAuthAndIsolation(t *testing.T) {
 		}
 		if tc.status == 200 && (!strings.Contains(w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") || w.Header().Get("Cache-Control") != "no-store") {
 			t.Fatal(w.Header())
+		}
+		if tc.path == "/api/system" && strings.Contains(w.Body.String(), "token") {
+			t.Fatal("system endpoint leaked credential metadata", w.Body.String())
 		}
 	}
 	s.config.Admin.Enabled = false

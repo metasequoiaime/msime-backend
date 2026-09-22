@@ -65,6 +65,15 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if path == "overview" {
+		days := 30
+		if raw := r.URL.Query().Get("days"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || (parsed != 7 && parsed != 30) {
+				writeError(w, 400, "invalid_days")
+				return
+			}
+			days = parsed
+		}
 		var result json.RawMessage
 		err := a.store.pool.QueryRow(r.Context(), `SELECT json_build_object(
    'users',(SELECT count(*) FROM auth_users),
@@ -83,8 +92,8 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
      (SELECT count(*) FROM auth_users WHERE created_at>=d AND created_at<d+interval '1 day') AS users,
      (SELECT count(*) FROM admin_events WHERE kind='download' AND created_at>=d AND created_at<d+interval '1 day') AS downloads,
      (SELECT count(*) FROM admin_events WHERE kind='crash' AND created_at>=d AND created_at<d+interval '1 day') AS crashes
-     FROM generate_series(date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'-interval '29 days',date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',interval '1 day') d
-   ) x))`).Scan(&result)
+	     FROM generate_series(date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' - ($1::int - 1) * interval '1 day',date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',interval '1 day') d
+   ) x), 'range_days',$1)`, days).Scan(&result)
 		if err != nil {
 			a.error(w, err)
 			return
@@ -110,8 +119,8 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 	queries := map[string]string{
 		"users":        `SELECT u.id,u.display_name,u.created_at,(SELECT count(*) FROM auth_sessions s WHERE s.user_id=u.id AND NOT revoked AND expires_at>now()) AS sessions FROM auth_users u`,
 		"skins":        `SELECT s.id,s.name,s.description,s.owner_id,s.created_at,(SELECT count(*) FROM community_skin_downloads WHERE skin_id=s.id) AS downloads FROM community_skins s`,
-		"dictionaries": `SELECT id,name,description,owner_id,revision,created_at,jsonb_array_length(content->'entries') AS entries,(SELECT count(*) FROM community_resource_saves WHERE resource_id=community_resources.id) AS saves FROM community_resources WHERE kind='dictionary'`,
-		"replies":      `SELECT id,name,description,owner_id,revision,created_at,content->>'prompt' AS prompt FROM community_resources WHERE kind='reply'`,
+		"dictionaries": `SELECT id,name,description,owner_id,revision,created_at,updated_at,jsonb_array_length(content->'entries') AS entries,(SELECT count(*) FROM community_resource_saves WHERE resource_id=community_resources.id) AS saves FROM community_resources WHERE kind='dictionary'`,
+		"replies":      `SELECT id,name,description,owner_id,revision,created_at,updated_at,content->>'prompt' AS prompt FROM community_resources WHERE kind='reply'`,
 		"downloads":    `SELECT id,platform,version,created_at FROM admin_events WHERE kind='download'`,
 		"crashes":      `SELECT id,platform,version,message,stack,resolved,created_at FROM admin_events WHERE kind='crash'`,
 		"audit":        `SELECT id,actor,action,target,created_at FROM admin_audit`,
@@ -122,7 +131,8 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	platform, version, status := r.URL.Query().Get("platform"), r.URL.Query().Get("version"), r.URL.Query().Get("status")
-	if len(platform) > 32 || len(version) > 64 || (status != "" && status != "open" && status != "resolved") || (status != "" && path != "crashes") || ((platform != "" || version != "") && path != "crashes" && path != "downloads") {
+	action, actor := r.URL.Query().Get("action"), r.URL.Query().Get("actor")
+	if len(platform) > 32 || len(version) > 64 || len(action) > 64 || len(actor) > 200 || (status != "" && status != "open" && status != "resolved") || (status != "" && path != "crashes") || ((platform != "" || version != "") && path != "crashes" && path != "downloads") || ((action != "" || actor != "") && path != "audit") {
 		writeError(w, 400, "invalid_filter")
 		return
 	}
@@ -134,9 +144,11 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
  AND ($3='' OR to_jsonb(x)->>'platform'=$3)
  AND ($4='' OR to_jsonb(x)->>'version'=$4)
  AND ($5='' OR to_jsonb(x)->>'resolved'=CASE WHEN $5='resolved' THEN 'true' ELSE 'false' END)
+ AND ($6='' OR to_jsonb(x)->>'action'=$6)
+ AND ($7='' OR to_jsonb(x)->>'actor' ILIKE '%'||$7||'%')
 ), selected AS (SELECT * FROM filtered ORDER BY created_at DESC,id DESC LIMIT 50 OFFSET $2)
 SELECT json_build_object('items', COALESCE((SELECT json_agg(item ORDER BY created_at DESC,id DESC) FROM selected),'[]'::json),
- 'page',$6::int,'total',(SELECT count(*) FROM filtered),'has_more',(SELECT count(*) FROM filtered)>$2+50)`, search, (page-1)*50, platform, version, status, page).Scan(&result)
+ 'page',$8::int,'total',(SELECT count(*) FROM filtered),'has_more',(SELECT count(*) FROM filtered)>$2+50)`, search, (page-1)*50, platform, version, status, action, actor, page).Scan(&result)
 	if err != nil {
 		a.error(w, err)
 		return
@@ -190,9 +202,22 @@ func (a *Service) adminAction(w http.ResponseWriter, r *http.Request) {
 		a.error(w, err)
 		return
 	}
-	if tag.RowsAffected() == 0 && v.Action != "revoke_sessions" {
-		writeError(w, 404, "not_found")
-		return
+	if tag.RowsAffected() == 0 {
+		if v.Action != "revoke_sessions" {
+			writeError(w, 404, "not_found")
+			return
+		}
+		// Revoking an existing user's already-empty session set is idempotent,
+		// but a missing user must not create a misleading audit record.
+		var exists bool
+		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_users WHERE id=$1)`, v.ID).Scan(&exists); err != nil {
+			a.error(w, err)
+			return
+		}
+		if !exists {
+			writeError(w, 404, "not_found")
+			return
+		}
 	}
 	if _, err = tx.Exec(r.Context(), `INSERT INTO admin_audit(action,target,actor) VALUES($1,$2,$3)`, v.Action, v.ID, adminActor(r.Context())); err != nil {
 		a.error(w, err)

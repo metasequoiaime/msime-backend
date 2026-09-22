@@ -86,7 +86,7 @@ func TestEveryPublishedRouteSecurityContract(t *testing.T) {
 }
 
 func TestEveryAdminRouteAuthenticationAndOrigin(t *testing.T) {
-	for _, path := range []string{"overview", "users", "users/example", "downloads", "crashes", "skins", "skins/example", "dictionaries", "dictionaries/example", "replies", "replies/example", "audit", "admins", "actions"} {
+	for _, path := range []string{"overview", "users", "users/example", "downloads", "crashes", "skins", "skins/example", "dictionaries", "dictionaries/example", "replies", "replies/example", "audit", "admins", "actions", "system"} {
 		t.Run(path, func(t *testing.T) {
 			s := fixture(t, nil)
 			s.config.Admin = AdminConfig{Enabled: true, Host: "admin.msime.app", token: strings.Repeat("a", 40)}

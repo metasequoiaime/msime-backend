@@ -15,7 +15,7 @@ export function Shell() {
     <nav id="admin-navigation" aria-label="后台导航" className={menuOpen ? "is-open" : ""}>{([
       ["数据与用户", ["overview", "users", "downloads", "crashes"]],
       ["社区内容", ["skins", "dictionaries", "replies"]],
-      ["系统管理", ["admins", "audit"]],
+      ["系统管理", ["admins", "audit", "system"]],
     ] as const).map(([group, keys]) => <div className="nav-group" key={group}><p className="nav-label">{group}</p>{keys.filter(key => key !== "admins" || session?.can_manage_admins).map(key => {
       const [title, , icon] = pages[key]; const active = key === "overview" ? path === "/" : path === `/${key}`;
       return <Link key={key} to={key === "overview" ? "/" : "/$section"} params={{ section: key }} className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => setMenuOpen(false)}><Icon className="nav-icon" name={icon} /><span>{title}</span></Link>;
