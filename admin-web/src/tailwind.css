@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+}
+
+@layer base {
+  :root { @apply font-sans text-[#233b35] antialiased; }
+  body { @apply m-0 bg-[#f4f6f5]; }
+  *, *::before, *::after { @apply box-border; }
+  button, input, select { @apply font-[inherit]; }
+  button { @apply cursor-pointer rounded-lg border border-[#dce5e0] bg-white px-3.5 py-2 text-[#30473d] transition hover:bg-[#edf4ef]; }
+  button:disabled { @apply cursor-not-allowed opacity-50; }
+  button:focus-visible, a:focus-visible, summary:focus-visible { @apply outline-2 outline-offset-2 outline-[#73b298]; }
+  h1, h2, h3, p { @apply m-0; }
+  table { @apply w-full border-collapse text-left text-xs; }
+  th { @apply whitespace-nowrap bg-[#f4f7f5] text-[11px] font-medium text-[#52675b]; }
+  td, th { @apply border-b border-[#edf1ee] px-5 py-4; }
+  input, select { @apply min-w-0 rounded-lg border border-[#d6e1db] bg-white px-3 py-2.5 text-[#203a30] outline-none; }
+  input:focus, select:focus { @apply ring-2 ring-[#8db8a0]; }
+  dialog { @apply max-h-[90dvh] w-[90%] max-w-[850px] overflow-auto rounded-xl border border-[#d9e4dc] p-6 text-[#233b35]; }
+  dialog::backdrop { @apply bg-[#10251f]/50; }
+  pre { @apply max-h-[65vh] overflow-auto whitespace-pre-wrap break-words bg-[#f6f8f6] p-5 text-xs leading-7; }
+}
+
+@layer components {
+  .muted { @apply text-[#7b8983]; }
+  .small { @apply text-xs leading-7; }
+  .sr-only { @apply absolute h-px w-px overflow-hidden; clip: rect(0,0,0,0); }
+  .notice { @apply rounded-lg border border-[#cfe5d5] bg-[#eaf3ed] p-3.5 text-[13px] shadow-sm; }
+  .notice.error, .error { @apply border-[#e5c8c5] bg-[#fff4f2] text-[#b44940]; }
+  .panel, .list { @apply mb-6 rounded-xl border border-[#e0e8e3] bg-white shadow-[0_5px_16px_#163c2b06]; }
+  .panel { @apply p-6; }
+  .panel-heading { @apply flex flex-wrap items-center justify-between gap-4; }
+  .badge { @apply inline-block whitespace-nowrap rounded-md bg-[#edf5ee] px-2 py-1 text-[11px] text-[#4b7a59]; }
+  .badge.warning { @apply bg-[#fbf1e0] text-[#b0793b]; }
+  .table-wrap { @apply max-h-[65vh] overflow-auto; }
+  .table-wrap th { @apply sticky top-0 z-[1]; }
+  .table-wrap tbody tr:hover { @apply bg-[#f9fcfa]; }
+  .compact td, .compact th { @apply py-2; }
+  .cell-text { @apply block max-w-[230px] overflow-hidden text-ellipsis whitespace-nowrap; }
+  .actions { @apply whitespace-nowrap; }
+  .actions button { @apply mr-1.5 px-2 py-1 text-[11px]; }
+  .danger { @apply text-[#ae5651]; }
+  .empty { @apply p-20 text-center text-[#90a096]; }
+  .pagination { @apply flex flex-wrap items-center justify-between gap-3 p-5 text-xs text-[#89958e]; }
+  .pagination > div { @apply flex gap-2; }
+  .toolbar { @apply flex flex-wrap items-center justify-between gap-4 p-5; }
+  .toolbar > div { @apply flex min-w-0 gap-2; }
+  .toolbar input { @apply w-[260px] py-2; }
+  .list-filters { @apply flex flex-wrap items-end gap-3.5 px-[22px] pb-[18px]; }
+  .list-filters label { @apply flex min-w-[130px] flex-col gap-1.5 text-xs text-[#53675d]; }
+  .list-filters input, .list-filters select { @apply w-[170px] py-2; }
+  .list-filters button, .toolbar button, .table-options button { @apply inline-flex items-center gap-1.5; }
+  .table-options, .batch-toolbar { @apply flex flex-wrap items-center gap-3 border-t border-[#edf1ee] p-3 text-xs; }
+  .table-options > span { @apply ml-auto; }
+  .batch-toolbar { @apply bg-[#f0f6f2]; }
+  .batch-toolbar button { @apply px-2.5 py-1.5 text-xs; }
+  .user-facts { @apply my-5 grid grid-cols-[100px_minmax(0,1fr)] gap-3 text-[13px] leading-7; }
+  .user-facts dt { @apply text-[#667b73]; }
+  .user-facts dd { @apply m-0 whitespace-pre-wrap break-words; }
+  .content-preview { @apply max-h-[45vh] whitespace-pre-wrap break-words overflow-auto; }
+  .content-search { @apply flex items-center gap-3; }
+  .content-search input { @apply min-w-0 flex-1; }
+  .content-footer { @apply mt-6 border-t border-[#d9e4dc] pt-3; }
+  .content-footer button { @apply inline-flex items-center gap-1.5; }
+  .service-grid { @apply my-5 grid grid-cols-1 gap-3 md:grid-cols-3; }
+  .service-grid > div { @apply flex items-center justify-between rounded-lg border border-[#e1e8e3] p-3.5 text-[13px]; }
+  .dialog-heading { @apply sticky top-[-24px] z-[2] flex flex-wrap items-center justify-between gap-3 border-b border-[#edf1ee] bg-white py-3; }
+  .overview-hero { @apply relative mb-[22px] flex items-center justify-between gap-6 overflow-hidden rounded-[18px] bg-gradient-to-br from-[#173e31] to-[#2a634d] p-7 text-[#f0f8f2] shadow-xl max-md:flex-col max-md:items-start; }
+  .overview-hero h2 { @apply mt-2.5 text-[25px] tracking-[-.5px]; }
+  .overview-hero p { @apply text-[13px] text-[#bbd7c8]; }
+  .hero-kicker, .section-kicker { @apply flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[1.4px]; }
+  .hero-kicker { @apply text-[#a9dbc0]; }
+  .section-kicker { @apply mb-1.5 text-[#6b8d7c]; }
+  .trend-controls { @apply flex flex-wrap items-center gap-2; }
+  .trend-controls button { @apply inline-flex items-center gap-1.5; }
+  .chart-tooltip { @apply rounded-lg border border-[#dce8df] bg-white p-2 text-xs shadow-xl; }
+  .hero-health { @apply relative z-[1] flex min-w-[210px] items-center gap-3 max-md:min-w-0; }
+  .hero-health strong, .hero-health small { @apply block; }
+  .hero-health strong { @apply text-[13px]; }
+  .hero-health small { @apply mt-1 text-[11px] text-[#add1bc]; }
+  .health-orb { @apply grid h-[42px] w-[42px] place-items-center rounded-[13px] bg-[#d4f2dd] text-[#216442]; }
+  .cards { @apply mb-[22px] grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3; }
+  .metric { @apply relative block overflow-hidden rounded-[15px] border border-[#e0e8e3] bg-white p-5 text-inherit no-underline shadow-sm transition hover:-translate-y-0.5 hover:border-[#b6d9c2] hover:shadow-lg; }
+  .metric-top { @apply mb-3.5 flex items-center justify-between; }
+  .metric-icon { @apply grid h-8 w-8 place-items-center rounded-[9px] bg-[#e7f4eb] text-[#347d57]; }
+  .metric-arrow { @apply text-[#a0b3a9] transition-transform; }
+  .metric:hover .metric-arrow { @apply translate-x-0.5 -translate-y-0.5; }
+  .metric-blue .metric-icon { @apply bg-[#e9f0ff] text-[#4678c4]; }
+  .metric-violet .metric-icon { @apply bg-[#f0edff] text-[#7862c7]; }
+  .metric-amber .metric-icon { @apply bg-[#fff2dd] text-[#bd8437]; }
+  .metric-green .metric-icon { @apply bg-[#e4f5e8] text-[#3f9561]; }
+  .metric-pink .metric-icon { @apply bg-[#fbeaf3] text-[#b2608d]; }
+  .metric-teal .metric-icon { @apply bg-[#e3f5f5] text-[#268d91]; }
+  .metric-orange .metric-icon { @apply bg-[#fff0e4] text-[#c67842]; }
+  .metric strong { @apply text-3xl font-medium tracking-[-1px] text-[#16372a]; }
+  .secondary-stats { @apply mb-6 grid grid-cols-2 overflow-hidden rounded-xl border border-[#e0e8e3] bg-white shadow-sm sm:grid-cols-5; }
+  .secondary-stats > a { @apply flex flex-col gap-1.5 border-b border-[#e7eee9] p-5 text-center no-underline; }
+  .secondary-stats strong { @apply text-[22px] font-medium text-[#214e39]; }
+  .secondary-label { @apply text-[11px] text-[#72857c]; }
+  .secondary-stats .small { @apply flex items-center justify-center gap-1; }
+  .axis { @apply flex justify-between text-[10px] text-[#91a095]; }
+  .chart { @apply mt-6 border-b border-[#e7eee8]; }
+  .skin-preview-stage { @apply mt-4 grid place-items-center rounded-xl border border-[#dce5df] bg-[#eef2ef] p-5; }
+  .skin-layout { @apply flex gap-1.5; }
+  .skin-layout button { @apply px-3 py-1.5 text-xs; }
+  .skin-layout button[aria-pressed=true] { @apply border-[#245d44] bg-[#245d44] text-white; }
+  .skin-source { @apply rounded-lg border border-[#dce5df] p-3.5; }
+  .skin-preview { @apply my-4; }
+  .skin-preview h3 { @apply m-0; }
+  .skin-preview-stage > svg { @apply block h-auto w-full max-w-[440px] drop-shadow-xl; }
+  .skin-source summary { @apply text-[#53675d]; }
+  .skin-source pre { @apply mb-0; }
+  .brand-version { @apply ml-2 inline-block rounded bg-[#e8efe9] px-1.5 py-0.5 text-[10px] font-medium text-[#53675d]; }
+  .admin-members-help { @apply px-[22px] pb-3; }
+}
+
+@media (max-width: 760px) {
+  .toolbar > div { @apply w-full; }
+  .toolbar input { @apply w-auto flex-1; }
+  .list-filters { @apply px-[15px] pb-[15px]; }
+  .list-filters label { @apply flex-1; }
+  .table-options, .batch-toolbar { @apply px-[15px]; }
+  .table-options > span { @apply ml-0 w-full; }
+  .user-facts { @apply grid-cols-[75px_minmax(0,1fr)] gap-2; }
+  .content-search { @apply flex-wrap; }
+  .content-search input { @apply w-full; }
+  td, th { @apply px-3.5 py-3; }
+  .cell-text { @apply max-w-[190px]; }
+  dialog { @apply w-[calc(100%-20px)] p-4; }
+  .dialog-heading { @apply top-[-16px]; }
+}
