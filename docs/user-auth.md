@@ -6,13 +6,15 @@
 
 参考 `config.example.json` 的 `auth` 配置，设置 `enabled: true`，通过环境变量提供数据库 URL 和至少 32 字节随机 `MSIME_AUTH_PEPPER`。密钥应存于 Vault，不提交到源码。
 
-首次启动前使用有 DDL 权限的数据库账号执行：
+服务启动时会检查表是否齐全，缺表就自己补迁移，所以运行账号有 DDL 权限时不需要任何手工步骤，新增表的版本直接滚动更新即可。
+
+生产上如果按下面的最小权限方案部署，运行账号没有 DDL 权限，自动迁移会失败并在启动日志里要求手工迁移。这种部署仍然按原来的方式做，用有 DDL 权限的账号先执行：
 
 ```sh
 msime-server -config /config/config.json -migrate-users
 ```
 
-迁移使用事务和 PostgreSQL advisory lock，可重复运行。生产可由运维迁移，再给运行账号授予本数据库的 CONNECT、public schema USAGE 和六张 `auth_*` 表的 SELECT/INSERT/UPDATE/DELETE；运行账号不需要超级用户、建库或建角色权限。连接生产 PostgreSQL 应启用 TLS；使用私有 CA 时挂载 CA 并设置 `sslmode=verify-full&sslrootcert=...`。
+迁移使用事务和 PostgreSQL advisory lock，可重复运行，多副本同时启动也会串行执行、后到的跑成空操作。生产可由运维迁移，再给运行账号授予本数据库的 CONNECT、public schema USAGE 和六张 `auth_*` 表的 SELECT/INSERT/UPDATE/DELETE；运行账号不需要超级用户、建库或建角色权限。连接生产 PostgreSQL 应启用 TLS；使用私有 CA 时挂载 CA 并设置 `sslmode=verify-full&sslrootcert=...`。
 
 数据库保存用户、身份、验证码摘要、会话摘要和限流计数；不保存明文验证码或会话令牌，不按同名邮箱自动合并第三方身份。服务每小时清理过期挑战、会话和限流计数。数据库需要纳入备份；本服务不提供数据备份功能。
 

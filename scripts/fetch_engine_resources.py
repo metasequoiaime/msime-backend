@@ -5,9 +5,35 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# GitHub 的下载偶尔整段时间返回 504，2026-09-14 那次持续了二十来分钟，同一个窗口里三个仓库的 CI 全
+# 挂在各自的下载上。一次失败就退出等于把 CI 的成败绑在对方那几分钟的可用性上，而这里下载的内容有
+# 摘要校验，重试不会引入坏数据。
+RETRY_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+ATTEMPTS = 5
+
+
+def open_with_retry(request):
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return urllib.request.urlopen(request, timeout=60)
+        except urllib.error.HTTPError as error:
+            # 404、403 这些重试多少次都是同一个答案，立刻失败比等五轮退避有用。
+            if error.code not in RETRY_STATUS or attempt == ATTEMPTS:
+                raise
+            reason = f'HTTP {error.code}'
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt == ATTEMPTS:
+                raise
+            reason = str(error)
+        delay = 2 ** attempt
+        print(f'下载失败（{reason}），{delay}s 后重试（第 {attempt}/{ATTEMPTS - 1} 次）', flush=True)
+        time.sleep(delay)
 
 def download(destination, native_build=None):
     lock = json.loads((ROOT/'native/resources.lock.json').read_text())
@@ -23,7 +49,7 @@ def download(destination, native_build=None):
         with tempfile.NamedTemporaryFile(dir=destination, prefix='.download-', delete=False) as output:
             temporary = Path(output.name)
             try:
-                with urllib.request.urlopen(request, timeout=60) as response:
+                with open_with_retry(request) as response:
                     digest_state = hashlib.sha256()
                     size = 0
                     while chunk := response.read(1024*1024):

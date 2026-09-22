@@ -145,3 +145,48 @@ func TestSkinJobInvalidImageIsFailedWithoutLeakingUpstream(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+// 失败的任务必须说出原因。
+//
+// 此前它只回 state="failed",而具体是哪一种(图像无效、上游拒绝、上游超时)在写入任务时就被丢掉了。
+// 客户端拿不到原因,于是自己编了一个 502 上报;服务端日志里也没有。这条断言把原因留在响应里 ——
+// 同时仍然不许泄露上游地址,那是这一组测试原本就在守的东西。
+func TestFailedSkinJobReportsItsReason(t *testing.T) {
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		respond(w, 200, map[string]any{"data": []any{map[string]string{"url": "https://private.example/token"}}})
+	})
+	t.Cleanup(s.Close)
+	s.config.Images = s.config.Chat
+	path := createArtworkJob(t, s)
+	s.skinWorkers.Wait()
+	w := call(s, "GET", path, "")
+	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`"failed"`)) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"reason":"invalid_skin_artwork"`)) {
+		t.Fatal("失败原因没有带出来:", w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("private.example")) {
+		t.Fatal("上游地址泄露了:", w.Body.String())
+	}
+}
+
+// 成功的任务不该多出一个空的 reason 字段 —— 它只在失败时才有意义。
+func TestSucceededSkinJobCarriesNoReason(t *testing.T) {
+	var encoded bytes.Buffer
+	_ = png.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 32, 24)))
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		respond(w, 200, map[string]any{"data": []any{map[string]string{"b64_json": base64.StdEncoding.EncodeToString(encoded.Bytes())}}})
+	})
+	t.Cleanup(s.Close)
+	s.config.Images = s.config.Chat
+	path := createArtworkJob(t, s)
+	s.skinWorkers.Wait()
+	w := call(s, "GET", path, "")
+	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`"succeeded"`)) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`"reason"`)) {
+		t.Fatal("成功的任务不该带 reason:", w.Body.String())
+	}
+}

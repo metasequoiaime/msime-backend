@@ -44,8 +44,29 @@ func TestServiceLifecycleAndUnavailableDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("SERVICE_TEST_DB", os.Getenv("MSIME_TEST_DATABASE_URL"))
+	// 配了迁移角色就必须切过去建表。生产上运行角色只有 DML 权限,DDL 只有属主角色做得了;要是这里
+	// 悄悄用连接自己的身份,线上表现就是 v0.21.0 那次:版本新增一张表 → 缺表 → DDL 被拒 → 启动失败
+	// → 整个后端 CrashLoopBackOff。用一个不存在的角色钉住这条路由:切换确实发生了。
+	cfg.MigrationRole = "msime_migration_role_that_does_not_exist"
 	if _, err = New(t.Context(), cfg); err == nil {
-		t.Fatal("missing migration accepted")
+		t.Fatal("migration ignored the configured role and used the connection identity")
+	}
+	// 留空则用连接自己的身份,单角色的开发和测试部署照旧自愈。
+	cfg.MigrationRole = ""
+	// 缺表不再是启动失败,而是就地补迁移 —— 版本升级新增一张表时不该要求运维记得先跑 -migrate-users。
+	// 连不上数据库仍然失败,由上面那条无效 DSN 用例覆盖。
+	migrated, err := New(t.Context(), cfg)
+	if err != nil {
+		t.Fatal("missing table was not migrated at startup:", err)
+	}
+	migrated.Close()
+	// to_regclass 按这条连接自己的 search_path 解析,不会撞上其它用例留在同一个库里的一次性 schema。
+	var restored bool
+	if err = db.pool.QueryRow(t.Context(), `SELECT to_regclass('user_preferences') IS NOT NULL`).Scan(&restored); err != nil {
+		t.Fatal(err)
+	}
+	if !restored {
+		t.Fatal("startup reported success without recreating the missing table")
 	}
 	if err := db.Migrate(t.Context()); err != nil {
 		t.Fatal(err)

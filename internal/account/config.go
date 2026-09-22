@@ -40,11 +40,16 @@ type AnonymousConfig struct {
 }
 
 type Config struct {
-	Enabled     bool       `json:"enabled"`
-	DatabaseEnv string     `json:"database_env"`
-	PepperEnv   string     `json:"pepper_env"`
-	Google      OIDCConfig `json:"google"`
-	Apple       OIDCConfig `json:"apple"`
+	Enabled     bool   `json:"enabled"`
+	DatabaseEnv string `json:"database_env"`
+	// 迁移时临时切换到的角色,留空就用连接自己的身份建表。生产上运行角色只有 DML 权限,拿它跑 DDL
+	// 必然 permission denied,而缺表是启动失败 —— 于是「版本里新增一张表」等于一次停机(v0.21.0)。
+	// 建表的权限属于库的属主角色,让迁移事务 SET ROLE 过去即可,不必给长连接池加 DDL 权限,也不必
+	// 为属主另造一套登录凭据 —— 它通常根本不是登录角色。
+	MigrationRole string     `json:"migration_role"`
+	PepperEnv     string     `json:"pepper_env"`
+	Google        OIDCConfig `json:"google"`
+	Apple         OIDCConfig `json:"apple"`
 	// 匿名账号:装完就有一个可用身份,不必先有邮箱或第三方账号。开着就等于开户没有门槛,所以 begin 那侧
 	// 按 IP 限流,否则一段脚本就能刷满数据库和 AI 额度。
 	Anonymous AnonymousConfig `json:"anonymous"`

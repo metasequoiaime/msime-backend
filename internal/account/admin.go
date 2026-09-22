@@ -8,8 +8,20 @@ import (
 	"strings"
 )
 
-// AdminReady makes an enabled admin fail startup if its migration is missing.
+// AdminReady 检查管理后台需要的表。缺表时就地补迁移再检查一次:Ready 只探用户表,而管理后台是后加
+// 的,一个在那之前迁移过的库会通过 Ready 却卡在这里。Migrate 是纯增量且带 advisory lock 的,重复执行
+// 安全。
 func (a *Service) AdminReady(ctx context.Context) error {
+	if err := a.adminTables(ctx); err != nil {
+		if migrated := a.store.Migrate(ctx); migrated != nil {
+			return migrated
+		}
+		return a.adminTables(ctx)
+	}
+	return nil
+}
+
+func (a *Service) adminTables(ctx context.Context) error {
 	_, err := a.store.pool.Exec(ctx, `SELECT email FROM admin_members WHERE false; SELECT id FROM admin_events WHERE false; SELECT actor FROM admin_audit WHERE false; SELECT state_hash FROM admin_login_flows WHERE false; SELECT token_hash FROM admin_sessions WHERE false`)
 	return err
 }

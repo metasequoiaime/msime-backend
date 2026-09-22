@@ -19,7 +19,7 @@
 
 复用现有 PostgreSQL 用户体系。配置 `auth.apple.client_ids: ["app.msime.ios"]`；Apple Developer 中为相同 App ID 启用 Sign in with Apple，并重新生成包含该 entitlement 的签名配置。客户端不包含设备共享令牌或 Apple 私钥。Apple nonce 来自后端挑战，ID Token 校验继续使用现有 issuer/audience/signature/nonce 校验。
 
-上线前使用迁移账号执行新版本的 `-migrate-users`，或者由数据库管理员在事务中执行 `internal/account/community_schema.sql`，并给运行角色授予三张新表的 SELECT/INSERT/UPDATE/DELETE。这些表放在现有 PostgreSQL 中，无需 K8s 本地目录或 PVC。新版本启动检查表已迁移；先迁移再滚动更新，旧二进制可兼容新增表。数据库需按现有方案备份。
+运行角色有 DDL 权限时不需要单独迁移：新版本启动发现缺表会自己补上。按最小权限部署（运行角色只有 DML）时仍照旧：上线前使用迁移账号执行新版本的 `-migrate-users`，或者由数据库管理员在事务中执行 `internal/account/community_schema.sql`，并给运行角色授予三张新表的 SELECT/INSERT/UPDATE/DELETE。这些表放在现有 PostgreSQL 中，无需 K8s 本地目录或 PVC。先迁移再滚动更新，旧二进制可兼容新增表。数据库需按现有方案备份。
 
 下载及评分的唯一键保证多副本并发去重；发布锁定账号行保证配额。浏览和写入继续使用数据库限流。没有给下载用户数设置产品上限；实际吞吐需按部署容量测试，不能把配额或副本数解释为可承载人数。
 

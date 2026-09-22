@@ -45,17 +45,35 @@ func signTencent(req *http.Request, payload []byte, e TranslationEndpoint, now t
 }
 
 func (s *Server) translateTencent(w http.ResponseWriter, r *http.Request, v translationRequest) {
+	source, target := strings.ToLower(v.Source), strings.ToLower(v.Target)
+	wanted := v.list()
+	// 先查共享缓存,只把没命中的送上游。一整批都命中就完全不打腾讯。
+	cached := s.cachedTranslations(r.Context(), source, target, wanted)
+	missing := missingTexts(wanted, cached)
+	var fresh []string
+	if len(missing) > 0 {
+		var ok bool
+		if fresh, ok = s.translateTencentUpstream(w, r, source, target, missing); !ok {
+			return
+		}
+		s.storeTranslations(r.Context(), source, target, missing, fresh)
+	}
+	respondTranslations(w, v, mergeTranslations(wanted, cached, missing, fresh))
+}
+
+// 打一次 TextTranslateBatch。返回的译文与 texts 一一对应;第二个返回值为 false 时响应已经写过了。
+func (s *Server) translateTencentUpstream(w http.ResponseWriter, r *http.Request, source, target string, texts []string) ([]string, bool) {
 	payload, _ := json.Marshal(struct {
 		Source         string
 		Target         string
 		ProjectId      int
 		SourceTextList []string
-	}{strings.ToLower(v.Source), strings.ToLower(v.Target), 0, v.list()})
+	}{source, target, 0, texts})
 	e := s.config.Translation
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, e.URL, bytes.NewReader(payload))
 	if err != nil {
 		upstreamError(w, r, err)
-		return
+		return nil, false
 	}
 	signTencent(req, payload, e, time.Now())
 	body, err := s.doUpstream(req)
@@ -65,16 +83,15 @@ func (s *Server) translateTencent(w http.ResponseWriter, r *http.Request, v tran
 			Error          json.RawMessage
 		}
 	}
-	wanted := v.list()
-	if err != nil || json.Unmarshal(body, &result) != nil || (len(result.Response.Error) != 0 && string(result.Response.Error) != "null") || len(result.Response.TargetTextList) != len(wanted) {
+	if err != nil || json.Unmarshal(body, &result) != nil || (len(result.Response.Error) != 0 && string(result.Response.Error) != "null") || len(result.Response.TargetTextList) != len(texts) {
 		upstreamError(w, r, err)
-		return
+		return nil, false
 	}
 	for _, text := range result.Response.TargetTextList {
 		if !bounded(text, contract.OutputTextBytes) {
 			upstreamError(w, r, err)
-			return
+			return nil, false
 		}
 	}
-	respondTranslations(w, v, result.Response.TargetTextList)
+	return result.Response.TargetTextList, true
 }

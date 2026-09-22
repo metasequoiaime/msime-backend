@@ -37,7 +37,8 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
-		if err = db.Migrate(ctx); err != nil {
+		// 和启动时自动迁移走同一条路,否则手动跑一次和自动跑一次会有不同的权限行为。
+		if err = db.MigrateAs(ctx, config.Auth.MigrationRole); err != nil {
 			slog.Error("用户数据库迁移失败")
 			os.Exit(1)
 		}

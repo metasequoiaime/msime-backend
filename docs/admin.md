@@ -23,7 +23,7 @@
    ```
 
 4. Google 登录模式不需要设置 `MSIME_ADMIN_TOKEN`。如果保留它，界面会额外提供管理员密钥登录作为兼容入口；不配置 Google 时仍需要至少 32 字节的独立随机管理员密钥。不要将任何密钥放进前端源码、安装包或版本库。
-5. 使用新二进制先执行迁移：`./msime-server -config /config/config.json -migrate-users`。镜像中可在正常入口后追加 `-migrate-users`。迁移是幂等的；后台启用但缺少表时服务会拒绝启动。
+5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表会自己补上。运行账号按最小权限只有 DML 时，仍需先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`（镜像中可在正常入口后追加 `-migrate-users`）。迁移是幂等的；后台启用而表既不存在又补不上时，服务拒绝启动并在错误里说明原因。
 6. 正常启动镜像；容器中的 `listen` 应为 `0.0.0.0:8080`。配置 `admin.msime.app` 的 DNS 指向入口，并在入口终止 HTTPS，将该域名的请求转发到相同的 Go 端口，保留原始 Host。Go 不信任 `X-Forwarded-Host`。
 
 示例 Nginx HTTPS 虚拟主机（证书路径、后端地址按部署调整）：
