@@ -24,11 +24,13 @@ func TestAdminHTTPValidationAndAuditAtomicity(t *testing.T) {
 	for _, action := range []string{"delete_skin", "delete_dictionary", "delete_reply", "resolve_crash", "reopen_crash"} {
 		apiRequest(t, handler, "POST", "/api/actions", `{"action":"`+action+`","id":"missing"}`, "", 404)
 	}
+	apiRequest(t, handler, "POST", "/api/actions", `{"action":"revoke_sessions","id":"missing"}`, "", 404)
 	for _, path := range []string{"users", "downloads", "crashes", "skins", "dictionaries", "replies", "audit"} {
 		apiRequest(t, handler, "GET", "/api/"+path+"?page=10001", "", "", 400)
 		apiRequest(t, handler, "GET", "/api/"+path+"?q="+strings.Repeat("a", 201), "", "", 400)
 		apiRequest(t, handler, "POST", "/api/"+path, `{}`, "", 405)
 	}
+	apiRequest(t, handler, "GET", "/api/overview?days=14", "", "", 400)
 	apiRequest(t, handler, "GET", "/api/unknown", "", "", 404)
 	var count int
 	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM admin_audit`).Scan(&count); err != nil || count != 0 {

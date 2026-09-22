@@ -54,6 +54,14 @@ func TestAdminDataAndActions(t *testing.T) {
 	if overview.Code != 200 || json.Unmarshal(overview.Body.Bytes(), &summary) != nil || summary.Users != 1 || summary.Downloads != 1 || summary.Crashes != 1 || len(summary.Daily) != 30 {
 		t.Fatal(overview.Code, overview.Body.String())
 	}
+	short := call("GET", "/api/overview?days=7", "", false)
+	var shortSummary struct {
+		RangeDays int   `json:"range_days"`
+		Daily     []any `json:"daily"`
+	}
+	if short.Code != 200 || json.Unmarshal(short.Body.Bytes(), &shortSummary) != nil || shortSummary.RangeDays != 7 || len(shortSummary.Daily) != 7 {
+		t.Fatal(short.Code, short.Body.String())
+	}
 	if _, err := db.pool.Exec(ctx, `INSERT INTO community_skins(id,owner_id,name,design) VALUES('skin-test',$1,'Skin','{}');`, user.User.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -146,5 +154,10 @@ func TestAdminListFilters(t *testing.T) {
 		if w.Code != 400 {
 			t.Fatal(query, w.Code, w.Body.String())
 		}
+	}
+	w := httptest.NewRecorder()
+	a.AdminHTTP(w, httptest.NewRequest("GET", "/api/audit?action=resolve_crash", nil))
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }

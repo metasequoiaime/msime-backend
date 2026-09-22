@@ -5,7 +5,8 @@ export const overviewSchema = z.object({
   downloads: z.number(), crashes: z.number(), open_crashes: z.number(),
   skins: z.number(), skin_downloads: z.number(), dictionaries: z.number(),
   replies: z.number(), resource_saves: z.number(),
-  daily: z.array(z.object({ day: z.string(), users: z.number(), downloads: z.number(), crashes: z.number() })).length(30),
+  range_days: z.union([z.literal(7), z.literal(30)]),
+  daily: z.array(z.object({ day: z.string(), users: z.number(), downloads: z.number(), crashes: z.number() })),
 });
 export type Overview = z.infer<typeof overviewSchema>;
 export const listSchema = z.object({
