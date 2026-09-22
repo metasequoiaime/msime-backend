@@ -10,6 +10,7 @@ import { SystemStatus } from "./system-status";
 import { ResourceList } from "./resource-list";
 import { isListPage } from "./pages";
 import "./style.scss";
+import "./tailwind.css";
 
 function NotFound() { return <section className="panel"><h1>页面不存在</h1><Link to="/">返回数据总览</Link></section>; }
 const rootRoute = createRootRoute({ component: Shell, notFoundComponent: NotFound });
