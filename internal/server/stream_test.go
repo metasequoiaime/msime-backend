@@ -78,6 +78,11 @@ func TestStreamBinaryRelayAndShutdown(t *testing.T) {
 	if _, _, err := c.Read(ctx); err == nil {
 		t.Fatal("stream remained open")
 	}
+	// Close waits for the stream handler, but the slot is released by the request middleware around it, just after the handler returns. A leak is a slot that never comes back, so wait for it rather than read it the instant Close returns.
+	released := time.Now().Add(2 * time.Second)
+	for len(s.slots) != 0 && time.Now().Before(released) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if len(s.slots) != 0 {
 		t.Fatal("stream leaked concurrency slot")
 	}
