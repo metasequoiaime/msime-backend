@@ -101,12 +101,42 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.remote, 'rev-parse', 'main'), tip)
         self.assertNotIn('backend-v0.1.1', self.run_git(self.remote, 'tag', '--list'))
 
+    def test_release_yields_to_the_run_a_newer_release_change_queued(self):
+        self.release()
+        (self.repo / 'cmd/main.go').write_text('package main\n// 修复\n')
+        self.commit('fix: 修复')
+        self.run_git(self.repo, 'push', 'origin', 'main')
+        other = self.root / 'other'
+        self.run_git(self.root, 'clone', '--branch', 'main', str(self.remote), str(other))
+        self.run_git(other, 'config', 'user.name', '并行提交')
+        self.run_git(other, 'config', 'user.email', 'other@example.invalid')
+        (other / 'cmd/main.go').write_text('package main\n// 修复\n// 并行修复\n')
+        self.run_git(other, 'add', '.')
+        self.run_git(other, 'commit', '-m', 'fix: 并行修改')
+        self.run_git(other, 'push', 'origin', 'main')
+        tip = self.run_git(other, 'rev-parse', 'HEAD')
+        outputs = (self.root / 'outputs').read_text()
+        # 并行提交改了发布路径，push 已为它排上一次发布；本次不失败，也不给镜像任务输出。
+        self.assertIsNone(self.release())
+        self.assertEqual((self.root / 'outputs').read_text(), outputs)
+        self.assertEqual(self.run_git(self.remote, 'rev-parse', 'main'), tip)
+        self.assertNotIn('backend-v0.1.1', self.run_git(self.remote, 'tag', '--list'))
+
     def test_version_tag_mismatch_rejected(self):
         self.release()
         (self.repo / 'VERSION').write_text('0.5.0\n')
         self.commit('chore: 错误版本')
         with self.assertRaisesRegex(RuntimeError, '不一致'):
             self.release()
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_trigger_paths_mirror_the_workflow(self):
+        # 让位的前提是新提交确实触发了一次发布，所以这里的路径必须和 on.push.paths 一字不差。
+        workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/backend-release.yml').read_text()
+        block = workflow.split('    paths:\n', 1)[1].split('\n  workflow_dispatch:', 1)[0]
+        paths = [line.strip()[2:].strip().strip("'") for line in block.splitlines() if line.strip().startswith('- ')]
+        self.assertEqual(backend.TRIGGER_PATHS, paths)
 
 
 if __name__ == '__main__':

@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""基于已检出的、已验证的 main 提交发布版本；原子推送失败时由工作流重跑。"""
+"""基于已检出的、已验证的 main 提交发布版本。
+
+验证期间 main 若前进，原子推送失败，不会发布未验证的代码。新提交若改了触发发布的路径，push 已为它在同一 concurrency 组里排上一次发布，那一次会验证并发布包含本次改动的新 main，本次让位并以成功结束；否则仍然失败，由人重跑。"""
 import os
 import re
 import subprocess
 from pathlib import Path
+
+# backend-release.yml 的 on.push.paths，逐字一致（test_trigger_paths_mirror_the_workflow 守着）。
+TRIGGER_PATHS = ['cmd/**', 'internal/**', 'admin-web/**', '!**/*.md', 'version.go', 'go.mod', 'go.sum', 'Dockerfile',
+                 '.dockerignore', '.gitmodules', 'native/**', 'third_party/**', 'scripts/release/**',
+                 '.github/workflows/backend-release.yml']
 
 PATHS = ['cmd', 'internal', 'admin-web', 'go.mod', 'go.sum', 'Dockerfile', '.dockerignore', '.gitmodules', 'native', 'third_party',
          'scripts/release', '.github/workflows/backend-release.yml',
@@ -12,6 +19,13 @@ PATHS = ['cmd', 'internal', 'admin-web', 'go.mod', 'go.sum', 'Dockerfile', '.doc
 
 def git(*args):
     return subprocess.check_output(['git', *args], text=True).strip()
+
+
+def superseded(base):
+    """base 之后进入 main 的提交里，是否有会触发新一次发布的。"""
+    git('fetch', '--quiet', 'origin', 'main')
+    specs = [f':(glob,exclude){p[1:]}' if p.startswith('!') else f':(glob){p}' for p in TRIGGER_PATHS]
+    return bool(git('log', '--format=%H', f'{base}..origin/main', '--', *specs))
 
 
 def next_version(current, messages):
@@ -28,6 +42,7 @@ def next_version(current, messages):
 def release():
     if git('status', '--porcelain'):
         raise RuntimeError('工作区必须干净')
+    base = git('rev-parse', 'HEAD')
     current = Path('VERSION').read_text().strip()
     if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', current):
         raise RuntimeError('VERSION 必须是无前缀的正式语义版本')
@@ -63,6 +78,9 @@ def release():
                             f'refs/tags/{tag}:refs/tags/{tag}'], check=True)
         except subprocess.CalledProcessError:
             git('tag', '-d', tag)
+            if superseded(base):
+                print(f'验证期间 main 已前进，新提交会触发下一次发布并包含本次改动；{tag} 由那一次发布')
+                return None
             raise
     revision = git('rev-parse', f'{tag}^{{commit}}')
     result = {'version': version, 'tag': tag, 'revision': revision}
