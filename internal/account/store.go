@@ -7,6 +7,8 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -77,11 +79,23 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	if e = p.Ping(ctx); e != nil {
-		p.Close()
-		return nil, errors.New("用户数据库连接失败")
+	// 刚启动的 Pod 可能在网络和 DNS 就绪前就先连库,第一次失败不代表库不可用。一直重试到调用方的
+	// 期限:之前第一次失败就退出进程,只能靠容器重启再来一次。最终的错误带上原因 —— pgx 的连接错误
+	// 只有用户名、库名和地址,不含密码 —— 否则像证书过期这样的问题只剩一句「连接失败」。
+	wait := 250 * time.Millisecond
+	for {
+		if e = p.Ping(ctx); e == nil {
+			return &Store{p}, nil
+		}
+		select {
+		case <-ctx.Done():
+			p.Close()
+			return nil, fmt.Errorf("用户数据库连接失败：%w", e)
+		case <-time.After(wait):
+		}
+		slog.Warn("用户数据库暂时连不上，重试", "error", e)
+		wait = min(wait*2, 2*time.Second)
 	}
-	return &Store{p}, nil
 }
 func (s *Store) Close()                            { s.pool.Close() }
 func (s *Store) Migrate(ctx context.Context) error { return s.MigrateAs(ctx, "") }

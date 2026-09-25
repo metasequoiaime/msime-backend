@@ -33,7 +33,7 @@ func main() {
 		defer cancel()
 		db, err := account.Open(ctx, os.Getenv(config.Auth.DatabaseEnv))
 		if err != nil {
-			slog.Error("用户数据库连接失败")
+			slog.Error("用户数据库连接失败", "error", err)
 			os.Exit(1)
 		}
 		defer db.Close()
