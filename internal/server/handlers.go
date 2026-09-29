@@ -201,13 +201,15 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) translateEndpoint(w http.ResponseWriter, r *http.Request, v translationRequest, e TranslationEndpoint) {
-	if len(v.Texts) > 0 && e.Provider != "tencent" {
+	if len(v.Texts) > 0 && e.Provider != "tencent" && e.Provider != "deepl" {
 		fail(w, 400, "batch_not_supported")
 		return
 	}
 	switch e.Provider {
 	case "openai":
 		s.translateOpenAI(w, r, v, e)
+	case "deepl":
+		s.translateDeepL(w, r, v, e)
 	case "tencent":
 		s.translateTencent(w, r, v, e)
 	case "niutrans":

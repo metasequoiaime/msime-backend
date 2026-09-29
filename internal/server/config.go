@@ -207,8 +207,8 @@ func (c *Config) Validate() error {
 }
 
 func validateTranslationEndpoint(e *TranslationEndpoint, requireProvider bool) error {
-	if e.Provider != "" && e.Provider != "deeplx" && e.Provider != "tencent" && e.Provider != "openai" && e.Provider != "niutrans" {
-		return errors.New("translation provider must be deeplx, tencent, openai or niutrans")
+	if e.Provider != "" && e.Provider != "deeplx" && e.Provider != "deepl" && e.Provider != "tencent" && e.Provider != "openai" && e.Provider != "niutrans" {
+		return errors.New("translation provider must be deeplx, deepl, tencent, openai or niutrans")
 	}
 	if requireProvider && e.Provider == "" {
 		return errors.New("translation fallback provider is required")
@@ -245,6 +245,19 @@ func validateTranslationEndpoint(e *TranslationEndpoint, requireProvider bool) e
 		e.appID, e.apiKey = os.Getenv(e.AppIDEnv), os.Getenv(e.APIKeyEnv)
 		if e.AppIDEnv == "" || e.APIKeyEnv == "" || !validProviderCredential(e.appID) || !validProviderCredential(e.apiKey) {
 			return errors.New("NiuTrans translation requires app_id_env and apikey_env")
+		}
+	}
+	if e.Provider == "deepl" {
+		if e.URL == "" {
+			e.URL = "https://api-free.deepl.com/v2/translate"
+		}
+		u, err := url.Parse(e.URL)
+		if err != nil || u.Path != "/v2/translate" || u.RawQuery != "" || u.ForceQuery {
+			return errors.New("DeepL translation URL must use /v2/translate without a query")
+		}
+		e.token = os.Getenv(e.TokenEnv)
+		if e.TokenEnv == "" || !validProviderCredential(e.token) {
+			return errors.New("DeepL translation requires token_env")
 		}
 	}
 	if e.URL == "" {
