@@ -253,7 +253,11 @@ func (s *Server) niuTransResources(w http.ResponseWriter, r *http.Request) {
 	}
 	params := map[string]string{"appId": s.config.NiuTrans.Resource.appID, "timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10), "action": action}
 	params["authStr"] = niuTransAuth(params, s.config.NiuTrans.Resource.apiKey)
-	u, _ := url.Parse(s.config.NiuTrans.Resource.URL)
+	u, err := url.Parse(s.config.NiuTrans.Resource.URL)
+	if err != nil {
+		upstreamError(w, r, err)
+		return
+	}
 	u.Path = strings.TrimSuffix(u.Path, "/") + "/" + action
 	q := u.Query()
 	for key, value := range params {
