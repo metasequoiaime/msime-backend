@@ -98,6 +98,20 @@ func New(c Config) (*Server, error) {
 	mux.HandleFunc("GET /v1/models", s.chatModels)
 	mux.HandleFunc("POST "+contract.TranslationPath, s.translate)
 	mux.HandleFunc("POST "+contract.TranscriptionPath, s.transcribe)
+	mux.HandleFunc("POST /v1/niutrans/documents", s.niuTransDocumentUpload)
+	mux.HandleFunc("GET /v1/niutrans/documents/{file_no}", s.niuTransDocumentStatus)
+	mux.HandleFunc("PUT /v1/niutrans/documents/{file_no}/interrupt", s.niuTransDocumentInterrupt)
+	mux.HandleFunc("DELETE /v1/niutrans/documents/{file_no}", s.niuTransDocumentDelete)
+	mux.HandleFunc("GET /v1/niutrans/documents/{file_no}/download", s.niuTransDocumentDownload)
+	mux.HandleFunc("POST /v1/niutrans/images", s.niuTransImageUpload)
+	mux.HandleFunc("GET /v1/niutrans/images/{file_no}", s.niuTransImageStatus)
+	mux.HandleFunc("PUT /v1/niutrans/images/{file_no}/interrupt", s.niuTransImageInterrupt)
+	mux.HandleFunc("GET /v1/niutrans/images/{file_no}/download", s.niuTransImageDownload)
+	mux.HandleFunc("POST /v1/niutrans/voice", s.niuTransVoiceUpload)
+	mux.HandleFunc("GET /v1/niutrans/voice/{file_no}", s.niuTransVoiceStatus)
+	mux.HandleFunc("PUT /v1/niutrans/voice/{file_no}/interrupt", s.niuTransVoiceInterrupt)
+	mux.HandleFunc("GET /v1/niutrans/voice/{file_no}/download", s.niuTransVoiceDownload)
+	mux.HandleFunc("GET /v1/niutrans/resources", s.niuTransResources)
 	mux.HandleFunc("GET "+contract.CloudPath, s.cloud)
 	s.handler = s.middleware(mux)
 	return s, nil
@@ -276,6 +290,7 @@ func (s *Server) doUpstream(req *http.Request) ([]byte, error) {
 	}
 	return b, nil
 }
+
 // 每一条 502/504 都要留下痕迹。
 //
 // 这里此前只写响应、不记日志,而 502 对客户端来说只是「上游失败」四个字。一次真实排查为此翻遍了

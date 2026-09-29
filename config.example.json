@@ -33,6 +33,28 @@
     "url": "",
     "token_env": "MSIME_TRANSLATION_TOKEN"
   },
+  "niutrans": {
+    "document": {
+      "url": "https://api.niutrans.com/v2/doc/translate/upload",
+      "app_id_env": "MSIME_NIUTRANS_DOC_APP_ID",
+      "apikey_env": "MSIME_NIUTRANS_APIKEY"
+    },
+    "image": {
+      "url": "https://api.niutrans.com/v2/image/translate/upload",
+      "app_id_env": "MSIME_NIUTRANS_IMAGE_APP_ID",
+      "apikey_env": "MSIME_NIUTRANS_APIKEY"
+    },
+    "voice": {
+      "url": "https://api.niutrans.com/v2/voice/translate/upload",
+      "app_id_env": "MSIME_NIUTRANS_VOICE_APP_ID",
+      "apikey_env": "MSIME_NIUTRANS_APIKEY"
+    },
+    "resource": {
+      "url": "https://api.niutrans.com/v2/resource",
+      "app_id_env": "MSIME_NIUTRANS_RESOURCE_APP_ID",
+      "apikey_env": "MSIME_NIUTRANS_APIKEY"
+    }
+  },
   "transcription": {
     "url": "",
     "token_env": "MSIME_TRANSCRIPTION_TOKEN",

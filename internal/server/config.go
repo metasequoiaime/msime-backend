@@ -32,6 +32,24 @@ type TranslationEndpoint struct {
 	appID       string
 	apiKey      string
 }
+
+// NiuTransEndpoint contains credentials for one of NiuTrans' asynchronous
+// media APIs. Credentials are resolved from the process environment and never
+// accepted from a client request.
+type NiuTransEndpoint struct {
+	URL       string `json:"url"`
+	AppIDEnv  string `json:"app_id_env"`
+	APIKeyEnv string `json:"apikey_env"`
+	appID     string
+	apiKey    string
+}
+
+type NiuTransConfig struct {
+	Document NiuTransEndpoint `json:"document"`
+	Image    NiuTransEndpoint `json:"image"`
+	Voice    NiuTransEndpoint `json:"voice"`
+	Resource NiuTransEndpoint `json:"resource"`
+}
 type StreamingEndpoint struct {
 	Provider      string `json:"provider"`
 	Model         string `json:"model"`
@@ -61,6 +79,7 @@ type Config struct {
 	Chat                 Endpoint              `json:"chat"`
 	Translation          TranslationEndpoint   `json:"translation"`
 	TranslationFallbacks []TranslationEndpoint `json:"translation_fallbacks,omitempty"`
+	NiuTrans             NiuTransConfig        `json:"niutrans"`
 	Transcription        Endpoint              `json:"transcription"`
 	Cloud                Endpoint              `json:"cloud"`
 	MaxConcurrent        int                   `json:"max_concurrent"`
@@ -152,6 +171,22 @@ func (c *Config) Validate() error {
 		seenFallbackProviders[e.Provider] = true
 		if err := validateTranslationEndpoint(e, true); err != nil {
 			return fmt.Errorf("translation fallback %d: %w", i, err)
+		}
+	}
+	c.validateNiuTransDefaults()
+	for name, e := range map[string]*NiuTransEndpoint{"document": &c.NiuTrans.Document, "image": &c.NiuTrans.Image, "voice": &c.NiuTrans.Voice, "resource": &c.NiuTrans.Resource} {
+		if e.URL == "" {
+			continue
+		}
+		u, err := url.Parse(e.URL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("NiuTrans %s URL must be an absolute HTTPS URL without query or credentials", name)
+		}
+		e.appID, e.apiKey = os.Getenv(e.AppIDEnv), os.Getenv(e.APIKeyEnv)
+		if !validProviderCredential(e.appID) || !validProviderCredential(e.apiKey) {
+			// Media APIs are optional at process startup. Their routes return 503
+			// until the corresponding API application is configured.
+			e.appID, e.apiKey = "", ""
 		}
 	}
 	for name, e := range map[string]*Endpoint{"images": &c.Images, "chat": &c.Chat, "translation": &c.Translation.Endpoint, "transcription": &c.Transcription, "cloud": &c.Cloud} {
@@ -275,6 +310,30 @@ func validateTranslationEndpoint(e *TranslationEndpoint, requireProvider bool) e
 		return errors.New("translation model required")
 	}
 	return nil
+}
+
+func (c *Config) validateNiuTransDefaults() {
+	defaults := []struct {
+		e    *NiuTransEndpoint
+		path string
+		id   string
+	}{
+		{&c.NiuTrans.Document, "https://api.niutrans.com/v2/doc/translate/upload", "MSIME_NIUTRANS_DOC_APP_ID"},
+		{&c.NiuTrans.Image, "https://api.niutrans.com/v2/image/translate/upload", "MSIME_NIUTRANS_IMAGE_APP_ID"},
+		{&c.NiuTrans.Voice, "https://api.niutrans.com/v2/voice/translate/upload", "MSIME_NIUTRANS_VOICE_APP_ID"},
+		{&c.NiuTrans.Resource, "https://api.niutrans.com/v2/resource", "MSIME_NIUTRANS_RESOURCE_APP_ID"},
+	}
+	for _, d := range defaults {
+		if d.e.URL == "" {
+			d.e.URL = d.path
+		}
+		if d.e.AppIDEnv == "" {
+			d.e.AppIDEnv = d.id
+		}
+		if d.e.APIKeyEnv == "" {
+			d.e.APIKeyEnv = "MSIME_NIUTRANS_APIKEY"
+		}
+	}
 }
 
 func validProviderCredential(value string) bool {
