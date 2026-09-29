@@ -45,3 +45,29 @@ SQL 在单个事务中切换到既有 DML 运行角色 `msime_backend`，使用�
 每个认证主体最多保留 3 个任务，全局最多 `min(8, max_concurrent)` 个；领取、取消或失败后调用 `DELETE /v1/skins/jobs/{job}` 释放任务。任务绑定认证主体，令牌刷新不改变归属，其他主体查询和删除都返回 404。上游请求最多运行 180 秒，服务关闭会取消并等待任务。提交请求不应自动重试，以免重复生成。
 
 这些是当前单实例服务中的临时草稿，10 分钟后失效，重启也会失效；不写入社区或用户皮肤库。客户端应提示重新抽取，只有用户保存后才成为持久化皮肤。扩展到多实例前需要将任务存储和执行迁移到共享任务服务。
+
+## 候选框皮肤包入库
+
+候选框皮肤包（msime-skins 格式，`skin.toml` 加图片等资源）直接存入 PostgreSQL，通过既有 `/v1/skins` 目录下发，客户端不必固定某个 msime-skins 提交。格式、校验和冲突规则见 `internal/skins/README.md`。
+
+部署：运行角色有 DDL 权限时新版本启动会自动建表。按最小权限部署时，上线前用迁移账号执行新版本的 `-migrate-users`，或在事务中执行 `internal/account/candidate_skin_schema.sql`（需要 PostgreSQL 12 及以上，用到生成列），并给运行角色授予两张新表的权限：
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON candidate_skins, candidate_skin_resources TO msime_backend;
+```
+
+服务只需要 SELECT；INSERT 供下面的种子 SQL 以运行角色写入，UPDATE/DELETE 供运维下架（`UPDATE candidate_skins SET published = false, updated_at = now() WHERE id = '…'`）或删除（级联删除资源）。先迁移再滚动更新，旧二进制不读这两张表。
+
+`scripts/candidate_skins_seed.py` 只生成 SQL，不连接数据库：
+
+```sh
+python3 scripts/candidate_skins_seed.py ~/src/msime-skins > /tmp/candidate-skins.sql
+python3 scripts/candidate_skins_seed.py ~/src/msime-skins --only bigfish,qq-blue > /tmp/candidate-skins.sql
+psql -X -v ON_ERROR_STOP=1 "$MSIME_MIGRATION_DATABASE_URL" -f /tmp/candidate-skins.sql
+```
+
+脚本按客户端规则校验每个包，客户端会拒绝的清单直接拒绝（不改写），并在 stderr 说明原因；任何一个包被拒绝时不输出 SQL。`license.assets` 含 `UNVERIFIED` 的包（如 `niya-demo`）默认跳过，用 `--only` 点名时拒绝。非皮肤资源（README 等）不入库，会在 stderr 列出；符号链接、超过 4 MiB 的文件、超过 16 MiB 或 512 个条目的包直接拒绝。SQL 注释记录来源仓库（去掉凭据）和提交，工作区有未提交改动时给出警告。
+
+SQL 在单个事务中切换到运行角色 `msime_backend`（`--role` 可改），加事务锁，只插入缺失的行；同一 ID 已存在且清单或资源集合（路径与 SHA-256）不一致时整个事务失败，不覆盖已发布的包。内容相同时重复执行不改变任何行。改版应发布新 ID，或由运维先显式下架、删除旧包。执行前审核 SQL 并确认目标数据库。
+
+msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID）。客户端把清单里的 `fluent` 当作 `system` 的别名，脚本和服务端同样接受；数据库保存原始清单字节，`/v1/skins` 返回的 `base` 为 `system`。其余 Windows 内置 ID 作为 base 仍被拒绝。

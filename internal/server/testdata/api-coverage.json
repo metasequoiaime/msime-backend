@@ -213,10 +213,12 @@
       "internal/account/dictionary_manage_test.go::TestManagedBaseDictionaryEdits"
     ],
     "GET /v1/skins": [
-      "internal/server/skins_test.go::TestSkinHTTP"
+      "internal/server/skins_test.go::TestSkinHTTP",
+      "internal/server/skins_test.go::TestDatabaseSkinsHTTP"
     ],
     "GET /v1/skins/{id}": [
-      "internal/server/skins_test.go::TestSkinHTTP"
+      "internal/server/skins_test.go::TestSkinHTTP",
+      "internal/server/skins_test.go::TestDatabaseSkinsHTTP"
     ],
     "GET /v1/skins/source": [
       "internal/server/skins_test.go::TestSkinHTTP"
@@ -225,7 +227,8 @@
       "internal/server/skins_test.go::TestSkinHTTP"
     ],
     "GET /v1/skins/{id}/resources/{resource}": [
-      "internal/server/skins_test.go::TestSkinHTTP"
+      "internal/server/skins_test.go::TestSkinHTTP",
+      "internal/server/skins_test.go::TestDatabaseSkinsHTTP"
     ],
     "GET /v1/community/skins": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"

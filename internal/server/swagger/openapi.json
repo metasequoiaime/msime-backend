@@ -9518,7 +9518,7 @@
             }
           }
         ],
-        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
+        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置，启用用户体系时再并入数据库中已发布的候选框皮肤包（按客户端 msime-skins 规则逐次校验）。同一 ID 同时出现在 skins_root 和数据库时两边都不提供，计 1 个 invalid_packages；数据库不可用时返回 503。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
         "responses": {
           "200": {
             "description": "成功",
@@ -9559,8 +9559,15 @@
                               "fluent",
                               "wechat",
                               "graphite",
-                              "willow_green"
-                            ]
+                              "willow_green",
+                              "system",
+                              "shuishan",
+                              "light",
+                              "paper",
+                              "night",
+                              "ink"
+                            ],
+                            "description": "内置与 skins_root 皮肤包沿用 Windows 方言，base 为四个内置 ID 之一；数据库皮肤包沿用客户端方言，base 为 system 或内置全局主题；清单中的 fluent 是 system 的别名，返回 system。"
                           },
                           "builtin": {
                             "type": "boolean"
@@ -9602,6 +9609,12 @@
                               "min_width_dip": {
                                 "type": "number"
                               },
+                              "corner_radius_dip": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 32,
+                                "description": "仅数据库皮肤包（客户端方言）提供；省略时沿用宿主圆角。"
+                              },
                               "decoration": {
                                 "type": "object",
                                 "properties": {
@@ -9610,13 +9623,188 @@
                                   },
                                   "width_dip": {
                                     "type": "number"
+                                  },
+                                  "image": {
+                                    "type": "string",
+                                    "description": "仅数据库皮肤包（客户端方言）提供；装饰图的包内路径；省略时客户端在有装饰带时改用 preview 图片。"
+                                  },
+                                  "align": {
+                                    "type": "string",
+                                    "enum": [
+                                      "left",
+                                      "center",
+                                      "right"
+                                    ],
+                                    "description": "仅数据库皮肤包（客户端方言）提供；默认 right。"
+                                  }
+                                }
+                              },
+                              "background": {
+                                "type": "object",
+                                "properties": {
+                                  "image": {
+                                    "type": "string"
+                                  },
+                                  "fit": {
+                                    "type": "string",
+                                    "enum": [
+                                      "cover",
+                                      "contain",
+                                      "stretch"
+                                    ]
+                                  },
+                                  "opacity": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                  }
+                                },
+                                "required": [
+                                  "image",
+                                  "fit",
+                                  "opacity"
+                                ]
+                              }
+                            }
+                          },
+                          "candidate": {
+                            "type": "object",
+                            "properties": {
+                              "dark": {
+                                "type": "object",
+                                "properties": {
+                                  "accent": {
+                                    "type": "string"
+                                  },
+                                  "selected": {
+                                    "type": "string"
+                                  },
+                                  "hover": {
+                                    "type": "string"
+                                  },
+                                  "surface": {
+                                    "type": "string"
+                                  },
+                                  "border": {
+                                    "type": "string"
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  },
+                                  "number": {
+                                    "type": "string"
+                                  },
+                                  "translation": {
+                                    "type": "string"
+                                  },
+                                  "show_selected_bar": {
+                                    "type": "boolean"
+                                  }
+                                }
+                              },
+                              "light": {
+                                "type": "object",
+                                "properties": {
+                                  "accent": {
+                                    "type": "string"
+                                  },
+                                  "selected": {
+                                    "type": "string"
+                                  },
+                                  "hover": {
+                                    "type": "string"
+                                  },
+                                  "surface": {
+                                    "type": "string"
+                                  },
+                                  "border": {
+                                    "type": "string"
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  },
+                                  "number": {
+                                    "type": "string"
+                                  },
+                                  "translation": {
+                                    "type": "string"
+                                  },
+                                  "show_selected_bar": {
+                                    "type": "boolean"
                                   }
                                 }
                               }
                             }
                           },
-                          "candidate": {
-                            "type": "object"
+                          "toolbar": {
+                            "type": "object",
+                            "properties": {
+                              "corner_radius_dip": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 32
+                              },
+                              "dark": {
+                                "type": "object",
+                                "properties": {
+                                  "background": {
+                                    "type": "string"
+                                  },
+                                  "border": {
+                                    "type": "string"
+                                  },
+                                  "handle": {
+                                    "type": "string"
+                                  },
+                                  "divider": {
+                                    "type": "string"
+                                  },
+                                  "icon": {
+                                    "type": "string"
+                                  },
+                                  "hover": {
+                                    "type": "string"
+                                  }
+                                }
+                              },
+                              "light": {
+                                "type": "object",
+                                "properties": {
+                                  "background": {
+                                    "type": "string"
+                                  },
+                                  "border": {
+                                    "type": "string"
+                                  },
+                                  "handle": {
+                                    "type": "string"
+                                  },
+                                  "divider": {
+                                    "type": "string"
+                                  },
+                                  "icon": {
+                                    "type": "string"
+                                  },
+                                  "hover": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "license": {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string"
+                              },
+                              "assets": {
+                                "type": "string"
+                              },
+                              "source": {
+                                "type": "string"
+                              }
+                            }
                           },
                           "resources": {
                             "type": "array",
@@ -9690,7 +9878,7 @@
             }
           }
         ],
-        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
+        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置，启用用户体系时再并入数据库中已发布的候选框皮肤包（按客户端 msime-skins 规则逐次校验）。同一 ID 同时出现在 skins_root 和数据库时两边都不提供，计 1 个 invalid_packages；数据库不可用时返回 503。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
         "responses": {
           "200": {
             "description": "成功",
@@ -9726,8 +9914,15 @@
                         "fluent",
                         "wechat",
                         "graphite",
-                        "willow_green"
-                      ]
+                        "willow_green",
+                        "system",
+                        "shuishan",
+                        "light",
+                        "paper",
+                        "night",
+                        "ink"
+                      ],
+                      "description": "内置与 skins_root 皮肤包沿用 Windows 方言，base 为四个内置 ID 之一；数据库皮肤包沿用客户端方言，base 为 system 或内置全局主题；清单中的 fluent 是 system 的别名，返回 system。"
                     },
                     "builtin": {
                       "type": "boolean"
@@ -9769,6 +9964,12 @@
                         "min_width_dip": {
                           "type": "number"
                         },
+                        "corner_radius_dip": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 32,
+                          "description": "仅数据库皮肤包（客户端方言）提供；省略时沿用宿主圆角。"
+                        },
                         "decoration": {
                           "type": "object",
                           "properties": {
@@ -9777,13 +9978,188 @@
                             },
                             "width_dip": {
                               "type": "number"
+                            },
+                            "image": {
+                              "type": "string",
+                              "description": "仅数据库皮肤包（客户端方言）提供；装饰图的包内路径；省略时客户端在有装饰带时改用 preview 图片。"
+                            },
+                            "align": {
+                              "type": "string",
+                              "enum": [
+                                "left",
+                                "center",
+                                "right"
+                              ],
+                              "description": "仅数据库皮肤包（客户端方言）提供；默认 right。"
+                            }
+                          }
+                        },
+                        "background": {
+                          "type": "object",
+                          "properties": {
+                            "image": {
+                              "type": "string"
+                            },
+                            "fit": {
+                              "type": "string",
+                              "enum": [
+                                "cover",
+                                "contain",
+                                "stretch"
+                              ]
+                            },
+                            "opacity": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            }
+                          },
+                          "required": [
+                            "image",
+                            "fit",
+                            "opacity"
+                          ]
+                        }
+                      }
+                    },
+                    "candidate": {
+                      "type": "object",
+                      "properties": {
+                        "dark": {
+                          "type": "object",
+                          "properties": {
+                            "accent": {
+                              "type": "string"
+                            },
+                            "selected": {
+                              "type": "string"
+                            },
+                            "hover": {
+                              "type": "string"
+                            },
+                            "surface": {
+                              "type": "string"
+                            },
+                            "border": {
+                              "type": "string"
+                            },
+                            "text": {
+                              "type": "string"
+                            },
+                            "number": {
+                              "type": "string"
+                            },
+                            "translation": {
+                              "type": "string"
+                            },
+                            "show_selected_bar": {
+                              "type": "boolean"
+                            }
+                          }
+                        },
+                        "light": {
+                          "type": "object",
+                          "properties": {
+                            "accent": {
+                              "type": "string"
+                            },
+                            "selected": {
+                              "type": "string"
+                            },
+                            "hover": {
+                              "type": "string"
+                            },
+                            "surface": {
+                              "type": "string"
+                            },
+                            "border": {
+                              "type": "string"
+                            },
+                            "text": {
+                              "type": "string"
+                            },
+                            "number": {
+                              "type": "string"
+                            },
+                            "translation": {
+                              "type": "string"
+                            },
+                            "show_selected_bar": {
+                              "type": "boolean"
                             }
                           }
                         }
                       }
                     },
-                    "candidate": {
-                      "type": "object"
+                    "toolbar": {
+                      "type": "object",
+                      "properties": {
+                        "corner_radius_dip": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 32
+                        },
+                        "dark": {
+                          "type": "object",
+                          "properties": {
+                            "background": {
+                              "type": "string"
+                            },
+                            "border": {
+                              "type": "string"
+                            },
+                            "handle": {
+                              "type": "string"
+                            },
+                            "divider": {
+                              "type": "string"
+                            },
+                            "icon": {
+                              "type": "string"
+                            },
+                            "hover": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "light": {
+                          "type": "object",
+                          "properties": {
+                            "background": {
+                              "type": "string"
+                            },
+                            "border": {
+                              "type": "string"
+                            },
+                            "handle": {
+                              "type": "string"
+                            },
+                            "divider": {
+                              "type": "string"
+                            },
+                            "icon": {
+                              "type": "string"
+                            },
+                            "hover": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "license": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "assets": {
+                          "type": "string"
+                        },
+                        "source": {
+                          "type": "string"
+                        }
+                      }
                     },
                     "resources": {
                       "type": "array",
@@ -9835,7 +10211,7 @@
           "皮肤"
         ],
         "parameters": [],
-        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
+        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置，启用用户体系时再并入数据库中已发布的候选框皮肤包（按客户端 msime-skins 规则逐次校验）。同一 ID 同时出现在 skins_root 和数据库时两边都不提供，计 1 个 invalid_packages；数据库不可用时返回 503。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
         "responses": {
           "200": {
             "description": "成功",
@@ -9869,7 +10245,7 @@
           "皮肤"
         ],
         "parameters": [],
-        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
+        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置，启用用户体系时再并入数据库中已发布的候选框皮肤包（按客户端 msime-skins 规则逐次校验）。同一 ID 同时出现在 skins_root 和数据库时两边都不提供，计 1 个 invalid_packages；数据库不可用时返回 503。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
         "responses": {
           "200": {
             "description": "成功",
@@ -9922,7 +10298,7 @@
             }
           }
         ],
-        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
+        "description": "需要设备或用户令牌；内置皮肤随服务提供，自定义目录由管理员 skins_root 配置，启用用户体系时再并入数据库中已发布的候选框皮肤包（按客户端 msime-skins 规则逐次校验）。同一 ID 同时出现在 skins_root 和数据库时两边都不提供，计 1 个 invalid_packages；数据库不可用时返回 503。无效皮肤不进入列表，计入 invalid_packages；不暴露服务器路径或解析错误详情。单资源最多 4 MiB，单包最多 16 MiB、512 个目录条目。下载保留原始文件字节与摘要，客户端仍使用其皮肤 CSS 隔离规则。",
         "responses": {
           "200": {
             "description": "成功",
