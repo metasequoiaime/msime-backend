@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"unicode"
@@ -154,7 +155,15 @@ func respondTranslations(w http.ResponseWriter, v translationRequest, texts []st
 }
 
 func (s *Server) translate(w http.ResponseWriter, r *http.Request) {
-	if !enabled(w, s.config.Translation.Endpoint) {
+	endpoints := append([]TranslationEndpoint{s.config.Translation}, s.config.TranslationFallbacks...)
+	configured := false
+	for _, e := range endpoints {
+		configured = configured || e.URL != ""
+	}
+	if !configured {
+		if !enabled(w, s.config.Translation.Endpoint) {
+			return
+		}
 		return
 	}
 	var v translationRequest
@@ -171,33 +180,64 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 批量只有腾讯支持:上游 TextTranslateBatch 一次收一组。openai 每条要一次对话,deeplx 本身就是
-	// 一条一请求 —— 对它们「支持批量」只是把 N 次调用挪到服务端,不如让调用方知道。
-	if len(v.Texts) > 0 && s.config.Translation.Provider != "tencent" {
+	var last *httptest.ResponseRecorder
+	for _, e := range endpoints {
+		if e.URL == "" {
+			continue
+		}
+		rr := httptest.NewRecorder()
+		s.translateEndpoint(rr, r, v, e)
+		last = rr
+		if rr.Code < 500 {
+			copyResponse(w, rr)
+			return
+		}
+	}
+	if last != nil {
+		copyResponse(w, last)
+		return
+	}
+	fail(w, 503, "translation_disabled")
+}
+
+func (s *Server) translateEndpoint(w http.ResponseWriter, r *http.Request, v translationRequest, e TranslationEndpoint) {
+	if len(v.Texts) > 0 && e.Provider != "tencent" && e.Provider != "deepl" {
 		fail(w, 400, "batch_not_supported")
 		return
 	}
-	if s.config.Translation.Provider == "openai" {
-		s.translateOpenAI(w, r, v)
-		return
+	switch e.Provider {
+	case "openai":
+		s.translateOpenAI(w, r, v, e)
+	case "deepl":
+		s.translateDeepL(w, r, v, e)
+	case "tencent":
+		s.translateTencent(w, r, v, e)
+	case "niutrans":
+		s.translateNiuTrans(w, r, v, e)
+	default:
+		v.Source, v.Target = strings.ToUpper(v.Source), strings.ToUpper(v.Target)
+		payload, _ := json.Marshal(v)
+		b, err := s.upstream(r, e.Endpoint, "POST", "application/json", bytes.NewReader(payload))
+		var result struct {
+			Code int    `json:"code"`
+			Data string `json:"data"`
+		}
+		if err != nil || json.Unmarshal(b, &result) != nil || (result.Code != 0 && result.Code != 200) || !bounded(result.Data, contract.OutputTextBytes) {
+			upstreamError(w, r, err)
+			return
+		}
+		respond(w, 200, map[string]any{"code": 200, "data": result.Data})
 	}
-	if s.config.Translation.Provider == "tencent" {
-		s.translateTencent(w, r, v)
-		return
+}
+
+func copyResponse(w http.ResponseWriter, r *httptest.ResponseRecorder) {
+	for key, values := range r.Header() {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
 	}
-	v.Source = strings.ToUpper(v.Source)
-	v.Target = strings.ToUpper(v.Target)
-	payload, _ := json.Marshal(v)
-	b, err := s.upstream(r, s.config.Translation.Endpoint, "POST", "application/json", bytes.NewReader(payload))
-	var result struct {
-		Code int    `json:"code"`
-		Data string `json:"data"`
-	}
-	if err != nil || json.Unmarshal(b, &result) != nil || (result.Code != 0 && result.Code != 200) || !bounded(result.Data, contract.OutputTextBytes) {
-		upstreamError(w, r, err)
-		return
-	}
-	respond(w, 200, map[string]any{"code": 200, "data": result.Data})
+	w.WriteHeader(r.Code)
+	_, _ = w.Write(r.Body.Bytes())
 }
 func (s *Server) cloud(w http.ResponseWriter, r *http.Request) {
 	if !enabled(w, s.config.Cloud) {

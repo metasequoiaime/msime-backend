@@ -17,7 +17,8 @@
     "POST /v1/translate": [
       "internal/server/server_test.go::TestTranslation",
       "internal/server/translation_openai_test.go::TestOpenAITranslation",
-      "internal/server/tencent_test.go::TestTencentTranslation"
+      "internal/server/tencent_test.go::TestTencentTranslation",
+      "internal/server/translation_niutrans_test.go::TestNiuTransTranslation"
     ],
     "POST /v1/audio/transcriptions": [
       "internal/server/server_test.go::TestTranscriptionMultipart",

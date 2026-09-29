@@ -44,7 +44,7 @@ func signTencent(req *http.Request, payload []byte, e TranslationEndpoint, now t
 	req.Header.Set("Authorization", "TC3-HMAC-SHA256 Credential="+e.secretID+"/"+scope+", SignedHeaders="+signedHeaders+", Signature="+signature)
 }
 
-func (s *Server) translateTencent(w http.ResponseWriter, r *http.Request, v translationRequest) {
+func (s *Server) translateTencent(w http.ResponseWriter, r *http.Request, v translationRequest, e TranslationEndpoint) {
 	source, target := strings.ToLower(v.Source), strings.ToLower(v.Target)
 	wanted := v.list()
 	// 先查共享缓存,只把没命中的送上游。一整批都命中就完全不打腾讯。
@@ -53,7 +53,7 @@ func (s *Server) translateTencent(w http.ResponseWriter, r *http.Request, v tran
 	var fresh []string
 	if len(missing) > 0 {
 		var ok bool
-		if fresh, ok = s.translateTencentUpstream(w, r, source, target, missing); !ok {
+		if fresh, ok = s.translateTencentUpstream(w, r, source, target, missing, e); !ok {
 			return
 		}
 		s.storeTranslations(r.Context(), source, target, missing, fresh)
@@ -62,14 +62,13 @@ func (s *Server) translateTencent(w http.ResponseWriter, r *http.Request, v tran
 }
 
 // 打一次 TextTranslateBatch。返回的译文与 texts 一一对应;第二个返回值为 false 时响应已经写过了。
-func (s *Server) translateTencentUpstream(w http.ResponseWriter, r *http.Request, source, target string, texts []string) ([]string, bool) {
+func (s *Server) translateTencentUpstream(w http.ResponseWriter, r *http.Request, source, target string, texts []string, e TranslationEndpoint) ([]string, bool) {
 	payload, _ := json.Marshal(struct {
 		Source         string
 		Target         string
 		ProjectId      int
 		SourceTextList []string
 	}{source, target, 0, texts})
-	e := s.config.Translation
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, e.URL, bytes.NewReader(payload))
 	if err != nil {
 		upstreamError(w, r, err)
