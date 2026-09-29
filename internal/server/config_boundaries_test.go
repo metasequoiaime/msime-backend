@@ -28,8 +28,15 @@ func TestConfigurationBoundaries(t *testing.T) {
 		"rate low":             func(c *Config) { c.Clients[0].RequestsPerMinute = 0 },
 		"rate high":            func(c *Config) { c.Clients[0].RequestsPerMinute = 100001 },
 		"translation provider": func(c *Config) { c.Translation.Provider = "unknown" },
-		"tencent path":         func(c *Config) { c.Translation.Provider = "tencent"; c.Translation.URL = "https://example.com/path" },
-		"tencent credentials":  func(c *Config) { c.Translation.Provider = "tencent" },
+		"niutrans credentials": func(c *Config) { c.Translation.Provider = "niutrans" },
+		"niutrans path": func(c *Config) {
+			c.Translation = TranslationEndpoint{Provider: "niutrans", AppIDEnv: "CONFIG_TEST_TOKEN", APIKeyEnv: "CONFIG_TEST_TOKEN", Endpoint: Endpoint{URL: "https://example.com/other"}}
+		},
+		"niutrans query": func(c *Config) {
+			c.Translation = TranslationEndpoint{Provider: "niutrans", AppIDEnv: "CONFIG_TEST_TOKEN", APIKeyEnv: "CONFIG_TEST_TOKEN", Endpoint: Endpoint{URL: "https://example.com/v2/text/translate?apikey=secret"}}
+		},
+		"tencent path":        func(c *Config) { c.Translation.Provider = "tencent"; c.Translation.URL = "https://example.com/path" },
+		"tencent credentials": func(c *Config) { c.Translation.Provider = "tencent" },
 		"tencent region": func(c *Config) {
 			c.Translation = TranslationEndpoint{Provider: "tencent", SecretIDEnv: "CONFIG_TEST_TOKEN", Region: "invalid/region", Endpoint: Endpoint{TokenEnv: "CONFIG_TEST_TOKEN"}}
 		},
@@ -67,6 +74,16 @@ func TestConfigurationBoundaries(t *testing.T) {
 	c.AllowedOrigins = []string{"https://example.com"}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	t.Setenv("CONFIG_NIUTRANS_APP", "synthetic-app")
+	t.Setenv("CONFIG_NIUTRANS_KEY", "synthetic-key")
+	niu := base()
+	niu.Translation = TranslationEndpoint{Provider: "niutrans", AppIDEnv: "CONFIG_NIUTRANS_APP", APIKeyEnv: "CONFIG_NIUTRANS_KEY"}
+	if err := niu.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if niu.Translation.URL != "https://api.niutrans.com/v2/text/translate" || niu.Translation.appID != "synthetic-app" || niu.Translation.apiKey != "synthetic-key" {
+		t.Fatalf("NiuTrans defaults or credentials not loaded: %+v", niu.Translation)
 	}
 	if c.Listen != "127.0.0.1:8080" || c.MaxConcurrent != 32 || c.TimeoutSeconds != 30 || c.Translation.Region != "ap-guangzhou" || c.Translation.URL != "https://tmt.tencentcloudapi.com/" {
 		t.Fatalf("defaults: %+v", c)

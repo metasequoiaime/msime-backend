@@ -41,7 +41,7 @@ curl -G -H "Authorization: Bearer $MSIME_CLIENT_TOKEN" \
 
 语音模型由服务端固定。聊天默认保持固定模型；管理员可在 `chat.models` 配置最多 32 个可选模型 ID，`GET /v1/models` 返回默认模型和允许列表，聊天请求只能选择其中的模型。EveryAPI 凭据仅保存在服务端；聊天未指定输出长度时最多生成 2048 token，避免长语音润色被候选场景的小预算截断；现有 AI 候选客户端明确请求 512 token，请求上限为 2048。聊天仅接受非流式文本消息（system/user/assistant），不支持工具调用。支持现有 Linux/Windows 请求中的 `response_format.type=json_object` 或 `text`；客户端的 `thinking.type=disabled` 和 `enable_thinking=false` 只作兼容接收，不透传服务商专有字段。JSON 请求上限 64 KiB；语音文件上限 15 MiB，multipart 总体上限 16 MiB；上游响应上限 1 MiB。客户端必须保留取消和输入代次校验，失败时继续本地输入。
 
-翻译上游支持 OpenAI 兼容聊天模型、DeepLX 与腾讯 TMT `TextTranslateBatch`；客户端统一使用 DeepLX 格式，不持有腾讯密钥。语音上游使用 multipart 转写协议，可解析 `text`、`transcription` 和 `result.text`。云候选上游使用 Google Input Tools 的响应格式，输出过滤控制字符、超长候选和重复项。
+翻译上游支持 OpenAI 兼容聊天模型、DeepLX、腾讯 TMT `TextTranslateBatch` 与小牛翻译 NiuTrans v2；客户端统一使用 DeepLX 格式，不持有供应商密钥。语音上游使用 multipart 转写协议，可解析 `text`、`transcription` 和 `result.text`。云候选上游使用 Google Input Tools 的响应格式，输出过滤控制字符、超长候选和重复项。
 
 错误采用 `{"error":{"code":"...","message":"..."}}`：400 参数不合法、401 未认证、403 来源不允许、413 上传过大、415 格式不支持、429 限流、502 上游失败、503 功能关闭或并发已满、504 超时。错误不透传服务商正文。429/并发已满提供 Retry-After。额度按客户端的 token bucket 控制，重启会重置；当前限流适用于单进程部署，多副本需共享配额实现后再启用。
 
@@ -77,6 +77,20 @@ WAV 上传现在校验 RIFF 文件长度、分块边界、fmt/data 必需块和�
 ```
 
 密钥通过服务进程环境注入。省略 URL 时使用 `https://tmt.tencentcloudapi.com/`；如指定 URL，必须为 HTTPS 根路径且无查询参数。服务使用 TC3 签名调用现有 Windows 适配器对应的 `TextTranslateBatch`，输出仍为 `{ "code": 200, "data": "译文" }`。腾讯账户须支持该接口；当前验证使用合成上游，未调用真实账户。选择 DeepLX 时使用 `provider: "deeplx"`（或省略 provider）并填写 URL；DeepLX 的空 URL 表示禁用翻译。
+
+### 小牛翻译上游
+
+将配置的 `translation` 替换为：
+
+```json
+{
+  "provider": "niutrans",
+  "app_id_env": "MSIME_NIUTRANS_APP_ID",
+  "apikey_env": "MSIME_NIUTRANS_APIKEY"
+}
+```
+
+服务默认调用 `https://api.niutrans.com/v2/text/translate`，也可在 `url` 中指定同样的 HTTPS 接口。App ID 和 API Key 只通过服务进程环境注入；服务端按 NiuTrans v2 协议生成 `authStr`，不会把供应商凭据转发给客户端。小牛翻译接口是单条请求，批量 `texts` 仍只支持腾讯 TMT。
 
 ### 共享译文缓存
 

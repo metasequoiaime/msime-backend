@@ -25,8 +25,12 @@ type TranslationEndpoint struct {
 	Endpoint
 	Provider    string `json:"provider"`
 	SecretIDEnv string `json:"secret_id_env"`
+	AppIDEnv    string `json:"app_id_env"`
+	APIKeyEnv   string `json:"apikey_env"`
 	Region      string `json:"region"`
 	secretID    string
+	appID       string
+	apiKey      string
 }
 type StreamingEndpoint struct {
 	Provider      string `json:"provider"`
@@ -135,8 +139,8 @@ func (c *Config) Validate() error {
 		ids[v.ID] = true
 		tokens[v.token] = true
 	}
-	if c.Translation.Provider != "" && c.Translation.Provider != "deeplx" && c.Translation.Provider != "tencent" && c.Translation.Provider != "openai" {
-		return errors.New("translation provider must be deeplx, tencent or openai")
+	if c.Translation.Provider != "" && c.Translation.Provider != "deeplx" && c.Translation.Provider != "tencent" && c.Translation.Provider != "openai" && c.Translation.Provider != "niutrans" {
+		return errors.New("translation provider must be deeplx, tencent, openai or niutrans")
 	}
 	if c.Translation.Provider == "tencent" {
 		e := &c.Translation
@@ -158,6 +162,20 @@ func (c *Config) Validate() error {
 			if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
 				return errors.New("invalid Tencent region")
 			}
+		}
+	}
+	if c.Translation.Provider == "niutrans" {
+		e := &c.Translation
+		if e.URL == "" {
+			e.URL = "https://api.niutrans.com/v2/text/translate"
+		}
+		u, err := url.Parse(e.URL)
+		if err != nil || u.Path != "/v2/text/translate" || u.RawQuery != "" || u.ForceQuery {
+			return errors.New("NiuTrans translation URL must use /v2/text/translate without a query")
+		}
+		e.appID, e.apiKey = os.Getenv(e.AppIDEnv), os.Getenv(e.APIKeyEnv)
+		if e.AppIDEnv == "" || e.APIKeyEnv == "" || !validProviderCredential(e.appID) || !validProviderCredential(e.apiKey) {
+			return errors.New("NiuTrans translation requires app_id_env and apikey_env")
 		}
 	}
 	for name, e := range map[string]*Endpoint{"images": &c.Images, "chat": &c.Chat, "translation": &c.Translation.Endpoint, "transcription": &c.Transcription, "cloud": &c.Cloud} {
@@ -210,4 +228,8 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validProviderCredential(value string) bool {
+	return value != "" && len(value) <= 4096 && !strings.ContainsAny(value, " \r\n\t")
 }

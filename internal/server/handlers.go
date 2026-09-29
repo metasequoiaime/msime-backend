@@ -185,6 +185,10 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request) {
 		s.translateTencent(w, r, v)
 		return
 	}
+	if s.config.Translation.Provider == "niutrans" {
+		s.translateNiuTrans(w, r, v)
+		return
+	}
 	v.Source = strings.ToUpper(v.Source)
 	v.Target = strings.ToUpper(v.Target)
 	payload, _ := json.Marshal(v)
