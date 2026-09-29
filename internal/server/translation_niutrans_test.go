@@ -51,3 +51,23 @@ func TestNiuTransAuthStringUsesRawValues(t *testing.T) {
 		t.Fatalf("authStr mismatch: got %s want %s", got, want)
 	}
 }
+
+func TestTranslationFallsBackAfterUpstreamFailure(t *testing.T) {
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/primary" {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":"synthetic primary failure"}`)
+			return
+		}
+		if r.URL.Path != "/fallback" {
+			t.Fatalf("unexpected fallback path: %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"code":200,"data":"fallback result"}`)
+	})
+	s.config.Translation = TranslationEndpoint{Endpoint: Endpoint{URL: s.config.Chat.URL + "/primary"}}
+	s.config.TranslationFallbacks = []TranslationEndpoint{{Provider: "deeplx", Endpoint: Endpoint{URL: s.config.Chat.URL + "/fallback"}}}
+	w := call(s, "POST", "/v1/translate", `{"text":"测试","source_lang":"zh","target_lang":"en"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"data":"fallback result"`) {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}

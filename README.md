@@ -43,6 +43,8 @@ curl -G -H "Authorization: Bearer $MSIME_CLIENT_TOKEN" \
 
 翻译上游支持 OpenAI 兼容聊天模型、DeepLX、腾讯 TMT `TextTranslateBatch` 与小牛翻译 NiuTrans v2；客户端统一使用 DeepLX 格式，不持有供应商密钥。语音上游使用 multipart 转写协议，可解析 `text`、`transcription` 和 `result.text`。云候选上游使用 Google Input Tools 的响应格式，输出过滤控制字符、超长候选和重复项。
 
+客户端请求不需要传 `provider` 字段。翻译 provider 由服务端配置决定；可选的 `translation_fallbacks` 按配置顺序尝试。主 provider 返回上游错误、超时或无效响应时，服务端继续下一个 provider；请求参数错误和不支持的批量请求不会切换。只有腾讯 provider 支持当前 `texts` 批量格式。
+
 错误采用 `{"error":{"code":"...","message":"..."}}`：400 参数不合法、401 未认证、403 来源不允许、413 上传过大、415 格式不支持、429 限流、502 上游失败、503 功能关闭或并发已满、504 超时。错误不透传服务商正文。429/并发已满提供 Retry-After。额度按客户端的 token bucket 控制，重启会重置；当前限流适用于单进程部署，多副本需共享配额实现后再启用。
 
 浏览器访问须明确配置 HTTPS `allowed_origins`，不使用通配来源。原生客户端不需要 Origin。官网目前负责展示与下载，没有在线输入功能，不应添加不需要的云调用。
@@ -88,6 +90,31 @@ WAV 上传现在校验 RIFF 文件长度、分块边界、fmt/data 必需块和�
   "app_id_env": "MSIME_NIUTRANS_APP_ID",
   "apikey_env": "MSIME_NIUTRANS_APIKEY"
 }
+```
+
+需要故障转移时，在同一配置中增加 fallback。provider 的凭据仍只从环境变量读取：
+
+```json
+{
+  "provider": "niutrans",
+  "app_id_env": "MSIME_NIUTRANS_APP_ID",
+  "apikey_env": "MSIME_NIUTRANS_APIKEY"
+}
+```
+
+```json
+"translation_fallbacks": [
+  {
+    "provider": "tencent",
+    "secret_id_env": "MSIME_TENCENT_SECRET_ID",
+    "token_env": "MSIME_TENCENT_SECRET_KEY",
+    "region": "ap-guangzhou"
+  },
+  {
+    "provider": "deeplx",
+    "url": "https://translator.example.invalid/translate"
+  }
+]
 ```
 
 服务默认调用 `https://api.niutrans.com/v2/text/translate`，也可在 `url` 中指定同样的 HTTPS 接口。App ID 和 API Key 只通过服务进程环境注入；服务端按 NiuTrans v2 协议生成 `authStr`，不会把供应商凭据转发给客户端。小牛翻译接口是单条请求，批量 `texts` 仍只支持腾讯 TMT。

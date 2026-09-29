@@ -22,18 +22,18 @@ func niutransAuthString(appID, apiKey, source, target, timestamp, text string) s
 	return hex.EncodeToString(checksum[:])
 }
 
-func (s *Server) translateNiuTrans(w http.ResponseWriter, r *http.Request, v translationRequest) {
+func (s *Server) translateNiuTrans(w http.ResponseWriter, r *http.Request, v translationRequest, e TranslationEndpoint) {
 	source, target := strings.ToLower(v.Source), strings.ToLower(v.Target)
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	form := url.Values{
 		"from":      {source},
 		"to":        {target},
-		"appId":     {s.config.Translation.appID},
+		"appId":     {e.appID},
 		"timestamp": {timestamp},
 		"srcText":   {v.Text},
 	}
-	form.Set("authStr", niutransAuthString(s.config.Translation.appID, s.config.Translation.apiKey, source, target, timestamp, v.Text))
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.config.Translation.URL, bytes.NewBufferString(form.Encode()))
+	form.Set("authStr", niutransAuthString(e.appID, e.apiKey, source, target, timestamp, v.Text))
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, e.URL, bytes.NewBufferString(form.Encode()))
 	if err != nil {
 		upstreamError(w, r, err)
 		return

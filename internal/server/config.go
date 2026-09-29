@@ -49,22 +49,23 @@ type Client struct {
 	token             string
 }
 type Config struct {
-	Admin          AdminConfig         `json:"admin"`
-	Images         Endpoint            `json:"images"`
-	SkinsRoot      string              `json:"skins_root"`
-	Engine         engine.Config       `json:"engine"`
-	DocsEnabled    bool                `json:"docs_enabled"`
-	Auth           account.Config      `json:"auth"`
-	Streaming      StreamingEndpoint   `json:"streaming"`
-	Listen         string              `json:"listen"`
-	Clients        []Client            `json:"clients"`
-	Chat           Endpoint            `json:"chat"`
-	Translation    TranslationEndpoint `json:"translation"`
-	Transcription  Endpoint            `json:"transcription"`
-	Cloud          Endpoint            `json:"cloud"`
-	MaxConcurrent  int                 `json:"max_concurrent"`
-	TimeoutSeconds int                 `json:"timeout_seconds"`
-	AllowedOrigins []string            `json:"allowed_origins"`
+	Admin                AdminConfig           `json:"admin"`
+	Images               Endpoint              `json:"images"`
+	SkinsRoot            string                `json:"skins_root"`
+	Engine               engine.Config         `json:"engine"`
+	DocsEnabled          bool                  `json:"docs_enabled"`
+	Auth                 account.Config        `json:"auth"`
+	Streaming            StreamingEndpoint     `json:"streaming"`
+	Listen               string                `json:"listen"`
+	Clients              []Client              `json:"clients"`
+	Chat                 Endpoint              `json:"chat"`
+	Translation          TranslationEndpoint   `json:"translation"`
+	TranslationFallbacks []TranslationEndpoint `json:"translation_fallbacks,omitempty"`
+	Transcription        Endpoint              `json:"transcription"`
+	Cloud                Endpoint              `json:"cloud"`
+	MaxConcurrent        int                   `json:"max_concurrent"`
+	TimeoutSeconds       int                   `json:"timeout_seconds"`
+	AllowedOrigins       []string              `json:"allowed_origins"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -139,43 +140,18 @@ func (c *Config) Validate() error {
 		ids[v.ID] = true
 		tokens[v.token] = true
 	}
-	if c.Translation.Provider != "" && c.Translation.Provider != "deeplx" && c.Translation.Provider != "tencent" && c.Translation.Provider != "openai" && c.Translation.Provider != "niutrans" {
-		return errors.New("translation provider must be deeplx, tencent, openai or niutrans")
+	if err := validateTranslationEndpoint(&c.Translation, false); err != nil {
+		return err
 	}
-	if c.Translation.Provider == "tencent" {
-		e := &c.Translation
-		if e.URL == "" {
-			e.URL = "https://tmt.tencentcloudapi.com/"
+	seenFallbackProviders := map[string]bool{}
+	for i := range c.TranslationFallbacks {
+		e := &c.TranslationFallbacks[i]
+		if e.Provider == "" || seenFallbackProviders[e.Provider] || e.Provider == c.Translation.Provider {
+			return errors.New("translation fallback providers must be non-empty and unique")
 		}
-		u, err := url.Parse(e.URL)
-		if err != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery {
-			return errors.New("Tencent translation URL must have a root path and no query")
-		}
-		e.secretID = os.Getenv(e.SecretIDEnv)
-		if e.secretID == "" || strings.ContainsAny(e.secretID, " /,\r\n\t") || e.TokenEnv == "" {
-			return errors.New("Tencent translation requires secret_id_env and token_env")
-		}
-		if e.Region == "" {
-			e.Region = "ap-guangzhou"
-		}
-		for _, ch := range e.Region {
-			if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
-				return errors.New("invalid Tencent region")
-			}
-		}
-	}
-	if c.Translation.Provider == "niutrans" {
-		e := &c.Translation
-		if e.URL == "" {
-			e.URL = "https://api.niutrans.com/v2/text/translate"
-		}
-		u, err := url.Parse(e.URL)
-		if err != nil || u.Path != "/v2/text/translate" || u.RawQuery != "" || u.ForceQuery {
-			return errors.New("NiuTrans translation URL must use /v2/text/translate without a query")
-		}
-		e.appID, e.apiKey = os.Getenv(e.AppIDEnv), os.Getenv(e.APIKeyEnv)
-		if e.AppIDEnv == "" || e.APIKeyEnv == "" || !validProviderCredential(e.appID) || !validProviderCredential(e.apiKey) {
-			return errors.New("NiuTrans translation requires app_id_env and apikey_env")
+		seenFallbackProviders[e.Provider] = true
+		if err := validateTranslationEndpoint(e, true); err != nil {
+			return fmt.Errorf("translation fallback %d: %w", i, err)
 		}
 	}
 	for name, e := range map[string]*Endpoint{"images": &c.Images, "chat": &c.Chat, "translation": &c.Translation.Endpoint, "transcription": &c.Transcription, "cloud": &c.Cloud} {
@@ -226,6 +202,64 @@ func (c *Config) Validate() error {
 		if e != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 			return errors.New("allowed_origins must contain HTTPS origins")
 		}
+	}
+	return nil
+}
+
+func validateTranslationEndpoint(e *TranslationEndpoint, requireProvider bool) error {
+	if e.Provider != "" && e.Provider != "deeplx" && e.Provider != "tencent" && e.Provider != "openai" && e.Provider != "niutrans" {
+		return errors.New("translation provider must be deeplx, tencent, openai or niutrans")
+	}
+	if requireProvider && e.Provider == "" {
+		return errors.New("translation fallback provider is required")
+	}
+	if e.Provider == "tencent" {
+		if e.URL == "" {
+			e.URL = "https://tmt.tencentcloudapi.com/"
+		}
+		u, err := url.Parse(e.URL)
+		if err != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery {
+			return errors.New("Tencent translation URL must have a root path and no query")
+		}
+		e.secretID = os.Getenv(e.SecretIDEnv)
+		if e.secretID == "" || strings.ContainsAny(e.secretID, " /,\r\n\t") || e.TokenEnv == "" {
+			return errors.New("Tencent translation requires secret_id_env and token_env")
+		}
+		if e.Region == "" {
+			e.Region = "ap-guangzhou"
+		}
+		for _, ch := range e.Region {
+			if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
+				return errors.New("invalid Tencent region")
+			}
+		}
+	}
+	if e.Provider == "niutrans" {
+		if e.URL == "" {
+			e.URL = "https://api.niutrans.com/v2/text/translate"
+		}
+		u, err := url.Parse(e.URL)
+		if err != nil || u.Path != "/v2/text/translate" || u.RawQuery != "" || u.ForceQuery {
+			return errors.New("NiuTrans translation URL must use /v2/text/translate without a query")
+		}
+		e.appID, e.apiKey = os.Getenv(e.AppIDEnv), os.Getenv(e.APIKeyEnv)
+		if e.AppIDEnv == "" || e.APIKeyEnv == "" || !validProviderCredential(e.appID) || !validProviderCredential(e.apiKey) {
+			return errors.New("NiuTrans translation requires app_id_env and apikey_env")
+		}
+	}
+	if e.URL == "" {
+		return nil
+	}
+	u, err := url.Parse(e.URL)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return errors.New("translation URL must be an absolute HTTPS URL without credentials or fragment")
+	}
+	e.token = os.Getenv(e.TokenEnv)
+	if e.TokenEnv != "" && (e.token == "" || strings.ContainsAny(e.token, "\r\n")) {
+		return errors.New("translation token environment variable missing or invalid")
+	}
+	if (e.Provider == "openai" || e.Provider == "deeplx") && e.Model == "" && e.Provider == "openai" {
+		return errors.New("translation model required")
 	}
 	return nil
 }
