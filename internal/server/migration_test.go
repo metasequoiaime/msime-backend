@@ -76,18 +76,18 @@ func TestStartupMigratesAnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an empty database did not migrate itself at startup: %v", err)
 	}
-	// 用户表、社区表、管理后台表和译文缓存都归同一次迁移管,少一张都说明自动迁移漏了一段 schema。
+	// 用户表、社区表、管理后台表、译文缓存和候选框皮肤包都归同一次迁移管,少一张都说明自动迁移漏了一段 schema。
 	var tables int
 	if err = admin.QueryRow(context.Background(), `SELECT count(*) FROM information_schema.tables
  WHERE table_schema=$1 AND table_name IN
- ('auth_users','user_preferences','user_dictionary_entries','community_skins','admin_members','translation_cache')`,
+ ('auth_users','user_preferences','user_dictionary_entries','community_skins','admin_members','translation_cache','candidate_skins','candidate_skin_resources')`,
 		schema).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
 	s.CloseAccounts()
 	s.Close()
-	if tables != 6 {
-		t.Fatalf("startup migration created %d of 6 expected tables", tables)
+	if tables != 8 {
+		t.Fatalf("startup migration created %d of 8 expected tables", tables)
 	}
 
 	// 再起一次。迁移必须可重复执行 —— 多副本滚动升级时每个副本都会走这条路。
@@ -130,4 +130,37 @@ func TestStartupMigratesAdminTablesAddedLater(t *testing.T) {
 	}
 	s.CloseAccounts()
 	s.Close()
+}
+
+// A database migrated before candidate skin packages existed passes the old readiness check; the new tables must still be created at startup.
+func TestStartupMigratesCandidateSkinTablesAddedLater(t *testing.T) {
+	admin, schema := disposableSchema(t)
+	ctx := context.Background()
+	db, err := account.Open(ctx, os.Getenv("MSIME_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	quoted := pgx.Identifier{schema}.Sanitize()
+	if _, err = admin.Exec(ctx, "DROP TABLE "+quoted+".candidate_skin_resources, "+quoted+".candidate_skins"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
+	t.Setenv("TEST_CLIENT_TOKEN", testToken)
+	s, err := New(Config{
+		Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
+		Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
+	})
+	if err != nil {
+		t.Fatalf("missing candidate skin tables were not migrated at startup: %v", err)
+	}
+	defer s.Close()
+	defer s.CloseAccounts()
+	var tables int
+	if err = admin.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema=$1 AND table_name IN ('candidate_skins','candidate_skin_resources')`, schema).Scan(&tables); err != nil || tables != 2 {
+		t.Fatal(tables, err)
+	}
 }
