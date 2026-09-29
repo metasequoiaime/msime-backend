@@ -28,3 +28,17 @@ func TestDeepLTranslation(t *testing.T) {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestDeepLRejectsProviderErrorsAndMalformedResults(t *testing.T) {
+	for _, response := range []string{`{"message":"private details"}`, `{"translations":[]}`, `{"translations":[{}]}`, `invalid`} {
+		t.Run(response, func(t *testing.T) {
+			s := fixture(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, response) })
+			s.config.Translation = TranslationEndpoint{Provider: "deepl", Endpoint: Endpoint{URL: s.config.Chat.URL + "/v2/translate", TokenEnv: "TEST_DEEPL_KEY"}}
+			s.config.Translation.token = "synthetic-deepl-key:fx"
+			w := call(s, "POST", "/v1/translate", `{"text":"测试","source_lang":"zh","target_lang":"en"}`)
+			if w.Code != http.StatusBadGateway || strings.Contains(w.Body.String(), "private details") {
+				t.Fatalf("status %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
