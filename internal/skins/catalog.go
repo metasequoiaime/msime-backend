@@ -32,13 +32,15 @@ func SafeID(id string) bool  { return idPattern.MatchString(id) }
 func Builtin(id string) bool { return slices.Contains(builtinIDs, id) }
 
 type Colors struct {
-	Accent          string `toml:"accent" json:"accent,omitempty"`
-	Selected        string `toml:"selected" json:"selected,omitempty"`
-	Hover           string `toml:"hover" json:"hover,omitempty"`
-	Surface         string `toml:"surface" json:"surface,omitempty"`
-	Border          string `toml:"border" json:"border,omitempty"`
-	Text            string `toml:"text" json:"text,omitempty"`
-	Number          string `toml:"number" json:"number,omitempty"`
+	Accent   string `toml:"accent" json:"accent,omitempty"`
+	Selected string `toml:"selected" json:"selected,omitempty"`
+	Hover    string `toml:"hover" json:"hover,omitempty"`
+	Surface  string `toml:"surface" json:"surface,omitempty"`
+	Border   string `toml:"border" json:"border,omitempty"`
+	Text     string `toml:"text" json:"text,omitempty"`
+	Number   string `toml:"number" json:"number,omitempty"`
+	// Translation and the other fields tagged toml:"-" below exist only in the client dialect; the Windows parser leaves them empty so builtin and skins_root responses keep their shape.
+	Translation     string `toml:"-" json:"translation,omitempty"`
 	ShowSelectedBar *bool  `toml:"show_selected_bar" json:"show_selected_bar,omitempty"`
 }
 type Package struct {
@@ -56,18 +58,25 @@ type Package struct {
 		Themes  []string `toml:"themes" json:"themes"`
 	} `toml:"supports" json:"supports"`
 	CandidateWindow struct {
-		MinWidth   float64 `toml:"min_width_dip" json:"min_width_dip"`
-		Decoration *struct {
-			Top   float64 `toml:"top_inset_dip" json:"top_inset_dip"`
-			Width float64 `toml:"width_dip" json:"width_dip"`
-		} `toml:"decoration" json:"decoration"`
+		MinWidth     float64     `toml:"min_width_dip" json:"min_width_dip"`
+		CornerRadius *float64    `toml:"-" json:"corner_radius_dip,omitempty"`
+		Decoration   *Decoration `toml:"decoration" json:"decoration"`
+		Background   *Background `toml:"-" json:"background,omitempty"`
 	} `toml:"candidate_window" json:"candidate_window"`
 	Candidate struct {
 		Dark  Colors `toml:"dark" json:"dark"`
 		Light Colors `toml:"light" json:"light"`
 	} `toml:"candidate" json:"candidate"`
-	Builtin   bool       `toml:"-" json:"builtin"`
-	Resources []Resource `toml:"-" json:"resources,omitempty"`
+	Toolbar   *Toolbar     `toml:"-" json:"toolbar,omitempty"`
+	License   *SkinLicense `toml:"-" json:"license,omitempty"`
+	Builtin   bool         `toml:"-" json:"builtin"`
+	Resources []Resource   `toml:"-" json:"resources,omitempty"`
+}
+type Decoration struct {
+	Top   float64 `toml:"top_inset_dip" json:"top_inset_dip"`
+	Width float64 `toml:"width_dip" json:"width_dip"`
+	Image string  `toml:"-" json:"image,omitempty"`
+	Align string  `toml:"-" json:"align,omitempty"`
 }
 type Resource struct {
 	Path      string `json:"path"`
@@ -269,27 +278,38 @@ func Load(root, id string) (Package, error) {
 	}
 	return p, nil
 }
-func Catalog(root, layout, theme string) ([]Package, int, error) {
-	ids := slices.Clone(builtinIDs)
-	if root != "" {
-		dir, err := os.OpenRoot(root)
-		if err != nil {
-			return nil, 0, err
-		}
-		entries, err := fs.ReadDir(dir.FS(), ".")
-		dir.Close()
-		if err != nil {
-			return nil, 0, err
-		}
-		if len(entries) > 256 {
-			return nil, 0, ErrInvalid
-		}
-		for _, d := range entries {
-			if d.IsDir() && SafeID(d.Name()) && !Builtin(d.Name()) {
-				ids = append(ids, d.Name())
-			}
+
+// rootIDs lists the package directories under skins_root that the catalog considers.
+func rootIDs(root string) ([]string, error) {
+	if root == "" {
+		return nil, nil
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := fs.ReadDir(dir.FS(), ".")
+	dir.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) > 256 {
+		return nil, ErrInvalid
+	}
+	ids := []string{}
+	for _, d := range entries {
+		if d.IsDir() && SafeID(d.Name()) && !Builtin(d.Name()) {
+			ids = append(ids, d.Name())
 		}
 	}
+	return ids, nil
+}
+func Catalog(root, layout, theme string) ([]Package, int, error) {
+	found, err := rootIDs(root)
+	if err != nil {
+		return nil, 0, err
+	}
+	ids := append(slices.Clone(builtinIDs), found...)
 	slices.Sort(ids)
 	packages := []Package{}
 	invalid := 0
