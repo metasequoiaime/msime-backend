@@ -38,6 +38,18 @@ curl -G -H "Authorization: Bearer $MSIME_CLIENT_TOKEN" \
 | POST `/v1/chat/completions` | `messages`、可选 `model`、`max_tokens`、`temperature` | Chat Completions JSON；支持联想和语音润色 |
 | POST `/v1/translate` | `text`、`source_lang`、`target_lang` | DeepLX 兼容 `{"code":200,"data":"..."}` |
 | POST `/v1/audio/transcriptions` | multipart `file`（WAV）、可选 `model`、`language`、`response_format=json` | `{"text":"..."}` |
+| POST `/v1/niutrans/documents` | multipart `file`、`from`、`to`，可选领域/术语/记忆参数 | 小牛文档翻译任务 |
+| GET `/v1/niutrans/documents/{file_no}` | 小牛文档任务编号 | 查询翻译状态 |
+| PUT `/v1/niutrans/documents/{file_no}/interrupt` | 小牛文档任务编号 | 终止翻译任务 |
+| DELETE `/v1/niutrans/documents/{file_no}` | 小牛文档任务编号 | 删除任务 |
+| GET `/v1/niutrans/documents/{file_no}/download` | `type=0..5` | 下载文档结果 |
+| POST `/v1/niutrans/images` | multipart `file`、`from`、`to` | 小牛图片翻译任务 |
+| GET `/v1/niutrans/images/{file_no}` | 小牛图片任务编号 | 查询图片翻译状态 |
+| GET `/v1/niutrans/images/{file_no}/download` | `type=0..5` | 下载图片结果 |
+| POST `/v1/niutrans/voice` | multipart `file`、`from`、`to` | 小牛语音翻译任务 |
+| GET `/v1/niutrans/voice/{file_no}` | 小牛语音任务编号 | 查询语音翻译状态 |
+| GET `/v1/niutrans/voice/{file_no}/download` | `type=0..5` | 下载语音结果 |
+| GET `/v1/niutrans/resources` | `action` | 调用已配置的小牛资源管理动作 |
 
 语音模型由服务端固定。聊天默认保持固定模型；管理员可在 `chat.models` 配置最多 32 个可选模型 ID，`GET /v1/models` 返回默认模型和允许列表，聊天请求只能选择其中的模型。EveryAPI 凭据仅保存在服务端；聊天未指定输出长度时最多生成 2048 token，避免长语音润色被候选场景的小预算截断；现有 AI 候选客户端明确请求 512 token，请求上限为 2048。聊天仅接受非流式文本消息（system/user/assistant），不支持工具调用。支持现有 Linux/Windows 请求中的 `response_format.type=json_object` 或 `text`；客户端的 `thinking.type=disabled` 和 `enable_thinking=false` 只作兼容接收，不透传服务商专有字段。JSON 请求上限 64 KiB；语音文件上限 15 MiB，multipart 总体上限 16 MiB；上游响应上限 1 MiB。客户端必须保留取消和输入代次校验，失败时继续本地输入。
 
@@ -118,6 +130,8 @@ WAV 上传现在校验 RIFF 文件长度、分块边界、fmt/data 必需块和�
 ```
 
 服务默认调用 `https://api.niutrans.com/v2/text/translate`，也可在 `url` 中指定同样的 HTTPS 接口。App ID 和 API Key 只通过服务进程环境注入；服务端按 NiuTrans v2 协议生成 `authStr`，不会把供应商凭据转发给客户端。小牛翻译接口是单条请求，批量 `texts` 仍只支持腾讯 TMT。
+
+文档、图片和语音接口使用同样的 NiuTrans v2 异步文件协议。服务端负责签名、上传和状态查询，客户端只看到 MSIME 设备令牌。对应 API 应用分别由 `MSIME_NIUTRANS_DOC_APP_ID`、`MSIME_NIUTRANS_IMAGE_APP_ID`、`MSIME_NIUTRANS_VOICE_APP_ID` 注入，并共用 `MSIME_NIUTRANS_APIKEY`。资源管理路由使用 `MSIME_NIUTRANS_RESOURCE_APP_ID`；`action` 只允许单段路径，服务端不会接受任意上游 URL。未配置某项 API 时，该项返回 503，不影响其他功能启动。
 
 ### 共享译文缓存
 

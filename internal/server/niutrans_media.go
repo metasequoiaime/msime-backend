@@ -1,0 +1,297 @@
+package server
+
+// NiuTrans' document, image and voice APIs use the same signed, asynchronous
+// file protocol. This adapter keeps that protocol behind the MSIME device
+// token so clients never receive an API key or an upstream URL.
+
+import (
+	"bytes"
+	"crypto/md5" // #nosec G501 -- required by the NiuTrans protocol.
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	niuTransFileBytes     = 64 << 20
+	niuTransResponseBytes = 1 << 20
+)
+
+func niuTransAuth(params map[string]string, apiKey string) string {
+	keys := make([]string, 0, len(params)+1)
+	for key, value := range params {
+		if key != "authStr" && key != "apikey" && value != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys)+1)
+	parts = append(parts, "apikey="+apiKey)
+	for _, key := range keys {
+		parts = append(parts, key+"="+params[key])
+	}
+	sum := md5.Sum([]byte(strings.Join(parts, "&"))) // #nosec G401 -- required by provider.
+	return hex.EncodeToString(sum[:])
+}
+
+func niuTransEndpointReady(e NiuTransEndpoint) bool {
+	return e.URL != "" && e.appID != "" && e.apiKey != ""
+}
+
+func (s *Server) niuTransEndpoint(w http.ResponseWriter, e NiuTransEndpoint) bool {
+	if !niuTransEndpointReady(e) {
+		fail(w, http.StatusServiceUnavailable, "niutrans_api_not_configured")
+		return false
+	}
+	return true
+}
+
+func niuTransJSON(w http.ResponseWriter, r *http.Request, body []byte) {
+	if !json.Valid(body) {
+		upstreamError(w, r, errors.New("invalid upstream JSON"))
+		return
+	}
+	respond(w, http.StatusOK, json.RawMessage(body))
+}
+
+func (s *Server) niuTransUpload(w http.ResponseWriter, r *http.Request, e NiuTransEndpoint, kind string) {
+	if !s.niuTransEndpoint(w, e) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, niuTransFileBytes+1<<20)
+	reader, err := r.MultipartReader()
+	if err != nil {
+		fail(w, http.StatusUnsupportedMediaType, "multipart_required")
+		return
+	}
+	var file []byte
+	filename := "upload.bin"
+	fields := map[string]string{}
+	seen := map[string]bool{}
+	for {
+		part, nextErr := reader.NextPart()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			fail(w, http.StatusBadRequest, "invalid_multipart")
+			return
+		}
+		name := part.FormName()
+		if name == "" || seen[name] {
+			fail(w, http.StatusBadRequest, "duplicate_field")
+			return
+		}
+		seen[name] = true
+		if name == "file" {
+			if part.FileName() != "" {
+				filename = part.FileName()
+			}
+			file, err = io.ReadAll(io.LimitReader(part, niuTransFileBytes+1))
+			if err != nil || len(file) == 0 || len(file) > niuTransFileBytes {
+				fail(w, http.StatusRequestEntityTooLarge, "file_too_large_or_empty")
+				return
+			}
+		} else {
+			value, readErr := io.ReadAll(io.LimitReader(part, 257))
+			if readErr != nil || len(value) == 0 || len(value) > 256 || strings.ContainsAny(string(value), "\r\n") {
+				fail(w, http.StatusBadRequest, "invalid_field")
+				return
+			}
+			fields[name] = string(value)
+		}
+		_ = part.Close()
+	}
+	if len(file) == 0 || fields["from"] == "" || fields["to"] == "" {
+		fail(w, http.StatusBadRequest, "file_from_to_required")
+		return
+	}
+	params := map[string]string{
+		"from": fields["from"], "to": fields["to"], "appId": e.appID,
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+	for _, key := range []string{"realmCode", "termId", "memoryId", "processingMode", "translationEngine"} {
+		if fields[key] != "" {
+			params[key] = fields[key]
+		}
+	}
+	params["authStr"] = niuTransAuth(params, e.apiKey)
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		upstreamError(w, r, err)
+		return
+	}
+	_, _ = part.Write(file)
+	for key, value := range params {
+		if key != "authStr" && value != "" {
+			_ = mw.WriteField(key, value)
+		}
+	}
+	_ = mw.WriteField("authStr", params["authStr"])
+	_ = mw.Close()
+	b, err := s.niuTransRequest(r, e.URL, http.MethodPost, mw.FormDataContentType(), &body)
+	if err != nil {
+		upstreamError(w, r, err)
+		return
+	}
+	niuTransJSON(w, r, b)
+	_ = kind // retained for route-specific documentation and future limits.
+}
+
+func (s *Server) niuTransDocumentUpload(w http.ResponseWriter, r *http.Request) {
+	s.niuTransUpload(w, r, s.config.NiuTrans.Document, "document")
+}
+func (s *Server) niuTransImageUpload(w http.ResponseWriter, r *http.Request) {
+	s.niuTransUpload(w, r, s.config.NiuTrans.Image, "image")
+}
+func (s *Server) niuTransVoiceUpload(w http.ResponseWriter, r *http.Request) {
+	s.niuTransUpload(w, r, s.config.NiuTrans.Voice, "voice")
+}
+
+func (s *Server) niuTransFileRequest(w http.ResponseWriter, r *http.Request, e NiuTransEndpoint, operation, fileNo string) {
+	if !s.niuTransEndpoint(w, e) {
+		return
+	}
+	if fileNo == "" || len(fileNo) > 256 || strings.ContainsAny(fileNo, "/\\\r\n") {
+		fail(w, http.StatusBadRequest, "invalid_file_no")
+		return
+	}
+	params := map[string]string{"appId": e.appID, "timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10)}
+	if operation == "download" {
+		typ := r.URL.Query().Get("type")
+		if typ == "" {
+			typ = "1"
+		}
+		if typ != "0" && typ != "1" && typ != "2" && typ != "3" && typ != "4" && typ != "5" {
+			fail(w, http.StatusBadRequest, "invalid_download_type")
+			return
+		}
+		params["type"] = typ
+	}
+	params["authStr"] = niuTransAuth(params, e.apiKey)
+	base, err := url.Parse(e.URL)
+	if err != nil {
+		upstreamError(w, r, err)
+		return
+	}
+	base.Path = strings.TrimSuffix(base.Path, "/upload") + "/" + operation + "/" + url.PathEscape(fileNo)
+	query := base.Query()
+	for key, value := range params {
+		query.Set(key, value)
+	}
+	base.RawQuery = query.Encode()
+	b, contentType, err := s.niuTransRequestWithType(r, base.String(), r.Method, "", nil)
+	if err != nil {
+		upstreamError(w, r, err)
+		return
+	}
+	if operation == "download" {
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+		return
+	}
+	niuTransJSON(w, r, b)
+}
+
+func (s *Server) niuTransDocumentStatus(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "status", r.PathValue("file_no"))
+}
+func (s *Server) niuTransDocumentInterrupt(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "interrupt", r.PathValue("file_no"))
+}
+func (s *Server) niuTransDocumentDelete(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "delete", r.PathValue("file_no"))
+}
+func (s *Server) niuTransDocumentDownload(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "download", r.PathValue("file_no"))
+}
+
+func (s *Server) niuTransImageStatus(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "status", r.PathValue("file_no"))
+}
+func (s *Server) niuTransImageInterrupt(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "interrupt", r.PathValue("file_no"))
+}
+func (s *Server) niuTransImageDownload(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "download", r.PathValue("file_no"))
+}
+func (s *Server) niuTransVoiceStatus(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "status", r.PathValue("file_no"))
+}
+func (s *Server) niuTransVoiceInterrupt(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "interrupt", r.PathValue("file_no"))
+}
+func (s *Server) niuTransVoiceDownload(w http.ResponseWriter, r *http.Request) {
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "download", r.PathValue("file_no"))
+}
+
+func (s *Server) niuTransResources(w http.ResponseWriter, r *http.Request) {
+	if !s.niuTransEndpoint(w, s.config.NiuTrans.Resource) {
+		return
+	}
+	// Resource management is an account-level API. Keep the upstream response
+	// opaque while forwarding the signed request; clients select the documented
+	// resource action with `action` and may provide only scalar parameters.
+	action := r.URL.Query().Get("action")
+	if action == "" || len(action) > 64 || strings.ContainsAny(action, "/\\\r\n") {
+		fail(w, http.StatusBadRequest, "resource_action_required")
+		return
+	}
+	params := map[string]string{"appId": s.config.NiuTrans.Resource.appID, "timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10), "action": action}
+	params["authStr"] = niuTransAuth(params, s.config.NiuTrans.Resource.apiKey)
+	u, _ := url.Parse(s.config.NiuTrans.Resource.URL)
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/" + action
+	q := u.Query()
+	for key, value := range params {
+		q.Set(key, value)
+	}
+	u.RawQuery = q.Encode()
+	b, err := s.niuTransRequest(r, u.String(), r.Method, "", nil)
+	if err != nil {
+		upstreamError(w, r, err)
+		return
+	}
+	niuTransJSON(w, r, b)
+}
+
+func (s *Server) niuTransRequest(r *http.Request, target, method, contentType string, body io.Reader) ([]byte, error) {
+	b, _, err := s.niuTransRequestWithType(r, target, method, contentType, body)
+	return b, err
+}
+
+func (s *Server) niuTransRequestWithType(r *http.Request, target, method, contentType string, body io.Reader) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(r.Context(), method, target, body)
+	if err != nil {
+		return nil, "", err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, niuTransResponseBytes+1))
+	if err != nil || len(data) > niuTransResponseBytes {
+		return nil, "", errors.New("upstream response too large")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", io.ErrUnexpectedEOF
+	}
+	return data, resp.Header.Get("Content-Type"), nil
+}
