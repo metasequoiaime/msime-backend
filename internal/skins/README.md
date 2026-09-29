@@ -44,7 +44,7 @@ width_dip = 0
 两种方言分开校验，互不影响：
 
 - 内置皮肤和 `skins_root` 仍按 Windows 方言（上文，`base` 为 `fluent` 等四个内置 ID）校验，规则和响应都不变。
-- 数据库皮肤包按跨平台客户端的加载规则校验（`crates/client-core/src/skin/catalog.rs` 的 `load()`，移植在 `client.go`），每次读取都重新校验：`base` 必须是 `system`、`shuishan`、`light`、`paper`、`night`、`ink` 之一（客户端已废弃 `fluent`）；ID 不能是全局主题 ID（再加上 `custom`）或四个内置 ID；支持 `corner_radius_dip`、`decoration.image` / `align`、`[candidate_window.background]`、`candidate.*.translation`、`[toolbar]` 与 `[license]`；允许的资源类型与客户端一致（CSS、png/jpeg/gif/webp/svg/ico/bmp/avif、woff/woff2/ttf/otf）。`testdata/client_dialect.json` 同时约束 Go 校验和种子脚本，改规则时两边一起改。
+- 数据库皮肤包按跨平台客户端的加载规则校验（`crates/client-core/src/skin/catalog.rs` 的 `load()`，移植在 `client.go`），每次读取都重新校验：`base` 必须是 `system`、`shuishan`、`light`、`paper`、`night`、`ink` 之一；清单里的 `fluent` 作为 `system` 的别名接受（msime-windows 只认四个内置 ID，msime-skins 因此保留 `base = "fluent"`），响应中 `base` 返回 `system`，其余 Windows 内置 ID（`wechat`、`graphite`、`willow_green`）与 `custom` 仍然拒绝；ID 不能是全局主题 ID（再加上 `custom`）或四个内置 ID；支持 `corner_radius_dip`、`decoration.image` / `align`、`[candidate_window.background]`、`candidate.*.translation`、`[toolbar]` 与 `[license]`；允许的资源类型与客户端一致（CSS、png/jpeg/gif/webp/svg/ico/bmp/avif、woff/woff2/ttf/otf）。`testdata/client_dialect.json` 同时约束 Go 校验和种子脚本，改规则时两边一起改。
 
 响应结构与现有包相同，新增字段只出现在数据库皮肤包里：`candidate_window.corner_radius_dip`、`candidate_window.decoration.image` / `align`（默认 `right`，数据库包总会给出 `decoration`，无装饰时为 0/0）、`candidate_window.background`（补齐默认 `fit = cover`、`opacity = 1`）、`candidate.{dark,light}.translation`、`toolbar`、`license`。颜色按清单原样返回，由客户端规范化。资源列表首项是 `skin.toml`，其余按路径排序。
 

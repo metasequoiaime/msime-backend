@@ -61,6 +61,9 @@ var reservedThemeIDs = []string{"system", "shuishan", "light", "paper", "night",
 // baseThemeIDs are the global themes a package may be drawn over: every reserved id except custom.
 var baseThemeIDs = []string{"system", "shuishan", "light", "paper", "night", "ink"}
 
+// windowsBaseAlias is the one Windows base the client accepts in a manifest, as another name for system, so msime-skins packages can keep the base msime-windows requires. The package is served with base system; the other Windows bases (wechat, graphite, willow_green) stay refused.
+const windowsBaseAlias = "fluent"
+
 func invalid(reason string) error { return fmt.Errorf("%w: %s", ErrInvalid, reason) }
 
 // clientMediaType is the client's resource_content_type: the text after the last dot, lowercased.
@@ -230,6 +233,9 @@ func ParseStored(s Stored) (Package, error) {
 	}
 	if p.Description, _, err = optionalString(table, "description", 500); err != nil {
 		return p, err
+	}
+	if p.Base == windowsBaseAlias {
+		p.Base = "system"
 	}
 	if !slices.Contains(baseThemeIDs, p.Base) {
 		return p, invalid("base must be system or a built-in theme")

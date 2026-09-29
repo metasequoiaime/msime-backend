@@ -9567,7 +9567,7 @@
                               "night",
                               "ink"
                             ],
-                            "description": "内置与 skins_root 皮肤包沿用 Windows 方言，base 为四个内置 ID 之一；数据库皮肤包沿用客户端方言，base 为 system 或内置全局主题。"
+                            "description": "内置与 skins_root 皮肤包沿用 Windows 方言，base 为四个内置 ID 之一；数据库皮肤包沿用客户端方言，base 为 system 或内置全局主题；清单中的 fluent 是 system 的别名，返回 system。"
                           },
                           "builtin": {
                             "type": "boolean"
@@ -9922,7 +9922,7 @@
                         "night",
                         "ink"
                       ],
-                      "description": "内置与 skins_root 皮肤包沿用 Windows 方言，base 为四个内置 ID 之一；数据库皮肤包沿用客户端方言，base 为 system 或内置全局主题。"
+                      "description": "内置与 skins_root 皮肤包沿用 Windows 方言，base 为四个内置 ID 之一；数据库皮肤包沿用客户端方言，base 为 system 或内置全局主题；清单中的 fluent 是 system 的别名，返回 system。"
                     },
                     "builtin": {
                       "type": "boolean"

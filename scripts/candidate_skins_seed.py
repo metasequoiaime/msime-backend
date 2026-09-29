@@ -23,6 +23,8 @@ MAX_ENTRIES = 512
 RESERVED = {"system", "shuishan", "light", "paper", "night", "ink", "custom"}
 BUILTIN = {"fluent", "wechat", "graphite", "willow_green"}
 BASES = {"system", "shuishan", "light", "paper", "night", "ink"}
+# The one Windows base the client accepts in a manifest, as another name for system; the service serves such a package with base system.
+BASE_ALIASES = {"fluent": "system"}
 MEDIA = {"css": "text/css; charset=utf-8", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml", "ico": "image/x-icon", "bmp": "image/bmp", "avif": "image/avif", "woff": "font/woff", "woff2": "font/woff2", "ttf": "font/ttf", "otf": "font/otf"}
 BASE_HINT = "base must be system or a built-in theme"
 
@@ -138,6 +140,8 @@ def validate(folder, manifest, files):
     base = required_string(table, "base", 32)
     optional_string(table, "author", 120)
     optional_string(table, "description", 500)
+    base = BASE_ALIASES.get(base, base)
+    table["base"] = base
     if base not in BASES:
         raise Invalid(BASE_HINT)
     supports = table.get("supports")
@@ -357,7 +361,7 @@ def build(checkout, only=None):
         except Invalid as error:
             reason = str(error)
             if reason == BASE_HINT:
-                reason += " (use system, shuishan, light, paper, night or ink; the client retired fluent)"
+                reason += " (use system, shuishan, light, paper, night or ink, or fluent as an alias of system)"
             errors.append(f"{sid}: {reason}")
             continue
         if unverified(table):

@@ -1,5 +1,5 @@
 {
- "_comment": "Client-dialect manifest cases shared by internal/skins/client_test.go and scripts/test_candidate_skins_seed.py. Ported from crates/client-core/src/skin/catalog/tests.rs in the client repository; reason strings are the client's. Templates substitute {id} with the case id (sample or bigfish by default); replace edits the first occurrence; pad_to appends a comment until the manifest is that many bytes; files are the package files beside skin.toml.",
+ "_comment": "Client-dialect manifest cases shared by internal/skins/client_test.go and scripts/test_candidate_skins_seed.py. Ported from crates/client-core/src/skin/catalog/tests.rs in the client repository; reason strings are the client's. Templates substitute {id} with the case id (sample or bigfish by default); replace edits the first occurrence; pad_to appends a comment until the manifest is that many bytes; files are the package files beside skin.toml. base, when set on an accepted case, is the resolved base the package is served with (fluent in a manifest resolves to system).",
  "templates": {
   "sample": {
    "id": "sample",
@@ -19,7 +19,8 @@
   {
    "name": "sample loads",
    "reason": null,
-   "template": "sample"
+   "template": "sample",
+   "base": "night"
   },
   {
    "name": "dimensions default to zero",
@@ -64,6 +65,18 @@
    "name": "styled package loads every drawn key",
    "reason": null,
    "template": "styled"
+  },
+  {
+   "name": "styled package with the Windows base fluent",
+   "reason": null,
+   "template": "styled",
+   "replace": [
+    [
+     "base = 'system'",
+     "base = 'fluent'"
+    ]
+   ],
+   "base": "system"
   },
   {
    "name": "both palettes carry every colour",
@@ -278,7 +291,8 @@
      "base = 'night'",
      "base = 'system'"
     ]
-   ]
+   ],
+   "base": "system"
   },
   {
    "name": "base shuishan",
@@ -289,7 +303,8 @@
      "base = 'night'",
      "base = 'shuishan'"
     ]
-   ]
+   ],
+   "base": "shuishan"
   },
   {
    "name": "base light",
@@ -300,7 +315,8 @@
      "base = 'night'",
      "base = 'light'"
     ]
-   ]
+   ],
+   "base": "light"
   },
   {
    "name": "base paper",
@@ -311,7 +327,8 @@
      "base = 'night'",
      "base = 'paper'"
     ]
-   ]
+   ],
+   "base": "paper"
   },
   {
    "name": "base night",
@@ -322,7 +339,8 @@
      "base = 'night'",
      "base = 'night'"
     ]
-   ]
+   ],
+   "base": "night"
   },
   {
    "name": "base ink",
@@ -333,7 +351,8 @@
      "base = 'night'",
      "base = 'ink'"
     ]
-   ]
+   ],
+   "base": "ink"
   },
   {
    "name": "system base with author and empty tables",
@@ -637,15 +656,16 @@
    ]
   },
   {
-   "name": "base fluent refused",
-   "reason": "base must be system or a built-in theme",
+   "name": "base fluent is a manifest alias of system",
+   "reason": null,
    "template": "sample",
    "replace": [
     [
      "base = 'night'",
      "base = 'fluent'"
     ]
-   ]
+   ],
+   "base": "system"
   },
   {
    "name": "base wechat refused",
@@ -655,6 +675,39 @@
     [
      "base = 'night'",
      "base = 'wechat'"
+    ]
+   ]
+  },
+  {
+   "name": "base Fluent refused",
+   "reason": "base must be system or a built-in theme",
+   "template": "sample",
+   "replace": [
+    [
+     "base = 'night'",
+     "base = 'Fluent'"
+    ]
+   ]
+  },
+  {
+   "name": "base graphite refused",
+   "reason": "base must be system or a built-in theme",
+   "template": "sample",
+   "replace": [
+    [
+     "base = 'night'",
+     "base = 'graphite'"
+    ]
+   ]
+  },
+  {
+   "name": "base willow_green refused",
+   "reason": "base must be system or a built-in theme",
+   "template": "sample",
+   "replace": [
+    [
+     "base = 'night'",
+     "base = 'willow_green'"
     ]
    ]
   },

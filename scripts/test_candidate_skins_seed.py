@@ -40,11 +40,13 @@ class ClientDialectTests(unittest.TestCase):
             with self.subTest(case["name"]):
                 sid, manifest, files = build_case(fixture, case)
                 try:
-                    seed.validate(sid, manifest, files)
+                    table = seed.validate(sid, manifest, files)
                     reason = None
                 except seed.Invalid as error:
                     reason = str(error)
                 self.assertEqual(reason, case["reason"])
+                if reason is None and case.get("base"):
+                    self.assertEqual(table["base"], case["base"])
 
     def test_resource_limits(self):
         manifest = b"schema_version = 1\nid = 'sample'\nname = 'S'\nversion = '1'\nbase = 'ink'\n[supports]\nlayouts = ['vertical']\nthemes = ['light']\n[candidate_window]\n"
@@ -102,13 +104,17 @@ class SeedTests(unittest.TestCase):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             seed.main([str(self.root), "--role", "x; DROP TABLE y"])
 
-    def test_refuses_retired_fluent_base_without_rewriting(self):
+    def test_windows_bases_other_than_the_fluent_alias_are_refused(self):
         self.package("harbor", base="fluent")
-        self.package("quay")
+        code, sql, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        # The manifest bytes are stored as written; only the service resolves fluent to system.
+        self.assertIn("base = 'fluent'".encode().hex(), sql)
+        self.package("quay", base="wechat")
         code, sql, err = self.run_main()
         self.assertEqual((code, sql), (1, ""))
-        self.assertIn("refused harbor: base must be system or a built-in theme", err)
-        self.assertIn("fluent", (self.root / "harbor/skin.toml").read_text())
+        self.assertIn("refused quay: base must be system or a built-in theme", err)
+        self.assertIn("wechat", (self.root / "quay/skin.toml").read_text())
 
     def test_unverified_assets_are_skipped_or_refused(self):
         self.package("niya-demo", extra="[license]\nassets = 'UNVERIFIED-DEMO-ONLY'\n")

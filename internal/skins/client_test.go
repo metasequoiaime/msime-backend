@@ -23,6 +23,7 @@ type clientCase struct {
 	Append   string      `json:"append"`
 	PadTo    int         `json:"pad_to"`
 	Files    *[]string   `json:"files"`
+	Base     string      `json:"base"`
 }
 type clientFixture struct {
 	Templates map[string]struct {
@@ -89,8 +90,10 @@ func TestClientDialectMatchesTheClientLoader(t *testing.T) {
 		t.Fatal("fixture lost cases", len(f.Cases))
 	}
 	for _, c := range f.Cases {
-		_, err := ParseStored(f.build(t, c))
+		p, err := ParseStored(f.build(t, c))
 		switch {
+		case err == nil && c.Base != "" && p.Base != c.Base:
+			t.Errorf("%s: base %q, want %q", c.Name, p.Base, c.Base)
 		case c.Reason == nil && err != nil:
 			t.Errorf("%s: rejected: %v", c.Name, err)
 		case c.Reason != nil && err == nil:

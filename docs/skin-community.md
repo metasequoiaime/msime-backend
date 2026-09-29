@@ -70,4 +70,4 @@ psql -X -v ON_ERROR_STOP=1 "$MSIME_MIGRATION_DATABASE_URL" -f /tmp/candidate-ski
 
 SQL 在单个事务中切换到运行角色 `msime_backend`（`--role` 可改），加事务锁，只插入缺失的行；同一 ID 已存在且清单或资源集合（路径与 SHA-256）不一致时整个事务失败，不覆盖已发布的包。内容相同时重复执行不改变任何行。改版应发布新 ID，或由运维先显式下架、删除旧包。执行前审核 SQL 并确认目标数据库。
 
-注意：msime-skins 当前清单仍写 `base = "fluent"`，客户端已不接受，脚本会全部拒绝；需等 msime-skins 改成 `system` 等全局主题后再入库。
+msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID）。客户端把清单里的 `fluent` 当作 `system` 的别名，脚本和服务端同样接受；数据库保存原始清单字节，`/v1/skins` 返回的 `base` 为 `system`。其余 Windows 内置 ID 作为 base 仍被拒绝。

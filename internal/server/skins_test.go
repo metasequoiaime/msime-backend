@@ -78,7 +78,7 @@ func TestDatabaseSkinsHTTP(t *testing.T) {
 		return "schema_version = 1\nid = '" + id + "'\nname = 'Demo'\nversion = '1.0.0'\nbase = '" + base + "'\n[supports]\nlayouts = ['horizontal', 'vertical']\nthemes = ['dark']\n[candidate_window]\nmin_width_dip = 176\n[candidate_window.background]\nimage = 'assets/bg.png'\nopacity = 0.3\n[candidate.dark]\ntranslation = '#9FB4E0'\n"
 	}
 	tables := pgx.Identifier{schema}.Sanitize()
-	for _, row := range [][3]any{{"demo", manifest("demo", "paper"), true}, {"legacy", manifest("legacy", "fluent"), true}, {"clash", manifest("clash", "system"), true}, {"secret", manifest("secret", "ink"), false}} {
+	for _, row := range [][3]any{{"demo", manifest("demo", "paper"), true}, {"legacy", manifest("legacy", "wechat"), true}, {"windows", manifest("windows", "fluent"), true}, {"clash", manifest("clash", "system"), true}, {"secret", manifest("secret", "ink"), false}} {
 		if _, err = admin.Exec(ctx, "INSERT INTO "+tables+".candidate_skins(id,manifest,published) VALUES($1,$2,$3)", row[0], []byte(row[1].(string)), row[2]); err != nil {
 			t.Fatal(err)
 		}
@@ -102,8 +102,8 @@ func TestDatabaseSkinsHTTP(t *testing.T) {
 	for _, p := range catalog.Skins {
 		ids = append(ids, p.ID+":"+p.Base)
 	}
-	// legacy uses the retired fluent base and clash exists in skins_root too: neither is listed.
-	if strings.Join(ids, ",") != "demo:paper,fluent:fluent,graphite:graphite,wechat:wechat,willow_green:willow_green" || catalog.Invalid != 2 {
+	// legacy names a Windows base the client refuses and clash exists in skins_root too: neither is listed. windows uses fluent, the manifest alias of system.
+	if strings.Join(ids, ",") != "demo:paper,fluent:fluent,graphite:graphite,wechat:wechat,willow_green:willow_green,windows:system" || catalog.Invalid != 2 {
 		t.Fatal(ids, catalog.Invalid)
 	}
 	detail := call(s, "GET", "/v1/skins/demo", "")
