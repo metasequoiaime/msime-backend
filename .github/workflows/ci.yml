@@ -57,6 +57,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
+      - run: python3 -m unittest discover -s scripts -p 'test_candidate_skins_seed.py'
       - run: go test -race ./internal/account
       - run: go test -race ./internal/server
 

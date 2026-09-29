@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -130,5 +133,66 @@ func TestCandidateSkinCatalogIsBounded(t *testing.T) {
 	}
 	if (&Service{store: s}).SkinDatabase() == nil {
 		t.Fatal("enabled accounts must provide a skin database")
+	}
+}
+
+// The seed script's SQL, executed for real: it inserts what the service then accepts, re-runs as a no-op and refuses to overwrite a package whose content changed.
+func TestCandidateSkinSeedSQL(t *testing.T) {
+	s := candidateSkinStore(t)
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required to render the seed SQL")
+	}
+	ctx := context.Background()
+	checkout := t.TempDir()
+	pkg := filepath.Join(checkout, "harbor")
+	if err = os.MkdirAll(filepath.Join(pkg, "assets"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "schema_version = 1\nid = 'harbor'\nname = 'Harbor'\nversion = '1.0.0'\nbase = 'system'\n[supports]\nlayouts = ['horizontal']\nthemes = ['dark', 'light']\n[candidate_window]\nmin_width_dip = 176\n[candidate_window.decoration]\nimage = 'assets/deco.png'\ntop_inset_dip = 40\nwidth_dip = 60\n[candidate.dark]\naccent = \"it's fine\"\n[license]\ncode = 'MIT'\nassets = 'CC-BY-4.0'\n"
+	for name, content := range map[string]string{"skin.toml": manifest, "assets/deco.png": "png'bytes", "README.md": "not an asset"} {
+		if err = os.WriteFile(filepath.Join(pkg, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var role string
+	if err = s.pool.QueryRow(ctx, "SELECT current_user").Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	seed := func() string {
+		cmd := exec.Command(python, "../../scripts/candidate_skins_seed.py", checkout, "--role", role)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err, stderr.String())
+		}
+		return string(out)
+	}
+	sql := seed()
+	for i := 0; i < 2; i++ {
+		if _, err = s.pool.Exec(ctx, sql); err != nil {
+			t.Fatal("run", i, err)
+		}
+	}
+	stored, err := s.CandidateSkin(ctx, "harbor")
+	if err != nil || string(stored.Manifest) != manifest || len(stored.Resources) != 1 {
+		t.Fatal(stored, err)
+	}
+	p, err := skins.ParseStored(stored)
+	if err != nil || p.CandidateWindow.Decoration.Image != "assets/deco.png" || p.Candidate.Dark.Accent != "it's fine" {
+		t.Fatal(p, err)
+	}
+	if raw, err := s.CandidateSkinResource(ctx, "harbor", "assets/deco.png"); err != nil || string(raw) != "png'bytes" {
+		t.Fatal(raw, err)
+	}
+	if err = os.WriteFile(filepath.Join(pkg, "assets/deco.png"), []byte("other bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.pool.Exec(ctx, seed()); err == nil || !strings.Contains(err.Error(), "differs from the reviewed package") {
+		t.Fatal("changed package overwritten", err)
+	}
+	if raw, _ := s.CandidateSkinResource(ctx, "harbor", "assets/deco.png"); string(raw) != "png'bytes" {
+		t.Fatal("failed seed left changes", string(raw))
 	}
 }
