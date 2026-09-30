@@ -1,8 +1,11 @@
 #pragma once
+#include "contracts/dictionary/format.h"
 #include "quanpin/quanpin_query.h"
 #include "ranking.h"
 #include "schemes/quanpin_scheme.h"
 #include "schemes/shuangpin_scheme.h"
+#include <algorithm>
+#include <vector>
 
 inline nlohmann::json
 query_dictionary_catalog(const nlohmann::json &request,
@@ -161,4 +164,90 @@ inline nlohmann::json listed_pinyin_batch(const nlohmann::json &request,
     listed.push_back(step == SQLITE_ROW);
   }
   return {{"listed", listed}};
+}
+
+// Which (word, display) pairs the shipped English dictionary already holds. Read-only, like listed_pinyin_batch; a file without english_words is not an English dictionary.
+inline nlohmann::json listed_english_batch(const nlohmann::json &request,
+                                           const std::filesystem::path &path) {
+  using namespace backend_ranking;
+  const auto &entries = request.at("entries");
+  if (!entries.is_array() || entries.empty() || entries.size() > 50)
+    return {{"error", "invalid_request"}};
+  sqlite3 *raw = nullptr;
+  if (sqlite3_open_v2(path.string().c_str(), &raw, SQLITE_OPEN_READONLY,
+                      nullptr) != SQLITE_OK) {
+    if (raw)
+      sqlite3_close(raw);
+    return {{"error", "resources_unavailable"}};
+  }
+  DB db(raw, sqlite3_close);
+  auto stmt = prepare(
+      db.get(),
+      "SELECT 1 FROM english_words WHERE word=?1 AND display=?2 LIMIT 1");
+  if (!stmt)
+    return {{"error", "resources_unavailable"}};
+  auto listed = json::array();
+  for (const auto &entry : entries) {
+    const auto word = entry.at("word").get<std::string>();
+    const auto display = entry.at("display").get<std::string>();
+    if (word.empty() || display.empty())
+      return {{"error", "invalid_request"}};
+    sqlite3_reset(stmt.get());
+    bind_text(stmt.get(), 1, word);
+    bind_text(stmt.get(), 2, display);
+    const int step = sqlite3_step(stmt.get());
+    if (step != SQLITE_ROW && step != SQLITE_DONE)
+      return {{"error", "engine_failure"}};
+    listed.push_back(step == SQLITE_ROW);
+  }
+  return {{"listed", listed}};
+}
+
+// The median weight of the shipped quanpin entries for each syllable count, keyed "1" to "7"; "8" stands for the overflow tables, which hold every entry of 8 or more syllables. Table names come from the Engine dictionary format contract. The lower middle value is taken, so a median is always a weight the dictionary stores.
+inline nlohmann::json pinyin_weight_medians(const std::filesystem::path &path) {
+  using namespace backend_ranking;
+  namespace format = metasequoia::dictionary_format;
+  sqlite3 *raw = nullptr;
+  if (sqlite3_open_v2(path.string().c_str(), &raw, SQLITE_OPEN_READONLY,
+                      nullptr) != SQLITE_OK) {
+    if (raw)
+      sqlite3_close(raw);
+    return {{"error", "resources_unavailable"}};
+  }
+  DB db(raw, sqlite3_close);
+  auto exists = prepare(
+      db.get(), "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1");
+  if (!exists)
+    return {{"error", "resources_unavailable"}};
+  auto medians = json::object();
+  std::vector<sqlite3_int64> weights;
+  for (std::size_t syllables = 1;
+       syllables <= format::maximum_numbered_syllables + 1; ++syllables) {
+    weights.clear();
+    for (const char *initial = format::initials; *initial; ++initial) {
+      const auto table = format::quanpin_table(syllables, *initial);
+      sqlite3_reset(exists.get());
+      bind_text(exists.get(), 1, table);
+      if (sqlite3_step(exists.get()) != SQLITE_ROW)
+        continue;
+      auto stmt = prepare(db.get(), ("SELECT weight FROM \"" + table +
+                                     "\" WHERE weight IS NOT NULL")
+                                        .c_str());
+      if (!stmt)
+        return {{"error", "engine_failure"}};
+      int step;
+      while ((step = sqlite3_step(stmt.get())) == SQLITE_ROW)
+        weights.push_back(sqlite3_column_int64(stmt.get(), 0));
+      if (step != SQLITE_DONE)
+        return {{"error", "engine_failure"}};
+    }
+    if (weights.empty())
+      continue;
+    const auto middle = weights.begin() + (weights.size() - 1) / 2;
+    std::nth_element(weights.begin(), middle, weights.end());
+    medians[std::to_string(syllables)] = *middle;
+  }
+  if (medians.empty())
+    return {{"error", "resources_unavailable"}};
+  return {{"medians", medians}};
 }

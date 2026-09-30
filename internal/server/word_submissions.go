@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
@@ -11,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -26,9 +28,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
+	"github.com/metasequoiaime/MSIME-Backend/internal/engine"
 )
 
-// Anonymous word submissions from the website (msime-web#213). A visitor proposes words with their quanpin reading; after Cloudflare Turnstile and a per-address PostgreSQL rate limit, the server appends them to words.txt in metasequoiaime/msime-dictionary on a rolling pull request that maintainers review. Nothing about the visitor is stored, and entries, notes and tokens are never logged.
+// Anonymous dictionary submissions from the website (msime-web#213). A visitor proposes words with their quanpin reading, English words with the form to show, or candidate-window translations; after Cloudflare Turnstile and a per-address PostgreSQL rate limit, the server appends them to custom/words.txt, custom/english.txt or custom/translations.txt in metasequoiaime/msime-dictionary on one rolling pull request that maintainers review. Nothing about the visitor is stored, and entries, notes and tokens are never logged.
 
 const (
 	wordSubmissionsPath      = "/v1/community/word-submissions"
@@ -37,13 +40,18 @@ const (
 	wordSubmissionMaxChars   = 16
 	wordSubmissionNoteChars  = 500
 	wordSubmissionTokenBytes = 2048
-	// Every community entry gets the same weight; submitters do not choose it.
-	wordSubmissionWeight   = 5000
-	wordSubmissionsFile    = "custom/words.txt"
-	wordSubmissionBranches = "community-words/"
-	wordSubmissionTimeout  = 45 * time.Second
-	defaultTurnstileURL    = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-	defaultGitHubAPIURL    = "https://api.github.com"
+	// Submitters do not choose weights. A word gets the median weight of the base dictionary entries with as many syllables; this one is used only while the Engine cannot compute the medians.
+	wordSubmissionFallbackWeight = 5000
+	// English words keep the lowest weight: they complete a typed prefix and must not push the dictionary's own words down.
+	englishSubmissionWeight = 1
+	englishWordMaxBytes     = 64
+	englishDisplayMaxChars  = 64
+	translationSourceChars  = 64
+	translationGlossChars   = 200
+	wordSubmissionBranches  = "community-words/"
+	wordSubmissionTimeout   = 45 * time.Second
+	defaultTurnstileURL     = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+	defaultGitHubAPIURL     = "https://api.github.com"
 )
 
 // Conservative per-address limits. They count requests that passed Turnstile, so an automated client cannot use up a visitor's quota without solving a challenge. The shorter window is checked first so a burst does not also consume the daily allowance.
@@ -204,6 +212,10 @@ type wordSubmitter struct {
 	tokenMu     sync.Mutex
 	token       string
 	tokenExpiry time.Time
+	// The base dictionary's median word weights, once the Engine has computed them.
+	mediansMu     sync.Mutex
+	medians       map[int]int
+	mediansWarned bool
 }
 
 func newWordSubmitter(c WordSubmissionsConfig, origins []string, limiter rateLimiter) *wordSubmitter {
@@ -230,21 +242,82 @@ func (s *Server) wordSubmissionSettings(w http.ResponseWriter, r *http.Request) 
 	respond(w, 200, map[string]any{"enabled": true, "site_key": s.words.config.Turnstile.SiteKey})
 }
 
+// submissionKind is one kind of website submission. Each appends to its own file in the dictionary repository; all kinds share one rolling branch and pull request.
+type submissionKind struct {
+	name     string // the request's kind
+	file     string // the file entries are appended to
+	singular string // how pull request titles count entries
+	plural   string
+	listed   string // the row reason for an entry the dictionary already has
+}
+
+var (
+	kindWords        = submissionKind{"words", "custom/words.txt", "word", "words", "词库中已有这个词条"}
+	kindEnglish      = submissionKind{"english", "custom/english.txt", "English word", "English words", "英文词库中已有这个词条"}
+	kindTranslations = submissionKind{"translations", "custom/translations.txt", "translation", "translations", "翻译表中已有相同的翻译"}
+	// Title order: words, English words, translations.
+	submissionKinds = []submissionKind{kindWords, kindEnglish, kindTranslations}
+)
+
 type wordSubmissionEntry struct {
 	Word   string `json:"word"`
 	Pinyin string `json:"pinyin"`
 }
 
+// An English word: word is what the user types (the english_words key), display what the candidate shows.
+type englishSubmissionEntry struct {
+	Word    string `json:"word"`
+	Display string `json:"display"`
+}
+
+// A candidate-window translation override: source is the word looked up, gloss what is shown for it.
+type translationSubmissionEntry struct {
+	Source string `json:"source"`
+	Gloss  string `json:"gloss"`
+}
+
 type wordSubmissionRequest struct {
-	Entries []wordSubmissionEntry `json:"entries"`
-	Note    string                `json:"note"`
-	Token   string                `json:"token"`
+	// Kind is words (the default, so older clients keep working), english or translations; entries are decoded by it.
+	Kind    string          `json:"kind"`
+	Entries json.RawMessage `json:"entries"`
+	Note    string          `json:"note"`
+	Token   string          `json:"token"`
 }
 
 type wordRejection struct {
 	Index  int    `json:"index"`
 	Code   string `json:"code"`
 	Reason string `json:"reason"`
+}
+
+// submissionLine is one validated entry as it is written to its file.
+type submissionLine struct {
+	// The first two columns joined by a tab; an entry whose key its file already has is a duplicate.
+	key string
+	// The third column: 1 for English words, the preferred weight for words (fitted to the range words.txt uses when written), 0 for none (translations).
+	weight int
+	// How the commit message lists the entry.
+	label string
+}
+
+type submission struct {
+	kind  submissionKind
+	lines []submissionLine
+	note  string
+}
+
+// decodeEntries decodes the entries of one kind; an unknown field (for example a weight, or a field of another kind) is invalid JSON.
+func decodeEntries[T any](raw json.RawMessage) ([]T, error) {
+	var entries []T
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +357,39 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 		wordsFail(w, 400, "invalid_json", "请求格式不正确。")
 		return
 	}
-	if len(input.Entries) < 1 || len(input.Entries) > wordSubmissionMaxEntries {
+	kind := kindWords
+	switch input.Kind {
+	case "", kindWords.name:
+	case kindEnglish.name:
+		kind = kindEnglish
+	case kindTranslations.name:
+		kind = kindTranslations
+	default:
+		wordsFail(w, 400, "invalid_kind", "不支持的提交类型。")
+		return
+	}
+	var (
+		words        []wordSubmissionEntry
+		english      []englishSubmissionEntry
+		translations []translationSubmissionEntry
+		count        int
+	)
+	switch kind {
+	case kindWords:
+		words, err = decodeEntries[wordSubmissionEntry](input.Entries)
+		count = len(words)
+	case kindEnglish:
+		english, err = decodeEntries[englishSubmissionEntry](input.Entries)
+		count = len(english)
+	default:
+		translations, err = decodeEntries[translationSubmissionEntry](input.Entries)
+		count = len(translations)
+	}
+	if err != nil {
+		wordsFail(w, 400, "invalid_json", "请求格式不正确。")
+		return
+	}
+	if count < 1 || count > wordSubmissionMaxEntries {
 		wordsFail(w, 400, "invalid_entry_count", "每次提交 1 到 20 个词条。")
 		return
 	}
@@ -293,7 +398,16 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 		wordsFail(w, 400, "invalid_note", "备注最多 500 个字。")
 		return
 	}
-	if rejected := validateWordEntries(input.Entries); len(rejected) > 0 {
+	var rejected []wordRejection
+	switch kind {
+	case kindWords:
+		rejected = validateWordEntries(words)
+	case kindEnglish:
+		rejected = validateEnglishEntries(english)
+	default:
+		rejected = validateTranslationEntries(translations)
+	}
+	if len(rejected) > 0 {
 		respond(w, 400, map[string]any{"error": "部分词条未通过校验，请修改后再提交。", "code": "invalid_entries", "rejected": rejected})
 		return
 	}
@@ -326,9 +440,22 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	sub := submission{kind: kind, note: note}
+	switch kind {
+	case kindWords:
+		if err = s.shippedWords(ctx, words); err == nil {
+			sub.lines = wordLines(words, ws.weightMedians(ctx, s.config.Engine))
+		}
+	case kindEnglish:
+		if err = s.shippedEnglish(ctx, english); err == nil {
+			sub.lines = englishLines(english)
+		}
+	default:
+		sub.lines = translationLines(translations)
+	}
 	var number int
-	if err = s.shippedWords(ctx, input.Entries); err == nil {
-		number, err = ws.submit(ctx, input.Entries, note)
+	if err == nil {
+		number, err = ws.submit(ctx, sub)
 	}
 	var listed alreadyListedError
 	switch {
@@ -337,7 +464,7 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &listed):
 		rejected := make([]wordRejection, 0, len(listed))
 		for _, index := range listed {
-			rejected = append(rejected, wordRejection{index, "already_listed", "词库中已有这个词条"})
+			rejected = append(rejected, wordRejection{index, "already_listed", kind.listed})
 		}
 		respond(w, 400, map[string]any{"error": "部分词条已在词库中。", "code": "invalid_entries", "rejected": rejected})
 	case errors.Is(err, errWordsConflict):
@@ -433,6 +560,75 @@ func validateWordEntries(entries []wordSubmissionEntry) []wordRejection {
 	return rejected
 }
 
+// plainText reports whether s is valid UTF-8 without control, format (zero-width, bidi) or line and paragraph separator characters, so it stays one field of one line and reads as what it looks like.
+func plainText(s string) bool {
+	return utf8.ValidString(s) && strings.IndexFunc(s, func(r rune) bool {
+		return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) || r == utf8.RuneError
+	}) < 0
+}
+
+// validateEnglishEntries checks English words and trims their display forms in place. The word is the english_words key the Engine completes typed prefixes against: lowercase ASCII letters only.
+func validateEnglishEntries(entries []englishSubmissionEntry) []wordRejection {
+	rejected := []wordRejection{}
+	seen := map[string]bool{}
+	for i := range entries {
+		e := &entries[i]
+		reject := func(code, reason string) { rejected = append(rejected, wordRejection{i, code, reason}) }
+		e.Display = strings.TrimSpace(e.Display)
+		switch {
+		case e.Word == "":
+			reject("word_required", "请填写英文单词")
+		case strings.IndexFunc(e.Word, func(r rune) bool { return r < 'a' || r > 'z' }) >= 0:
+			reject("invalid_word", "单词是输入时键入的编码，只能包含小写英文字母 a–z，不能有大写、数字、空格或符号")
+		case len(e.Word) > englishWordMaxBytes:
+			reject("word_too_long", "单词最多 64 个字母")
+		case e.Display == "":
+			reject("display_required", "请填写候选中显示的词形")
+		case !plainText(e.Display):
+			reject("invalid_display", "显示词形不能包含制表符、换行或其他控制字符")
+		case utf8.RuneCountInString(e.Display) > englishDisplayMaxChars:
+			reject("display_too_long", "显示词形最多 64 个字符")
+		case seen[e.Word+"\t"+e.Display]:
+			reject("duplicate_entry", "“"+e.Display+"”重复填写了")
+		default:
+			seen[e.Word+"\t"+e.Display] = true
+		}
+	}
+	return rejected
+}
+
+// validateTranslationEntries checks translation overrides and trims both sides in place, as the dictionary build strips them. A source may repeat one already in translations.txt (the later line wins, which is the point of an override); only an identical pair is a duplicate.
+func validateTranslationEntries(entries []translationSubmissionEntry) []wordRejection {
+	rejected := []wordRejection{}
+	seen := map[string]bool{}
+	for i := range entries {
+		e := &entries[i]
+		reject := func(code, reason string) { rejected = append(rejected, wordRejection{i, code, reason}) }
+		e.Source, e.Gloss = strings.TrimSpace(e.Source), strings.TrimSpace(e.Gloss)
+		switch {
+		case e.Source == "":
+			reject("source_required", "请填写原词")
+		case !plainText(e.Source):
+			reject("invalid_source", "原词不能包含制表符、换行或其他控制字符")
+		case strings.HasPrefix(e.Source, "#"):
+			reject("invalid_source", "原词不能以 # 开头")
+		case utf8.RuneCountInString(e.Source) > translationSourceChars:
+			reject("source_too_long", "原词最多 64 个字符")
+		case e.Gloss == "":
+			reject("gloss_required", "请填写译文")
+		case !plainText(e.Gloss):
+			reject("invalid_gloss", "译文不能包含制表符、换行或其他控制字符")
+		case utf8.RuneCountInString(e.Gloss) > translationGlossChars:
+			reject("gloss_too_long", "译文最多 200 个字符")
+		case seen[e.Source+"\t"+e.Gloss]:
+			reject("duplicate_entry", "“"+e.Source+"”的这条翻译重复填写了")
+		default:
+			seen[e.Source+"\t"+e.Gloss] = true
+		}
+	}
+	return rejected
+}
+
 // The note ends up in a public commit message. It is flattened to one line, and every @ (mention), # and GH- (issue references, including closing keywords) and :// (autolinks) is broken with a zero-width space so a submission cannot ping people, touch issues or plant links.
 func sanitizeWordNote(note string) (string, bool) {
 	if !utf8.ValidString(note) || utf8.RuneCountInString(note) > wordSubmissionNoteChars {
@@ -448,8 +644,7 @@ func sanitizeWordNote(note string) (string, bool) {
 		return r
 	}, note)
 	note = strings.Join(strings.Fields(note), " ")
-	note = strings.NewReplacer("@", "@​", "#", "#​", "://", ":​//", "GH-", "GH​-", "gh-", "gh​-", "Gh-", "Gh​-", "gH-", "gH​-").Replace(note)
-	return note, true
+	return githubReferenceBreaker.Replace(note), true
 }
 
 var errTurnstileRejected = errors.New("turnstile rejected the token")
@@ -483,17 +678,28 @@ func (ws *wordSubmitter) verifyTurnstile(ctx context.Context, token string) erro
 	return nil
 }
 
-// wordsCommitMessage lists the entries; the note follows on its own line after sanitising.
-func wordsTitle(count int) string {
-	noun := "words"
-	if count == 1 {
-		noun = "word"
+// submissionTitle names what the rolling pull request adds, per kind in title order with zero kinds left out, for example "feat(custom): add 3 words, 1 English word and 2 translations". It is also the squash commit subject that release-please reads.
+func submissionTitle(counts map[string]int) string {
+	var parts []string
+	for _, kind := range submissionKinds {
+		switch n := counts[kind.name]; {
+		case n == 1:
+			parts = append(parts, "1 "+kind.singular)
+		case n > 1:
+			parts = append(parts, strconv.Itoa(n)+" "+kind.plural)
+		}
 	}
-	return "feat(words): add " + strconv.Itoa(count) + " community-submitted " + noun
+	switch len(parts) {
+	case 0:
+		return "feat(custom): add community submissions"
+	case 1:
+		return "feat(custom): add " + parts[0]
+	}
+	return "feat(custom): add " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 }
 
-// wordsAdded counts the entry lines in head that base does not have, so maintainer edits on the rolling branch are reflected. Blank and # comment lines are not entries.
-func wordsAdded(base, head string) int {
+// addedLines counts the entry lines in head that base does not have, so maintainer edits on the rolling branch are reflected. Blank and # comment lines are not entries, and surrounding whitespace does not make a line different, as the dictionary build strips it.
+func addedLines(base, head string) int {
 	remaining := map[string]int{}
 	entries := func(content string, visit func(string)) {
 		for _, line := range strings.Split(content, "\n") {
@@ -514,33 +720,135 @@ func wordsAdded(base, head string) int {
 	return added
 }
 
-func wordsCommitMessage(entries []wordSubmissionEntry, note string) string {
+// Commit messages and titles are public. Contributed text is flattened by validation; this breaks every @ (mention), # and GH- (issue references, including closing keywords) and :// (autolinks) with a zero-width space so a submission cannot ping people, touch issues or plant links.
+var githubReferenceBreaker = strings.NewReplacer("@", "@​", "#", "#​", "://", ":​//", "GH-", "GH​-", "gh-", "gh​-", "Gh-", "Gh​-", "gH-", "gH​-")
+
+// submissionCommitMessage titles the commit with this submission alone and lists its entries; the note follows on its own line after sanitising.
+func submissionCommitMessage(sub submission) string {
 	var b strings.Builder
-	b.WriteString(wordsTitle(len(entries)) + "\n\n")
-	for _, e := range entries {
-		b.WriteString("- " + e.Word + " " + e.Pinyin + "\n")
+	b.WriteString(submissionTitle(map[string]int{sub.kind.name: len(sub.lines)}) + "\n\n")
+	for _, line := range sub.lines {
+		b.WriteString("- " + line.label + "\n")
 	}
-	b.WriteString("\nSubmitted anonymously through the MSIME website word form.\n")
-	if note != "" {
-		b.WriteString("\nNote: " + note + "\n")
+	b.WriteString("\nSubmitted anonymously through the MSIME website form.\n")
+	if sub.note != "" {
+		b.WriteString("\nNote: " + sub.note + "\n")
 	}
 	return b.String()
 }
 
-// appendWordLines adds word<TAB>pinyin<TAB>weight lines, making sure the existing content ends with a newline first.
-func appendWordLines(content string, entries []wordSubmissionEntry) string {
+// wordWeightRange is the lowest and highest weight of the entries in words.txt, which the msime-dictionary check-words gate requires every added entry to stay within; ok is false when the file has none. Lines are read as the dictionary build reads them: stripped, blank and # lines skipped, word<TAB>pinyin<TAB>weight.
+func wordWeightRange(content string) (low, high int, ok bool) {
+	for _, line := range strings.Split(content, "\n") {
+		if line = strings.TrimSpace(line); line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 {
+			continue
+		}
+		weight, err := strconv.Atoi(strings.TrimSpace(fields[2]))
+		if err != nil || weight < 1 {
+			continue
+		}
+		if !ok {
+			low, high, ok = weight, weight, true
+		}
+		low, high = min(low, weight), max(high, weight)
+	}
+	return low, high, ok
+}
+
+// appendSubmissionLines adds the submission's lines to content, making sure the existing content ends with a newline first. Word weights are fitted to the range base words.txt uses (and never below 1, the build's minimum).
+func appendSubmissionLines(content string, sub submission, base string) string {
+	low, high, ok := wordWeightRange(base)
+	if !ok {
+		low, high = 1, math.MaxInt
+	}
 	var b strings.Builder
 	b.WriteString(content)
 	if content != "" && !strings.HasSuffix(content, "\n") {
 		b.WriteString("\n")
 	}
-	for _, e := range entries {
-		b.WriteString(e.Word + "\t" + e.Pinyin + "\t" + strconv.Itoa(wordSubmissionWeight) + "\n")
+	for _, line := range sub.lines {
+		b.WriteString(line.key)
+		switch {
+		case sub.kind == kindWords:
+			b.WriteString("\t" + strconv.Itoa(max(1, min(max(line.weight, low), high))))
+		case line.weight > 0:
+			b.WriteString("\t" + strconv.Itoa(line.weight))
+		}
+		b.WriteString("\n")
 	}
 	return b.String()
 }
 
+// wordLines gives each word the base dictionary's median weight for its syllable count (8 standing for 8 or more), or the fallback weight when the medians are unknown.
+func wordLines(entries []wordSubmissionEntry, medians map[int]int) []submissionLine {
+	lines := make([]submissionLine, len(entries))
+	for i, e := range entries {
+		weight, ok := medians[min(strings.Count(e.Pinyin, "'")+1, 8)]
+		if !ok {
+			weight = wordSubmissionFallbackWeight
+		}
+		lines[i] = submissionLine{e.Word + "\t" + e.Pinyin, weight, e.Word + " " + e.Pinyin}
+	}
+	return lines
+}
+
+func englishLines(entries []englishSubmissionEntry) []submissionLine {
+	lines := make([]submissionLine, len(entries))
+	for i, e := range entries {
+		lines[i] = submissionLine{e.Word + "\t" + e.Display, englishSubmissionWeight, githubReferenceBreaker.Replace(e.Word + " → " + e.Display)}
+	}
+	return lines
+}
+
+func translationLines(entries []translationSubmissionEntry) []submissionLine {
+	lines := make([]submissionLine, len(entries))
+	for i, e := range entries {
+		lines[i] = submissionLine{e.Source + "\t" + e.Gloss, 0, githubReferenceBreaker.Replace(e.Source + " → " + e.Gloss)}
+	}
+	return lines
+}
+
+// weightMedians returns the base dictionary's median weight per syllable count (8 standing for 8 or more syllables), computed by the Engine once per process. A failed computation is not cached, so the next submission tries again; meanwhile words get wordSubmissionFallbackWeight, which is logged only the first time.
+func (ws *wordSubmitter) weightMedians(ctx context.Context, e engine.Config) map[int]int {
+	ws.mediansMu.Lock()
+	defer ws.mediansMu.Unlock()
+	if ws.medians != nil {
+		return ws.medians
+	}
+	raw, err := e.Query(ctx, map[string]any{"operation": "pinyin_weight_medians"})
+	var out struct {
+		Medians map[string]int `json:"medians"`
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &out)
+	}
+	medians := map[int]int{}
+	for key, weight := range out.Medians {
+		if n, convErr := strconv.Atoi(key); convErr == nil && n >= 1 && n <= 8 {
+			medians[n] = weight
+		}
+	}
+	if err == nil && len(medians) == 0 {
+		err = errors.New("no medians")
+	}
+	if err != nil {
+		if !ws.mediansWarned {
+			ws.mediansWarned = true
+			slog.Warn("word submissions: base dictionary weight medians unavailable, using the fallback weight", "fallback", wordSubmissionFallbackWeight, "reason", err.Error())
+		}
+		return nil
+	}
+	ws.medians = medians
+	return medians
+}
+
 type alreadyListedError []int
+
+func (alreadyListedError) Error() string { return "entries already listed" }
 
 // shippedWords rejects entries the base dictionary in the Engine resources already holds, before GitHub is touched. The msime-dictionary check-words gate repeats this against the current release, so an unavailable Engine only logs and lets the submission through.
 func (s *Server) shippedWords(ctx context.Context, entries []wordSubmissionEntry) error {
@@ -548,18 +856,32 @@ func (s *Server) shippedWords(ctx context.Context, entries []wordSubmissionEntry
 	for i, e := range entries {
 		batch[i] = map[string]string{"code": e.Pinyin, "word": e.Word}
 	}
-	raw, err := s.config.Engine.Query(ctx, map[string]any{"operation": "listed_pinyin_batch", "entries": batch})
+	return s.shippedEntries(ctx, "listed_pinyin_batch", batch)
+}
+
+// shippedEnglish rejects English words whose (word, display) pair english.db already holds. Nothing gates custom/english.txt in msime-dictionary, so maintainers review what an unavailable Engine lets through.
+func (s *Server) shippedEnglish(ctx context.Context, entries []englishSubmissionEntry) error {
+	batch := make([]map[string]string, len(entries))
+	for i, e := range entries {
+		batch[i] = map[string]string{"word": e.Word, "display": e.Display}
+	}
+	return s.shippedEntries(ctx, "listed_english_batch", batch)
+}
+
+// shippedEntries runs a read-only Engine lookup that answers one listed flag per entry. Any Engine failure skips the check with a warning.
+func (s *Server) shippedEntries(ctx context.Context, operation string, batch []map[string]string) error {
+	raw, err := s.config.Engine.Query(ctx, map[string]any{"operation": operation, "entries": batch})
 	var out struct {
 		Listed []bool `json:"listed"`
 	}
 	if err == nil {
 		err = json.Unmarshal(raw, &out)
 	}
-	if err == nil && len(out.Listed) != len(entries) {
+	if err == nil && len(out.Listed) != len(batch) {
 		err = errors.New("listed count mismatch")
 	}
 	if err != nil {
-		slog.Warn("word submissions: base dictionary check skipped", "reason", err.Error())
+		slog.Warn("word submissions: base dictionary check skipped", "operation", operation, "reason", err.Error())
 		return nil
 	}
 	var listed alreadyListedError
@@ -574,22 +896,23 @@ func (s *Server) shippedWords(ctx context.Context, entries []wordSubmissionEntry
 	return listed
 }
 
-func (alreadyListedError) Error() string { return "entries already listed" }
-
-// listedWords returns the indexes of entries whose word and reading already appear in words.txt.
-func listedWords(content string, entries []wordSubmissionEntry) alreadyListedError {
+// listedLines returns the indexes of lines whose key (the first two columns) content already has. Columns are stripped and blank and # lines skipped, as the dictionary build reads the files.
+func listedLines(content string, lines []submissionLine) alreadyListedError {
 	existing := map[string]bool{}
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	scanner.Buffer(make([]byte, 0, 4096), 1<<20)
 	for scanner.Scan() {
-		fields := strings.Split(scanner.Text(), "\t")
-		if len(fields) >= 2 {
-			existing[fields[0]+"\t"+fields[1]] = true
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if fields := strings.Split(line, "\t"); len(fields) >= 2 {
+			existing[strings.TrimSpace(fields[0])+"\t"+strings.TrimSpace(fields[1])] = true
 		}
 	}
 	var listed alreadyListedError
-	for i, e := range entries {
-		if existing[e.Word+"\t"+e.Pinyin] {
+	for i, line := range lines {
+		if existing[line.key] {
 			listed = append(listed, i)
 		}
 	}

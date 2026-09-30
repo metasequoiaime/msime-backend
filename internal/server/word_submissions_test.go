@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -68,11 +70,23 @@ type fakeWordsUpstream struct {
 	bodies          map[string]map[string]any
 	query           map[string]url.Values
 	tokens          int
+	// files holds custom/english.txt and custom/translations.txt; a nil entry is a file the repository does not have.
+	files map[string]*fakeFile
 }
+
+// fakeFile is one file on the rolling branch (content, sha) and on the base branch (base).
+type fakeFile struct{ content, base, sha string }
+
+const (
+	wordsTestBase        = "未来可期\twei'lai'ke'qi\t1\n今天\tjin'tian\t9000\n"
+	englishTestBase      = "asr\tASR\t1"
+	translationsTestBase = "# zh -> en\n苹果\tapple\n"
+)
 
 func newFakeWordsUpstream(t *testing.T) *fakeWordsUpstream {
 	f := &fakeWordsUpstream{t: t, turnstile: map[string]any{"success": true, "action": "words", "hostname": "msime.app"}, turnstileStatus: 200,
-		content: "未来可期\twei'lai'ke'qi\t1\n", base: "未来可期\twei'lai'ke'qi\t1\n", sha: "sha-0", status: map[string]int{}, calls: map[string]int{}, bodies: map[string]map[string]any{}, query: map[string]url.Values{}}
+		content: wordsTestBase, base: wordsTestBase, sha: "sha-0",
+		files: map[string]*fakeFile{"custom/english.txt": {englishTestBase, englishTestBase, "en-0"}, "custom/translations.txt": {translationsTestBase, translationsTestBase, "tr-0"}}, status: map[string]int{}, calls: map[string]int{}, bodies: map[string]map[string]any{}, query: map[string]url.Values{}}
 	f.server = httptest.NewTLSServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.server.Close)
 	return f
@@ -151,6 +165,26 @@ func (f *fakeWordsUpstream) serve(w http.ResponseWriter, r *http.Request) {
 			wrapped, encoded = append(wrapped, encoded[:60]), encoded[60:]
 		}
 		reply(200, map[string]any{"type": "file", "encoding": "base64", "sha": sha, "content": strings.Join(append(wrapped, encoded), "\n") + "\n"})
+	case "GET " + wordsTestRepo + "/contents/custom/english.txt", "GET " + wordsTestRepo + "/contents/custom/translations.txt":
+		file := f.files[strings.TrimPrefix(r.URL.Path, wordsTestRepo+"/contents/")]
+		if file == nil {
+			reply(404, map[string]string{"message": "Not Found"})
+			return
+		}
+		content, sha := file.content, file.sha
+		if r.URL.Query().Get("ref") == "main" {
+			content, sha = file.base, "base-sha"
+		}
+		reply(200, map[string]any{"type": "file", "encoding": "base64", "sha": sha, "content": base64.StdEncoding.EncodeToString([]byte(content))})
+	case "PUT " + wordsTestRepo + "/contents/custom/english.txt", "PUT " + wordsTestRepo + "/contents/custom/translations.txt":
+		file := f.files[strings.TrimPrefix(r.URL.Path, wordsTestRepo+"/contents/")]
+		if file == nil || body["sha"] != file.sha {
+			reply(409, map[string]string{"message": "sha mismatch"})
+			return
+		}
+		decoded, _ := base64.StdEncoding.DecodeString(body["content"].(string))
+		file.content, file.sha = string(decoded), file.sha+"+"
+		reply(200, map[string]any{"content": map[string]string{"sha": file.sha}})
 	case "POST " + wordsTestRepo + "/git/refs":
 		reply(201, map[string]any{"ref": body["ref"]})
 	case "PUT " + wordsTestRepo + "/contents/custom/words.txt":
@@ -390,15 +424,56 @@ func TestWordNoteSanitising(t *testing.T) {
 	if note, ok = sanitizeWordNote(""); !ok || note != "" {
 		t.Fatal("empty note")
 	}
-	message := wordsCommitMessage([]wordSubmissionEntry{{"扛把子", "kang'ba'zi"}}, "")
-	if !strings.HasPrefix(message, "feat(words): add 1 community-submitted word\n\n- 扛把子 kang'ba'zi\n") || strings.Contains(message, "Note:") {
+	message := submissionCommitMessage(submission{kind: kindWords, lines: wordLines([]wordSubmissionEntry{{"扛把子", "kang'ba'zi"}}, nil)})
+	if !strings.HasPrefix(message, "feat(custom): add 1 word\n\n- 扛把子 kang'ba'zi\n") || strings.Contains(message, "Note:") {
 		t.Fatalf("%q", message)
 	}
-	if got := appendWordLines("a\tb\t1", []wordSubmissionEntry{{"你", "ni"}}); got != "a\tb\t1\n你\tni\t5000\n" {
+	// Words keep the weight inside the range the base words.txt uses, which is what the check-words gate enforces; without a base range only the minimum of 1 applies.
+	words := submission{kind: kindWords, lines: wordLines([]wordSubmissionEntry{{"你", "ni"}, {"你好", "ni'hao"}, {"你好吗", "ni'hao'ma"}}, map[int]int{1: 0, 2: 7000})}
+	if got := appendSubmissionLines("a\tb\t1", words, "# c\n\na\tb\t10\nc\td\t6000\nbroken line\ne\tf\tx\n"); got != "a\tb\t1\n你\tni\t10\n你好\tni'hao\t6000\n你好吗\tni'hao'ma\t5000\n" {
 		t.Fatalf("%q", got)
 	}
-	if got := appendWordLines("", []wordSubmissionEntry{{"你", "ni"}}); got != "你\tni\t5000\n" {
+	if got := appendSubmissionLines("", words, ""); got != "你\tni\t1\n你好\tni'hao\t7000\n你好吗\tni'hao'ma\t5000\n" {
 		t.Fatalf("%q", got)
+	}
+	english := submission{kind: kindEnglish, lines: englishLines([]englishSubmissionEntry{{"github", "GitHub"}})}
+	if got := appendSubmissionLines(englishTestBase, english, englishTestBase); got != "asr\tASR\t1\ngithub\tGitHub\t1\n" {
+		t.Fatalf("%q", got)
+	}
+	translations := submission{kind: kindTranslations, lines: translationLines([]translationSubmissionEntry{{"苹果", "apple (fruit)"}})}
+	if got := appendSubmissionLines(translationsTestBase, translations, translationsTestBase); got != translationsTestBase+"苹果\tapple (fruit)\n" {
+		t.Fatalf("%q", got)
+	}
+	// Labels in commit messages cannot mention users or link issues.
+	if label := englishLines([]englishSubmissionEntry{{"x", "@x#1"}})[0].label; label != "x → @​x#​1" {
+		t.Fatalf("%q", label)
+	}
+	if label := translationLines([]translationSubmissionEntry{{"gh-1", "https://x"}})[0].label; label != "gh​-1 → https:​//x" {
+		t.Fatalf("%q", label)
+	}
+}
+
+func TestSubmissionTitle(t *testing.T) {
+	for want, counts := range map[string]map[string]int{
+		"feat(custom): add 1 word":                                     {"words": 1},
+		"feat(custom): add 2 words":                                    {"words": 2, "english": 0},
+		"feat(custom): add 1 English word":                             {"english": 1},
+		"feat(custom): add 4 translations":                             {"translations": 4},
+		"feat(custom): add 2 words and 1 translation":                  {"words": 2, "translations": 1},
+		"feat(custom): add 3 words, 1 English word and 2 translations": {"words": 3, "english": 1, "translations": 2},
+		"feat(custom): add 1 word, 5 English words and 1 translation":  {"translations": 1, "english": 5, "words": 1},
+		"feat(custom): add community submissions":                      {},
+	} {
+		if got := submissionTitle(counts); got != want {
+			t.Errorf("%v: %q", counts, got)
+		}
+	}
+	// Blank lines, comments and lines the base already has are not counted; a line removed from the base is not negative.
+	if n := addedLines("a\nb\n", "a\n# c\n\n b \nd\nd\n"); n != 2 {
+		t.Fatal(n)
+	}
+	if n := addedLines("a\nb\nc\n", "a\n"); n != 0 {
+		t.Fatal(n)
 	}
 }
 
@@ -527,16 +602,16 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	if put["sha"] != "sha-0" || put["branch"] != "community-words/20260930-123456" {
 		t.Fatal(put)
 	}
-	if f.content != "未来可期\twei'lai'ke'qi\t1\n扛把子\tkang'ba'zi\t5000\n二〇二六\ter'ling'er'liu\t5000\n" {
+	if f.content != wordsTestBase+"扛把子\tkang'ba'zi\t5000\n二〇二六\ter'ling'er'liu\t5000\n" {
 		t.Fatalf("%q", f.content)
 	}
 	message := put["message"].(string)
-	if !strings.HasPrefix(message, "feat(words): add 2 community-submitted words\n\n- 扛把子 kang'ba'zi\n- 二〇二六 er'ling'er'liu\n") || !strings.Contains(message, "Note: 网络流行语 @​octocat fixes #​3 https:​//example.com") {
+	if !strings.HasPrefix(message, "feat(custom): add 2 words\n\n- 扛把子 kang'ba'zi\n- 二〇二六 er'ling'er'liu\n") || !strings.Contains(message, "Note: 网络流行语 @​octocat fixes #​3 https:​//example.com") {
 		t.Fatalf("%q", message)
 	}
 	pr := f.bodies["POST "+wordsTestRepo+"/pulls"]
 	body, _ := pr["body"].(string)
-	if pr["head"] != "community-words/20260930-123456" || pr["base"] != "main" || pr["title"] != "feat(words): add 2 community-submitted words" || !strings.Contains(body, "reviewed by maintainers") || !strings.Contains(body, "msime-dictionary CI") || !strings.Contains(body, "dict-v*") || !strings.Contains(body, "resources/dictionary-sources.lock.json") || !strings.Contains(body, "custom/words.txt") {
+	if pr["head"] != "community-words/20260930-123456" || pr["base"] != "main" || pr["title"] != "feat(custom): add 2 words" || !strings.Contains(body, "reviewed by maintainers") || !strings.Contains(body, "msime-dictionary CI") || !strings.Contains(body, "dict-v*") || !strings.Contains(body, "resources/dictionary-sources.lock.json") || !strings.Contains(body, "custom/words.txt") {
 		t.Fatal(pr)
 	}
 	if strings.Contains(body, "扛把子") || strings.Contains(body, "octocat") {
@@ -554,7 +629,7 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	if !strings.HasSuffix(f.content, "堪堪\tkan'kan\t5000\n") || f.bodies["PUT "+wordsTestRepo+"/contents/custom/words.txt"]["sha"] != "sha-0+" {
 		t.Fatal(f.content)
 	}
-	if title := f.bodies["PATCH "+wordsTestRepo+"/pulls/12"]["title"]; title != "feat(words): add 3 community-submitted words" {
+	if title := f.bodies["PATCH "+wordsTestRepo+"/pulls/12"]["title"]; title != "feat(custom): add 3 words" {
 		t.Fatal("the rolling pull request title must count every entry on the branch", title)
 	}
 }
@@ -585,12 +660,12 @@ func TestWordSubmissionAppendsToOpenPullRequest(t *testing.T) {
 	if f.count("GET "+wordsTestRepo+"/git/ref/heads/main") != 0 || f.count("POST "+wordsTestRepo+"/git/refs") != 0 || f.count("POST "+wordsTestRepo+"/pulls") != 0 {
 		t.Fatal(f.calls)
 	}
-	if title := f.bodies["PATCH "+wordsTestRepo+"/pulls/9"]["title"]; title != "feat(words): add 2 community-submitted words" || f.query["GET "+wordsTestRepo+"/contents/custom/words.txt"] == nil {
+	if title := f.bodies["PATCH "+wordsTestRepo+"/pulls/9"]["title"]; title != "feat(custom): add 2 words" || f.query["GET "+wordsTestRepo+"/contents/custom/words.txt"] == nil {
 		t.Fatal(title)
 	}
 
 	// An up-to-date title is left alone, and a failed retitle does not fail a submission whose entries are already committed.
-	f.pulls[3]["title"] = "feat(words): add 3 community-submitted words"
+	f.pulls[3]["title"] = "feat(custom): add 3 words"
 	if w = postWords(s, `{"entries":[{"word":"鼎鼎","pinyin":"ding'ding"}],"token":"turnstile-token"}`); w.Code != 201 || f.count("PATCH "+wordsTestRepo+"/pulls/9") != 1 {
 		t.Fatal(w.Code, f.calls)
 	}
@@ -850,5 +925,238 @@ func TestWordSubmissionRateLimitInPostgreSQL(t *testing.T) {
 	}
 	if rows != 4 || leaked != 0 {
 		t.Fatal("expected two windows for two addresses, stored as digests", rows, leaked)
+	}
+}
+
+func TestWordSubmissionKindValidation(t *testing.T) {
+	s, f, limiter := wordsFixture(t)
+	requests := 0
+	post := func(body string) *httptest.ResponseRecorder {
+		requests++
+		return postWords(s, body, func(r *http.Request) { r.RemoteAddr = "192.0.2." + strconv.Itoa(requests) + ":1" })
+	}
+	request := func(kind string, entries ...map[string]string) string {
+		raw, _ := json.Marshal(map[string]any{"kind": kind, "entries": entries, "token": "turnstile-token"})
+		return string(raw)
+	}
+	for _, c := range []struct {
+		kind  string
+		entry map[string]string
+		code  string
+	}{
+		{"english", map[string]string{"word": "", "display": "x"}, "word_required"},
+		{"english", map[string]string{"word": "GitHub", "display": "GitHub"}, "invalid_word"},
+		{"english", map[string]string{"word": "git hub", "display": "git hub"}, "invalid_word"},
+		{"english", map[string]string{"word": "wifi6", "display": "Wi-Fi 6"}, "invalid_word"},
+		{"english", map[string]string{"word": "café", "display": "café"}, "invalid_word"},
+		{"english", map[string]string{"word": strings.Repeat("a", 65), "display": "a"}, "word_too_long"},
+		{"english", map[string]string{"word": "github", "display": "  "}, "display_required"},
+		{"english", map[string]string{"word": "github", "display": "Git\tHub"}, "invalid_display"},
+		{"english", map[string]string{"word": "github", "display": "Git​Hub"}, "invalid_display"},
+		{"english", map[string]string{"word": "github", "display": "Git Hub"}, "invalid_display"},
+		{"english", map[string]string{"word": "github", "display": strings.Repeat("G", 65)}, "display_too_long"},
+		{"translations", map[string]string{"source": "", "gloss": "x"}, "source_required"},
+		{"translations", map[string]string{"source": "苹\n果", "gloss": "apple"}, "invalid_source"},
+		{"translations", map[string]string{"source": "#苹果", "gloss": "apple"}, "invalid_source"},
+		{"translations", map[string]string{"source": strings.Repeat("长", 65), "gloss": "long"}, "source_too_long"},
+		{"translations", map[string]string{"source": "苹果", "gloss": " "}, "gloss_required"},
+		{"translations", map[string]string{"source": "苹果", "gloss": "app\tle"}, "invalid_gloss"},
+		{"translations", map[string]string{"source": "苹果", "gloss": strings.Repeat("a", 201)}, "gloss_too_long"},
+	} {
+		w := post(request(c.kind, c.entry))
+		body := decodeBody(t, w)
+		rejected, _ := body["rejected"].([]any)
+		if w.Code != 400 || body["code"] != "invalid_entries" || len(rejected) != 1 || rejected[0].(map[string]any)["code"] != c.code || rejected[0].(map[string]any)["reason"] == "" {
+			t.Errorf("%s %v: %d %s", c.kind, c.entry, w.Code, w.Body.String())
+		}
+	}
+	// Limits are inclusive, a word may have several display forms and a source several glosses; only an identical pair repeats.
+	if rejected := validateEnglishEntries([]englishSubmissionEntry{{strings.Repeat("a", 64), strings.Repeat("A", 64)}, {"github", "GitHub"}, {"github", "Github"}}); len(rejected) != 0 {
+		t.Fatal(rejected)
+	}
+	if rejected := validateTranslationEntries([]translationSubmissionEntry{{strings.Repeat("长", 64), strings.Repeat("a", 200)}, {"苹果", "apple"}, {"苹果", "Apple Inc."}, {"apple", "苹果"}}); len(rejected) != 0 {
+		t.Fatal(rejected)
+	}
+	w := post(request("english", map[string]string{"word": "github", "display": "GitHub"}, map[string]string{"word": "github", "display": " GitHub "}))
+	if w.Code != 400 || strings.Count(w.Body.String(), "duplicate_entry") != 1 {
+		t.Fatal("english duplicates", w.Code, w.Body.String())
+	}
+	w = post(request("translations", map[string]string{"source": "苹果", "gloss": "apple"}, map[string]string{"source": " 苹果", "gloss": "apple "}))
+	if w.Code != 400 || strings.Count(w.Body.String(), "duplicate_entry") != 1 {
+		t.Fatal("translation duplicates", w.Code, w.Body.String())
+	}
+	for body, code := range map[string]string{
+		`{"kind":"emoji","entries":[{"word":"你","pinyin":"ni"}],"token":"t"}`:              "invalid_kind",
+		`{"kind":"Words","entries":[{"word":"你","pinyin":"ni"}],"token":"t"}`:              "invalid_kind",
+		`{"kind":"words","entries":[{"word":"你","display":"ni"}],"token":"t"}`:             "invalid_json",
+		`{"kind":"english","entries":[{"word":"x","pinyin":"x"}],"token":"t"}`:             "invalid_json",
+		`{"kind":"english","entries":[{"word":"x","display":"X","weight":9}],"token":"t"}`: "invalid_json",
+		`{"kind":"translations","entries":[{"word":"x","gloss":"x"}],"token":"t"}`:         "invalid_json",
+		`{"kind":"translations","entries":{"source":"x","gloss":"x"},"token":"t"}`:         "invalid_json",
+		`{"kind":"english","entries":[],"token":"t"}`:                                      "invalid_entry_count",
+		`{"kind":"translations","token":"t"}`:                                              "invalid_entry_count",
+		`{"kind":"english","entries":[{"word":"x","display":"X"}],"note":"\u0000"}`:        "token_required",
+		`{"kind":1,"entries":[{"word":"你","pinyin":"ni"}],"token":"t"}`:                    "invalid_json",
+		`{"kind":"translations","entries":[{"source":"x","gloss":"x"}],"token":"t","x":1}`: "invalid_json",
+	} {
+		w := post(body)
+		if w.Code != 400 || decodeBody(t, w)["code"] != code {
+			t.Errorf("%.70s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	if f.count("POST /siteverify") != 0 || len(limiter.calls) != 0 {
+		t.Fatal("invalid requests reached Turnstile or the rate limit")
+	}
+}
+
+func TestWordSubmissionEnglishAndTranslations(t *testing.T) {
+	s, f, _ := wordsFixture(t)
+	w := postWords(s, `{"kind":"english","entries":[{"word":"github","display":" GitHub "},{"word":"figma","display":"Figma"}],"note":"tools","token":"turnstile-token"}`)
+	if w.Code != 201 || strings.TrimSpace(w.Body.String()) != `{"pull_request_url":"https://github.com/metasequoiaime/msime-dictionary/pull/12"}` {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// english.txt ships without a trailing newline; the submission starts on a line of its own.
+	if got := f.files["custom/english.txt"].content; got != "asr\tASR\t1\ngithub\tGitHub\t1\nfigma\tFigma\t1\n" {
+		t.Fatalf("%q", got)
+	}
+	put := f.bodies["PUT "+wordsTestRepo+"/contents/custom/english.txt"]
+	if put["sha"] != "en-0" || put["branch"] != "community-words/20260930-123456" || !strings.HasPrefix(put["message"].(string), "feat(custom): add 2 English words\n\n- github → GitHub\n- figma → Figma\n") || !strings.Contains(put["message"].(string), "Note: tools") {
+		t.Fatal(put)
+	}
+	if f.query["GET "+wordsTestRepo+"/contents/custom/english.txt"].Get("ref") != "base-commit" || f.count("PUT "+wordsTestRepo+"/contents/custom/words.txt") != 0 {
+		t.Fatal("an English submission must only touch english.txt at the new branch's start", f.calls)
+	}
+	if pr := f.bodies["POST "+wordsTestRepo+"/pulls"]; pr["title"] != "feat(custom): add 2 English words" || !strings.Contains(pr["body"].(string), "custom/english.txt") || !strings.Contains(pr["body"].(string), "custom/translations.txt") {
+		t.Fatal(pr)
+	}
+
+	// The next submissions share the rolling pull request; its title counts what the branch adds in every file.
+	w = postWords(s, `{"kind":"translations","entries":[{"source":"苹果","gloss":"apple (fruit)"},{"source":"香蕉","gloss":"banana"}],"token":"turnstile-token"}`)
+	if w.Code != 201 || !strings.HasSuffix(strings.TrimSpace(w.Body.String()), `/pull/12"}`) || f.count("POST "+wordsTestRepo+"/pulls") != 1 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := f.files["custom/translations.txt"].content; got != translationsTestBase+"苹果\tapple (fruit)\n香蕉\tbanana\n" {
+		t.Fatalf("%q", got)
+	}
+	if title := f.bodies["PATCH "+wordsTestRepo+"/pulls/12"]["title"]; title != "feat(custom): add 2 English words and 2 translations" {
+		t.Fatal(title)
+	}
+	f.pulls[0]["title"] = "feat(custom): add 2 English words and 2 translations"
+	if w = postWords(s, `{"entries":[{"word":"堪堪","pinyin":"kan'kan"}],"token":"turnstile-token"}`); w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if title := f.bodies["PATCH "+wordsTestRepo+"/pulls/12"]["title"]; title != "feat(custom): add 1 word, 2 English words and 2 translations" {
+		t.Fatal(title)
+	}
+
+	// Identical lines already on the branch are rejected per row; a new gloss for an existing source is an override and goes through.
+	w = postWords(s, `{"kind":"english","entries":[{"word":"asr","display":"ASR"},{"word":"asr","display":"Asr"}],"token":"turnstile-token"}`)
+	rejected, _ := decodeBody(t, w)["rejected"].([]any)
+	if w.Code != 400 || len(rejected) != 1 || rejected[0].(map[string]any)["index"] != 0.0 || rejected[0].(map[string]any)["code"] != "already_listed" || rejected[0].(map[string]any)["reason"] != kindEnglish.listed {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = postWords(s, `{"kind":"translations","entries":[{"source":"苹果","gloss":"apple"},{"source":"香蕉","gloss":"banana"}],"token":"turnstile-token"}`)
+	rejected, _ = decodeBody(t, w)["rejected"].([]any)
+	if w.Code != 400 || len(rejected) != 2 || rejected[0].(map[string]any)["reason"] != kindTranslations.listed {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w = postWords(s, `{"kind":"translations","entries":[{"source":"苹果","gloss":"Apple"}],"token":"turnstile-token"}`); w.Code != 201 || !strings.HasSuffix(f.files["custom/translations.txt"].content, "苹果\tApple\n") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+func TestWordSubmissionMissingFiles(t *testing.T) {
+	// A file the repository does not have cannot be appended to; the submission fails before anything is written.
+	s, f, _ := wordsFixture(t)
+	delete(f.files, "custom/translations.txt")
+	if w := postWords(s, `{"kind":"translations","entries":[{"source":"苹果","gloss":"apple"}],"token":"turnstile-token"}`); w.Code != 503 || f.count("POST "+wordsTestRepo+"/git/refs") != 0 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// Counting for the title treats a missing file as empty, and a failed read leaves the title alone.
+	s, f, _ = wordsFixture(t)
+	f.pulls = []map[string]any{{"number": 9, "title": "old", "head": map[string]any{"ref": "community-words/20260915-080000", "repo": map[string]string{"full_name": "metasequoiaime/msime-dictionary"}}, "base": map[string]string{"ref": "main"}}}
+	delete(f.files, "custom/english.txt")
+	if w := postWords(s, validWords); w.Code != 201 || f.bodies["PATCH "+wordsTestRepo+"/pulls/9"]["title"] != "feat(custom): add 2 words" {
+		t.Fatal(w.Code, w.Body.String(), f.bodies["PATCH "+wordsTestRepo+"/pulls/9"])
+	}
+	for status, reason := range map[int]string{500: "status", 200: "response"} {
+		s, f, _ = wordsFixture(t)
+		f.pulls = []map[string]any{{"number": 9, "title": "old", "head": map[string]any{"ref": "community-words/20260915-080000", "repo": map[string]string{"full_name": "metasequoiaime/msime-dictionary"}}, "base": map[string]string{"ref": "main"}}}
+		f.status["GET "+wordsTestRepo+"/contents/custom/translations.txt"] = status
+		if w := postWords(s, validWords); w.Code != 201 || f.count("PATCH "+wordsTestRepo+"/pulls/9") != 0 {
+			t.Fatal(reason, w.Code, w.Body.String())
+		}
+	}
+	ws := s.words
+	ws.config.GitHub.APIURL = "http://127.0.0.1:1"
+	if _, err := ws.fileText(context.Background(), "token", "custom/english.txt", "main"); err == nil {
+		t.Fatal("unreachable GitHub read as a file")
+	}
+}
+
+func TestWordSubmissionWeightMedians(t *testing.T) {
+	s, f, _ := wordsFixture(t)
+	calls := filepath.Join(t.TempDir(), "calls")
+	// The Engine fails the first medians request and answers the second; listed checks always answer not listed.
+	s.config.Engine.Binary = fakeEngine(t, `request=$(cat); case "$request" in
+*pinyin_weight_medians*) echo x >> "`+calls+`"; if [ "$(wc -l < "`+calls+`")" -eq 1 ]; then exit 1; fi; echo '{"medians":{"1":0,"2":2205,"3":100,"8":12000,"9":7,"x":3}}';;
+*) echo '{"listed":[false,false]}';;
+esac`)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if w := postWords(s, validWords); w.Code != 201 || !strings.HasSuffix(f.content, "扛把子\tkang'ba'zi\t5000\n二〇二六\ter'ling'er'liu\t5000\n") {
+		t.Fatal("failed medians fall back to 5000", w.Code, f.content)
+	}
+	if w := postWords(s, `{"entries":[{"word":"堪堪","pinyin":"kan'kan"},{"word":"一丝不苟一丝不苟","pinyin":"yi'si'bu'gou'yi'si'bu'gou"}],"token":"turnstile-token"}`); w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// 2 syllables take the median; 8 syllables take the 8-and-more median, clamped to the base range 1..9000.
+	if !strings.HasSuffix(f.content, "堪堪\tkan'kan\t2205\n一丝不苟一丝不苟\tyi'si'bu'gou'yi'si'bu'gou\t9000\n") {
+		t.Fatalf("%q", f.content)
+	}
+	if w := postWords(s, `{"entries":[{"word":"鼎","pinyin":"ding"},{"word":"赫赫有名","pinyin":"he'he'you'ming"}],"token":"turnstile-token"}`); w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// A zero median is raised to the base minimum, and a syllable count without a median falls back.
+	if !strings.HasSuffix(f.content, "鼎\tding\t1\n赫赫有名\the'he'you'ming\t5000\n") {
+		t.Fatalf("%q", f.content)
+	}
+	raw, _ := os.ReadFile(calls)
+	if strings.Count(string(raw), "x") != 2 || strings.Count(logs.String(), "weight medians unavailable") != 1 {
+		t.Fatal("the medians are retried after a failure, cached after success, and the failure logged once", string(raw), logs.String())
+	}
+
+	// An empty or malformed answer is a failure too.
+	for _, script := range []string{`echo '{"medians":{}}'`, `echo 'nope'`} {
+		ws := &wordSubmitter{}
+		s.config.Engine.Binary = fakeEngine(t, "cat >/dev/null; "+script)
+		if medians := ws.weightMedians(context.Background(), s.config.Engine); medians != nil || ws.medians != nil {
+			t.Fatal(script, medians)
+		}
+	}
+}
+
+func TestWordSubmissionRejectsShippedEnglish(t *testing.T) {
+	s, f, _ := wordsFixture(t)
+	request := filepath.Join(t.TempDir(), "request.json")
+	s.config.Engine.Binary = fakeEngine(t, `cat > "`+request+`"; echo '{"listed":[true,false]}'`)
+	w := postWords(s, `{"kind":"english","entries":[{"word":"hello","display":"hello"},{"word":"hello","display":"Hello!"}],"token":"turnstile-token"}`)
+	rejected, _ := decodeBody(t, w)["rejected"].([]any)
+	if w.Code != 400 || len(rejected) != 1 || rejected[0].(map[string]any)["index"] != 0.0 || rejected[0].(map[string]any)["reason"] != kindEnglish.listed {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if raw, _ := os.ReadFile(request); string(raw) != `{"entries":[{"display":"hello","word":"hello"},{"display":"Hello!","word":"hello"}],"operation":"listed_english_batch"}` {
+		t.Fatal(string(raw))
+	}
+	if f.tokens != 0 {
+		t.Fatal("GitHub contacted for a shipped entry")
+	}
+	// Translations are not checked against the Engine: overriding what it ships is their purpose.
+	s.config.Engine.Binary = fakeEngine(t, `cat >/dev/null; echo '{"listed":[true]}'`)
+	if w = postWords(s, `{"kind":"translations","entries":[{"source":"苹果","gloss":"apple fruit"}],"token":"turnstile-token"}`, func(r *http.Request) { r.RemoteAddr = "198.51.100.8:1" }); w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }
