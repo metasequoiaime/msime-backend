@@ -141,7 +141,7 @@ func TestEveryAccountRouteAuthenticationAndDisabledService(t *testing.T) {
 
 func TestProviderDiscoveryAndMalformedAuthenticationBodies(t *testing.T) {
 	db := testStore(t)
-	a := &Service{store: db, config: Config{Google: OIDCConfig{ClientIDs: []string{"test-client"}}, Email: MailConfig{From: "test@example.test"}}}
+	a := &Service{store: db, config: Config{Google: GoogleConfig{ClientIDs: []string{"test-client"}}, Email: MailConfig{From: "test@example.test"}}}
 	mux := http.NewServeMux()
 	Mount(mux, a)
 	w := apiRequest(t, mux, "GET", "/v1/auth/providers", "", "", 200)

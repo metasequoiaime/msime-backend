@@ -54,8 +54,8 @@ tokens=obj({'access_token':string(),'refresh_token':string(),'token_type':string
 provider=string(enum=['apple','google','wechat','phone','email'])
 auth_operations=[
  ('/v1/auth/providers','get','查询可用登录方式',None,obj({'providers':obj({p:{'type':'boolean'} for p in ['apple','google','wechat','phone','email']})}),False,200),
- ('/v1/auth/challenges','post','创建登录或绑定挑战',obj({'provider':provider,'target':string(description='邮箱地址或 E.164 手机号；第三方登录省略。'),'purpose':string(enum=['login','link'],default='login')},['provider'],True),obj({'challenge_id':string(),'expires_in':{'type':'integer'},'nonce':string(),'authorization_url':string()}),False,201),
- ('/v1/auth/login','post','验证凭据并登录或绑定',obj({'challenge_id':string(),'credential':string(description='六位验证码、Apple/Google ID Token 或微信授权 code。')},['challenge_id','credential'],True),tokens,False,200),
+ ('/v1/auth/challenges','post','创建登录或绑定挑战',obj({'provider':provider,'target':string(description='邮箱地址或 E.164 手机号。Google 桌面端传本机回环回调地址 http://127.0.0.1:<端口>/callback 或 http://[::1]:<端口>/callback（端口 1024–65535），由服务端持有 PKCE 与客户端密钥换码，响应附带 authorization_url；地址不合规返回 invalid_target。其余第三方登录省略。'),'purpose':string(enum=['login','link'],default='login')},['provider'],True),obj({'challenge_id':string(),'expires_in':{'type':'integer'},'nonce':string(),'authorization_url':string()}),False,201),
+ ('/v1/auth/login','post','验证凭据并登录或绑定',obj({'challenge_id':string(),'credential':string(description='六位验证码、Apple/Google ID Token、Google 桌面回环回调收到的授权 code，或微信授权 code。')},['challenge_id','credential'],True),tokens,False,200),
  ('/v1/auth/refresh','post','轮换用户会话令牌',obj({'refresh_token':string()},['refresh_token'],True),tokens,False,200),
  ('/v1/auth/logout','post','退出当前或全部会话',obj({'all':{'type':'boolean','default':False}},strict=True),None,True,204),
  ('/v1/users/me','get','查询当前用户和已绑定身份',None,obj({'user':user,'identities':{'type':'array','items':obj({'provider':provider,'subject':string()})}}),True,200),

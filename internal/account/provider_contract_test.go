@@ -35,13 +35,13 @@ func TestProviderIdentityContracts(t *testing.T) {
 	}
 	for _, provider := range []string{"apple", "google"} {
 		a := &Service{verifiers: map[string]Verifier{provider: success}}
-		identity, err := a.identity(t.Context(), Challenge{Provider: provider, Nonce: "nonce"}, "token")
+		identity, _, err := a.identity(t.Context(), Challenge{Provider: provider, Nonce: "nonce"}, "token")
 		if err != nil || identity.Subject != "user" || identity.Provider != provider {
 			t.Fatal(identity, err)
 		}
 		for _, token := range []*oidc.IDToken{{Subject: "", Nonce: "nonce", IssuedAt: time.Now()}, {Subject: strings.Repeat("a", 256), Nonce: "nonce", IssuedAt: time.Now()}, {Subject: "user", Nonce: "wrong", IssuedAt: time.Now()}, {Subject: "user", Nonce: "nonce"}, {Subject: "user", Nonce: "nonce", IssuedAt: time.Now().Add(time.Hour)}} {
 			a.verifiers[provider] = contractVerifier(func(context.Context, string) (*oidc.IDToken, error) { return token, nil })
-			if _, err := a.identity(t.Context(), Challenge{Provider: provider, Nonce: "nonce"}, "token"); err != ErrInvalid {
+			if _, _, err := a.identity(t.Context(), Challenge{Provider: provider, Nonce: "nonce"}, "token"); err != ErrInvalid {
 				t.Fatal("invalid OIDC claims accepted", err)
 			}
 		}
@@ -58,19 +58,19 @@ func TestProviderIdentityContracts(t *testing.T) {
 			}
 			return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
 		})}}
-		id, err := a.identity(t.Context(), Challenge{Provider: "wechat"}, "code")
+		id, _, err := a.identity(t.Context(), Challenge{Provider: "wechat"}, "code")
 		if (err == nil) != tc.ok || (tc.ok && id.Subject != "app:person") {
 			t.Fatal(id, err)
 		}
 	}
 	a := &Service{client: &http.Client{Transport: contractTransport(func(*http.Request) (*http.Response, error) { return nil, errors.New("sensitive transport error") })}}
-	if _, err := a.identity(t.Context(), Challenge{Provider: "wechat"}, "code"); err == nil || strings.Contains(err.Error(), "sensitive") {
+	if _, _, err := a.identity(t.Context(), Challenge{Provider: "wechat"}, "code"); err == nil || strings.Contains(err.Error(), "sensitive") {
 		t.Fatal(err)
 	}
-	if _, err := a.identity(t.Context(), Challenge{Provider: "missing"}, "code"); err != ErrInvalid {
+	if _, _, err := a.identity(t.Context(), Challenge{Provider: "missing"}, "code"); err != ErrInvalid {
 		t.Fatal(err)
 	}
-	verifiers := makeVerifiers(t.Context(), Config{Apple: OIDCConfig{ClientIDs: []string{"apple"}}, Google: OIDCConfig{ClientIDs: []string{"google1", "google2"}}}, http.DefaultClient)
+	verifiers := makeVerifiers(t.Context(), Config{Apple: OIDCConfig{ClientIDs: []string{"apple"}}, Google: GoogleConfig{ClientIDs: []string{"google1", "google2"}}}, http.DefaultClient)
 	if len(verifiers) != 2 || len(verifiers["google"].(audienceVerifiers)) != 2 {
 		t.Fatal("audience configuration not applied")
 	}

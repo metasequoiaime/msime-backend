@@ -86,6 +86,7 @@
     "enabled": false,
     "database_env": "MSIME_DATABASE_URL",
     "pepper_env": "MSIME_AUTH_PEPPER",
+    "token_key_env": "MSIME_PROVIDER_TOKEN_KEY",
     "apple": {
       "client_ids": []
     },
@@ -94,7 +95,11 @@
       "daily_per_address": 5
     },
     "google": {
-      "client_ids": []
+      "client_ids": [],
+      "desktop": {
+        "client_id": "",
+        "secret_env": "MSIME_GOOGLE_DESKTOP_CLIENT_SECRET"
+      }
     },
     "wechat": {
       "app_id": "",

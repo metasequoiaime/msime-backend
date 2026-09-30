@@ -36,10 +36,12 @@
     ],
     "POST /v1/auth/challenges": [
       "internal/account/account_test.go::TestEmailHTTPFlowAndFailure",
+      "internal/account/google_exchange_test.go::TestGoogleExchangeAndIDTokenLoginsStoreProfileAndSealedRefreshToken",
       "internal/account/http_contract_test.go::TestProviderDiscoveryAndMalformedAuthenticationBodies"
     ],
     "POST /v1/auth/login": [
       "internal/account/account_test.go::TestEmailHTTPFlowAndFailure",
+      "internal/account/google_exchange_test.go::TestGoogleExchangeAndIDTokenLoginsStoreProfileAndSealedRefreshToken",
       "internal/account/http_contract_test.go::TestProviderDiscoveryAndMalformedAuthenticationBodies"
     ],
     "POST /v1/auth/refresh": [

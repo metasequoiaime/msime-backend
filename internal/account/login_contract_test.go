@@ -16,7 +16,7 @@ func TestProviderLoginAndIdentityLinkHTTP(t *testing.T) {
 	db := testStore(t)
 	sender := &captureSender{}
 	t.Setenv("LOGIN_TEST_PEPPER", strings.Repeat("p", 32))
-	a := &Service{store: db, sender: sender, config: Config{PepperEnv: "LOGIN_TEST_PEPPER", Google: OIDCConfig{ClientIDs: []string{"client"}}, SMS: SMSConfig{TemplateCode: "test"}, Wechat: WechatConfig{AppID: "test-app", RedirectURI: "https://example.test/callback"}}}
+	a := &Service{store: db, sender: sender, config: Config{PepperEnv: "LOGIN_TEST_PEPPER", Google: GoogleConfig{ClientIDs: []string{"client"}}, SMS: SMSConfig{TemplateCode: "test"}, Wechat: WechatConfig{AppID: "test-app", RedirectURI: "https://example.test/callback"}}}
 	mux := http.NewServeMux()
 	Mount(mux, a)
 	owner := complete(t, db, Identity{"email", "owner@example.test"})

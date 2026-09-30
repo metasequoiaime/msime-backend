@@ -208,13 +208,13 @@ func TestOIDCSignatureAudienceIssuerNonceAndExpiry(t *testing.T) {
 			b, _ := json.Marshal(map[string]any{"iss": test.issuer, "aud": test.aud, "nonce": test.nonce, "sub": test.sub, "exp": test.expiry, "iat": time.Now().Unix()})
 			signed, _ := signer.Sign(b)
 			token, _ := signed.CompactSerialize()
-			_, e := a.identity(context.Background(), Challenge{Provider: "google", Nonce: "nonce"}, token)
+			_, _, e := a.identity(context.Background(), Challenge{Provider: "google", Nonce: "nonce"}, token)
 			if (e == nil) != test.valid {
 				t.Fatal(e)
 			}
 		})
 	}
-	if _, e = a.identity(context.Background(), Challenge{Provider: "google", Nonce: "nonce"}, "eyJhbGciOiJub25lIn0.e30."); e == nil {
+	if _, _, e = a.identity(context.Background(), Challenge{Provider: "google", Nonce: "nonce"}, "eyJhbGciOiJub25lIn0.e30."); e == nil {
 		t.Fatal("不能接受无签名令牌")
 	}
 }

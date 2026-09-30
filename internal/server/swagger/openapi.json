@@ -1473,7 +1473,7 @@
                   },
                   "target": {
                     "type": "string",
-                    "description": "邮箱地址或 E.164 手机号；第三方登录省略。"
+                    "description": "邮箱地址或 E.164 手机号。Google 桌面端传本机回环回调地址 http://127.0.0.1:<端口>/callback 或 http://[::1]:<端口>/callback（端口 1024–65535），由服务端持有 PKCE 与客户端密钥换码，响应附带 authorization_url；地址不合规返回 invalid_target。其余第三方登录省略。"
                   },
                   "purpose": {
                     "type": "string",
@@ -1628,7 +1628,7 @@
                   },
                   "credential": {
                     "type": "string",
-                    "description": "六位验证码、Apple/Google ID Token 或微信授权 code。"
+                    "description": "六位验证码、Apple/Google ID Token、Google 桌面回环回调收到的授权 code，或微信授权 code。"
                   }
                 },
                 "required": [
