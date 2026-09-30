@@ -1052,6 +1052,10 @@ func TestCommunityCandidateSkinSchemaUpgrade(t *testing.T) {
 	}
 	id := "dd334455-1234-4234-8234-123456789abc"
 	insertCandidateSkin(t, db, id, owner.User.ID, "released")
+	// The released row was published a while before the upgrade runs.
+	if _, err = db.pool.Exec(t.Context(), `UPDATE community_candidate_skins SET created_at=now()-interval '3 days' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
 	for range 2 {
 		if err = db.Migrate(t.Context()); err != nil {
 			t.Fatal(err)
@@ -1059,8 +1063,9 @@ func TestCommunityCandidateSkinSchemaUpgrade(t *testing.T) {
 	}
 	var visibility string
 	var constraints int
-	if err = db.pool.QueryRow(t.Context(), `SELECT visibility,(SELECT count(*) FROM pg_constraint WHERE conrelid='community_candidate_skins'::regclass AND conname LIKE 'community_candidate_skins_license%') FROM community_candidate_skins WHERE id=$1`, id).Scan(&visibility, &constraints); err != nil || visibility != "public" || constraints != 1 {
-		t.Fatal("upgrade", visibility, constraints, err)
+	var sincePublish bool
+	if err = db.pool.QueryRow(t.Context(), `SELECT visibility,(SELECT count(*) FROM pg_constraint WHERE conrelid='community_candidate_skins'::regclass AND conname LIKE 'community_candidate_skins_license%'),updated_at=created_at FROM community_candidate_skins WHERE id=$1`, id).Scan(&visibility, &constraints, &sincePublish); err != nil || visibility != "public" || constraints != 1 || !sincePublish {
+		t.Fatal("upgrade", visibility, constraints, sincePublish, err)
 	}
 	skin := func(id, assets, visibility string) string {
 		return `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,version,license_assets,manifest,preview_path,request_sha256,visibility) VALUES('` + id + `',$1,'shared','n','1','` + assets + `','m','p.png','` + strings.Repeat("a", 64) + `','` + visibility + `')`

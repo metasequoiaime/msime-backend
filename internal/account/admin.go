@@ -133,7 +133,7 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 		"skins":           `SELECT s.id,s.name,s.description,s.owner_id,s.created_at,(SELECT count(*) FROM community_skin_downloads WHERE skin_id=s.id) AS downloads FROM community_skins s`,
 		"dictionaries":    `SELECT id,name,description,owner_id,revision,created_at,updated_at,jsonb_array_length(content->'entries') AS entries,(SELECT count(*) FROM community_resource_saves WHERE resource_id=community_resources.id) AS saves FROM community_resources WHERE kind='dictionary'`,
 		"replies":         `SELECT id,name,description,owner_id,revision,created_at,updated_at,content->>'prompt' AS prompt FROM community_resources WHERE kind='reply'`,
-		"candidate-skins": `SELECT s.id,s.package_id,s.name,COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'||upper(left(u.id,6))) AS author,(SELECT COALESCE(sum(size),0) FROM community_candidate_skin_files WHERE skin_id=s.id) AS size,(SELECT count(*) FROM community_candidate_skin_files WHERE skin_id=s.id) AS file_count,s.created_at FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id`,
+		"candidate-skins": `SELECT s.id,s.package_id,s.name,COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'||upper(left(u.id,6))) AS author,(SELECT COALESCE(sum(size),0) FROM community_candidate_skin_files WHERE skin_id=s.id) AS size,(SELECT count(*) FROM community_candidate_skin_files WHERE skin_id=s.id) AS file_count,s.visibility,s.created_at,s.updated_at FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id`,
 		"downloads":       `SELECT id,platform,version,created_at FROM admin_events WHERE kind='download'`,
 		"crashes":         `SELECT id,platform,version,message,stack,resolved,created_at FROM admin_events WHERE kind='crash'`,
 		"audit":           `SELECT id,actor,action,target,created_at FROM admin_audit`,
@@ -145,7 +145,9 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	platform, version, status := r.URL.Query().Get("platform"), r.URL.Query().Get("version"), r.URL.Query().Get("status")
 	action, actor := r.URL.Query().Get("action"), r.URL.Query().Get("actor")
-	if len(platform) > 32 || len(version) > 64 || len(action) > 64 || len(actor) > 200 || (status != "" && status != "open" && status != "resolved") || (status != "" && path != "crashes") || ((platform != "" || version != "") && path != "crashes" && path != "downloads") || ((action != "" || actor != "") && path != "audit") {
+	// Candidate skins hold both the public gallery and each account's private library, so moderation can list either one.
+	visibility := r.URL.Query().Get("visibility")
+	if len(platform) > 32 || len(version) > 64 || len(action) > 64 || len(actor) > 200 || (status != "" && status != "open" && status != "resolved") || (status != "" && path != "crashes") || ((platform != "" || version != "") && path != "crashes" && path != "downloads") || ((action != "" || actor != "") && path != "audit") || (visibility != "" && visibility != "public" && visibility != "private") || (visibility != "" && path != "candidate-skins") {
 		writeError(w, 400, "invalid_filter")
 		return
 	}
@@ -159,9 +161,10 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
  AND ($5='' OR to_jsonb(x)->>'resolved'=CASE WHEN $5='resolved' THEN 'true' ELSE 'false' END)
  AND ($6='' OR to_jsonb(x)->>'action'=$6)
  AND ($7='' OR to_jsonb(x)->>'actor' ILIKE '%'||$7||'%')
+ AND ($9='' OR to_jsonb(x)->>'visibility'=$9)
 ), selected AS (SELECT * FROM filtered ORDER BY created_at DESC,id DESC LIMIT 50 OFFSET $2)
 SELECT json_build_object('items', COALESCE((SELECT json_agg(item ORDER BY created_at DESC,id DESC) FROM selected),'[]'::json),
- 'page',$8::int,'total',(SELECT count(*) FROM filtered),'has_more',(SELECT count(*) FROM filtered)>$2+50)`, search, (page-1)*50, platform, version, status, action, actor, page).Scan(&result)
+ 'page',$8::int,'total',(SELECT count(*) FROM filtered),'has_more',(SELECT count(*) FROM filtered)>$2+50)`, search, (page-1)*50, platform, version, status, action, actor, page, visibility).Scan(&result)
 	if err != nil {
 		a.error(w, err)
 		return

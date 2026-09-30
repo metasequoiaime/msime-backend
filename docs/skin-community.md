@@ -119,6 +119,6 @@ msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID
 GRANT SELECT, INSERT, UPDATE, DELETE ON community_candidate_skins, community_candidate_skin_files, community_candidate_skin_downloads, community_candidate_skin_ratings TO msime_backend;
 ```
 
-先迁移再滚动更新，旧二进制不读这四张表。加入私有作品的版本在启动时给 `community_candidate_skins` 增加 `visibility`（已有行为 `public`）和 `updated_at` 两列，并把 license assets 的列约束换成命名约束 `community_candidate_skins_license_check`（公开行要求非空，私有行可为空），重复执行不会改变任何东西；旧二进制仍能读写这张表。但旧二进制不认识 `visibility`，会把私有作品当公开作品列出和下发，所以必须等所有副本都换成新版本后再让客户端开始同步私有作品，回滚到旧版本前也要先处理私有行。每个账号满额时约占 200 MiB bytea（100 款，每款最多 2 MiB 图片），需计入数据库容量与备份。账号注销级联删除作品、图片、评分和下载记录。
+先迁移再滚动更新，旧二进制不读这四张表。加入私有作品的版本在启动时给 `community_candidate_skins` 增加 `visibility`（已有行为 `public`）和 `updated_at`（已有行取其 `created_at`）两列，并把 license assets 的列约束换成命名约束 `community_candidate_skins_license_check`（公开行要求非空，私有行可为空），重复执行不会改变任何东西；旧二进制仍能读写这张表。但旧二进制不认识 `visibility`，会把私有作品当公开作品列出和下发，所以必须等所有副本都换成新版本后再让客户端开始同步私有作品，回滚到旧版本前也要先处理私有行。每个账号满额时约占 200 MiB bytea（100 款，每款最多 2 MiB 图片），需计入数据库容量与备份。账号注销级联删除作品、图片、评分和下载记录。
 
-公开作品发布即公开，不做事前审核。管理后台 API 提供 `GET /api/candidate-skins`、`GET /api/candidate-skins/{id}`（元数据、清单文本和每个文件的路径、大小、SHA-256，不含图片字节）和审计过的 `delete_candidate_skin` 操作用于事后下架；管理后台网页暂未提供对应页面。
+公开作品发布即公开，不做事前审核。管理后台 API 提供 `GET /api/candidate-skins`（可用 `visibility=public|private` 筛选）、`GET /api/candidate-skins/{id}`（元数据、可见性、清单文本和每个文件的路径、大小、SHA-256，不含图片字节）和审计过的 `delete_candidate_skin` 操作用于事后下架；管理后台网页暂未提供对应页面。

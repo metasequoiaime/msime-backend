@@ -99,10 +99,12 @@ func TestAdminContentDetails(t *testing.T) {
 			Size   int    `json:"size"`
 			SHA256 string `json:"sha256"`
 		} `json:"files"`
-		Downloads int     `json:"downloads"`
-		Rating    float64 `json:"rating_average"`
+		Downloads  int     `json:"downloads"`
+		Rating     float64 `json:"rating_average"`
+		Visibility string  `json:"visibility"`
+		UpdatedAt  string  `json:"updated_at"`
 	}
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.Owner != user.User.ID || detail.PackageID != "shared" || detail.Content != manifest || detail.License.Assets != "CC-BY-4.0" || len(detail.Files) != 2 || detail.Files[0].Path != "assets/deco.jpg" || detail.Downloads != 1 || detail.Rating != 3 {
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.Visibility != "public" || detail.UpdatedAt == "" || detail.Owner != user.User.ID || detail.PackageID != "shared" || detail.Content != manifest || detail.License.Assets != "CC-BY-4.0" || len(detail.Files) != 2 || detail.Files[0].Path != "assets/deco.jpg" || detail.Downloads != 1 || detail.Rating != 3 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	for _, f := range detail.Files {

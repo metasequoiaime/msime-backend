@@ -20,7 +20,14 @@ CREATE TABLE IF NOT EXISTS community_candidate_skins (
 );
 -- Databases created before private rows existed: every existing row stays public, and the column-level license check that required assets on every row is replaced by the named one below.
 ALTER TABLE community_candidate_skins ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'public' CHECK(visibility IN ('private','public'));
-ALTER TABLE community_candidate_skins ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+-- A released row was last changed when it was published, so updated_at starts from created_at rather than from the migration time.
+DO $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='community_candidate_skins'::regclass AND attname='updated_at' AND NOT attisdropped) THEN
+  ALTER TABLE community_candidate_skins ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();
+  UPDATE community_candidate_skins SET updated_at=created_at;
+ END IF;
+END $$;
 ALTER TABLE community_candidate_skins DROP CONSTRAINT IF EXISTS community_candidate_skins_license_assets_check;
 DO $$
 BEGIN
