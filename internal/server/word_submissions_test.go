@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -664,6 +665,9 @@ func TestWordSubmissionGitHubFailuresBeforeWriting(t *testing.T) {
 
 func fakeEngine(t *testing.T, script string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake Engine is a POSIX shell script")
+	}
 	path := filepath.Join(t.TempDir(), "msime-engine")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
 		t.Fatal(err)
