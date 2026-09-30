@@ -249,6 +249,11 @@ for path,method,title,body,response in [
     if body: operation['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     if method=='post': operation['responses']['201']=operation['responses']['200']
     paths.setdefault(path,{})[method]=operation
+count=lambda description:{'type':'integer','minimum':0,'description':description}
+community_stats=obj({'skins':count('已发布的用户皮肤数'),'skin_downloads':count('皮肤下载人次（按账号和皮肤去重）'),'dictionaries':count('已发布的共享词库数'),'replies':count('已发布的回复模板数'),'resource_saves':count('词库与回复模板收藏人次（按账号和作品去重）'),'generated_at':string(format='date-time',description='数据库统计时间（UTC）')},['skins','skin_downloads','dictionaries','replies','resource_saves','generated_at'])
+paths['/v1/community/stats']={'get':{'summary':'社区内容统计','tags':['创作社区'],'security':[],
+    'description':'公开只读，供官网展示。只统计社区作品与去重后的下载、收藏人次，不含用户数和安装包上报；注销账号的作品与互动随之移除。响应禁用缓存，调用方自行缓存。',
+    'responses':{'200':{'description':'成功','content':{'application/json':{'schema':community_stats}}},'429':{'description':'请求过多','headers':{'Retry-After':{'description':'重试等待秒数','schema':{'type':'integer'}}}},'503':{'description':'用户体系未启用或数据库不可用'}}}}
 
 # Anonymous website word form (msime-web#213). Errors here use a plain-string error plus code, which the website form reads.
 word_error=obj({'error':string(description='可直接展示给用户的中文说明。'),'code':string()},['error','code'])

@@ -125,6 +125,7 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"DELETE /v1/community/resources/{id}":     (*Service).resourceDelete,
 		"PUT /v1/community/resources/{id}/save":   (*Service).resourceSave,
 		"PUT /v1/community/resources/{id}/rating": (*Service).resourceRate,
+		"GET /v1/community/stats":                 (*Service).communityStats,
 		"GET /v1/community/skins":                 (*Service).communityList,
 		"POST /v1/community/skins":                (*Service).communityPublish,
 		"GET /v1/community/skins/{id}":            (*Service).communityDetail,
