@@ -33,6 +33,9 @@ var translationSchema string
 
 //go:embed candidate_skin_schema.sql
 var candidateSkinSchema string
+
+//go:embed community_candidate_skin_schema.sql
+var communityCandidateSkinSchema string
 var ErrInvalid = errors.New("invalid_credentials")
 var ErrLimited = errors.New("rate_limit_exceeded")
 var ErrConflict = errors.New("identity_already_linked")
@@ -121,7 +124,7 @@ func (s *Store) MigrateAs(ctx context.Context, role string) error {
 			return e
 		}
 	}
-	if _, e = tx.Exec(ctx, schema+"\n"+userDataSchema+"\n"+communitySchema+"\n"+adminSchema+"\n"+translationSchema+"\n"+candidateSkinSchema); e != nil {
+	if _, e = tx.Exec(ctx, schema+"\n"+userDataSchema+"\n"+communitySchema+"\n"+adminSchema+"\n"+translationSchema+"\n"+candidateSkinSchema+"\n"+communityCandidateSkinSchema); e != nil {
 		return e
 	}
 	return tx.Commit(ctx)
@@ -146,7 +149,11 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_skin_ratings sr ON sr.user_id=u.id
  LEFT JOIN translation_cache tc ON false
  LEFT JOIN candidate_skins ck ON false
- LEFT JOIN candidate_skin_resources ckr ON false WHERE false`).Scan(&n)
+ LEFT JOIN candidate_skin_resources ckr ON false
+ LEFT JOIN community_candidate_skins ccs ON ccs.owner_id=u.id
+ LEFT JOIN community_candidate_skin_files ccf ON false
+ LEFT JOIN community_candidate_skin_downloads ccd ON ccd.user_id=u.id
+ LEFT JOIN community_candidate_skin_ratings ccr ON ccr.user_id=u.id WHERE false`).Scan(&n)
 }
 func (s *Store) Rate(ctx context.Context, key string, limit int, window time.Duration) error {
 	var n int

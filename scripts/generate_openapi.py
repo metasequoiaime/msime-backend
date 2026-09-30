@@ -227,6 +227,31 @@ for path,method,title,body,response,status in [
     if body: operation['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     if path=='/v1/community/skins' and method=='post': operation['responses']['200']={'description':'同一发布请求的安全重试','content':{'application/json':{'schema':response}}}
     paths.setdefault(path,{})[method]=operation
+# 候选窗皮肤包：skin.toml 加 PNG/JPEG，与 /v1/skins 精选目录分表，服务端重新编码图片。
+candidate_license = obj({'code':string(),'assets':string(),'source':string()},['code','assets','source'])
+community_candidate_skin = obj({'id':string(format='uuid'),'package_id':string(pattern='^[a-z0-9][a-z0-9._-]{0,63}$'),'name':string(),'description':string(),'author':string(),'version':string(),'license':candidate_license,'size':{'type':'integer','description':'重新编码后的图片总字节数'},'file_count':{'type':'integer','description':'图片数量，不含 skin.toml'},'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'created_at':string(format='date-time')})
+candidate_files = {'type':'object','minProperties':1,'maxProperties':3,'additionalProperties':string(format='byte'),'description':'键为包内相对路径（仅 png/jpg/jpeg），值为标准 base64。'}
+community_candidate_skin_publish = obj({'id':string(format='uuid'),'name':string(minLength=1,maxLength=32),'description':string(maxLength=280),'manifest':string(maxLength=65536,description='原样的 skin.toml 文本'),'files':candidate_files},['id','name','description','manifest','files'],True)
+community_candidate_skin_package = obj({'id':string(format='uuid'),'package_id':string(),'manifest':string(),'files':candidate_files})
+candidate_rules='只接受 skin.toml 加 PNG/JPEG 图片（最多 3 个文件，均须被清单引用）：单个图片不超过 1 MiB、合计不超过 2 MiB，每边 1 到 2048 像素、整包不超过 800 万像素；必须用 preview 指定一张包内图片作为预览图（重新编码后不超过 256 KiB），[license] 必须填写非空 assets。服务器解码后重新编码图片，去除 EXIF、XMP、ICC 等元数据。'
+for path,method,title,body,response,status,description in [
+ ('/v1/community/candidate-skins','get','浏览候选窗皮肤',None,obj({'skins':{'type':'array','maxItems':20,'items':community_candidate_skin},'has_more':{'type':'boolean'}}),'200','公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，需要用户会话。'),
+ ('/v1/community/candidate-skins','post','发布候选窗皮肤包',community_candidate_skin_publish,community_candidate_skin,'201','请求最多 3,200,000 字节（高于其他 JSON 接口的 64 KiB）。'+candidate_rules+'id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 款，每小时最多发布 10 次。发布后不能修改，更新请发布新作品。'),
+ ('/v1/community/candidate-skins/{id}','get','候选窗皮肤详情',None,community_candidate_skin,'200','公开详情；登录时额外返回自己的评分与是否为作者。'),
+ ('/v1/community/candidate-skins/{id}','delete','作者下架候选窗皮肤',None,obj({'deleted':{'type':'boolean'}}),'200','仅作者可下架，连带删除图片、下载和评分记录。'),
+ ('/v1/community/candidate-skins/{id}/preview','get','候选窗皮肤预览图',None,obj({'path':string(),'content_type':string(enum=['image/png','image/jpeg']),'data':string(format='byte')}),'200','公开返回重新编码后的预览图，data 为标准 base64。'),
+ ('/v1/community/candidate-skins/{id}/download','post','下载候选窗皮肤包并去重计数',None,community_candidate_skin_package,'200','返回原样清单和重新编码后的图片；下载人数按账号去重。'),
+ ('/v1/community/candidate-skins/{id}/rating','put','为候选窗皮肤评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200','评分需先下载且不能自评，重复提交更新同一条评分。'),
+]:
+    parameters=[]
+    if '{id}' in path: parameters.append({'name':'id','in':'path','required':True,'schema':string(format='uuid')})
+    elif method=='get': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},{'name':'scope','in':'query','schema':string(enum=['','mine'],default='')}]
+    operation={'summary':title,'tags':['皮肤社区'],'security':[] if method=='get' else [{'userSession':[]}],'parameters':parameters,
+      'description':description+' 详见 docs/skin-community.md。',
+      'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数、清单或图片无效'),('401','需要用户登录'),('403','尚未下载或正在评价自己的作品'),('404','皮肤不存在或非作者'),('409','发布配额已满或 UUID 冲突'),('415','需要 application/json'),('429','请求过多'),('503','服务不可用或图片处理繁忙')]}}}
+    if body: operation['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
+    if path=='/v1/community/candidate-skins' and method=='post': operation['responses']['200']={'description':'同一发布请求的安全重试','content':{'application/json':{'schema':response}}}
+    paths.setdefault(path,{})[method]=operation
 
 shared_word = obj({'kind':string(enum=['pinyin','wubi','english','quick']),'code':string(maxLength=512),'word':string(maxLength=2048),'weight':{'type':'integer','minimum':0}},['kind','code','word','weight'],True)
 resource_content = obj({'entries':{'type':'array','minItems':1,'maxItems':128,'items':shared_word},'prompt':string(minLength=1,maxLength=2000)},[],True)

@@ -62,6 +62,8 @@ func testUserDataTransactions(t *testing.T, native bool) {
 		clipboard      string
 		skin, resource string
 		revision       int64
+		// foreignCandidate is another account's candidate skin the fixture user has downloaded, so rating it succeeds.
+		foreignCandidate string
 	}
 	seed := func(t *testing.T) fixture {
 		t.Helper()
@@ -85,6 +87,13 @@ func testUserDataTransactions(t *testing.T, native bool) {
 		if _, err := db.pool.Exec(t.Context(), `INSERT INTO community_resources(id,owner_id,kind,name,description,content) VALUES($1,$2,'reply','reply','','{"prompt":"hello"}')`, id, uid); err != nil {
 			t.Fatal(err)
 		}
+		insertCandidateSkin(t, db, id, uid, "candidate")
+		author := complete(t, db, Identity{"email", randomToken() + "@example.test"})
+		foreign := randomToken()[:8] + "-1234-1234-1234-" + randomToken()[:12]
+		insertCandidateSkin(t, db, foreign, author.User.ID, "foreign candidate")
+		if _, err := db.pool.Exec(t.Context(), `INSERT INTO community_candidate_skin_downloads(skin_id,user_id) VALUES($1,$2)`, foreign, uid); err != nil {
+			t.Fatal(err)
+		}
 		revision := int64(1)
 		if native {
 			for i, word := range []string{"测试首词", "测试次词"} {
@@ -97,21 +106,24 @@ func testUserDataTransactions(t *testing.T, native bool) {
 				t.Fatal(err)
 			}
 		}
-		return fixture{user, *change.Replacement, item.ID, id, id, revision}
+		return fixture{user, *change.Replacement, item.ID, id, id, revision, foreign}
 	}
 	snapshot := func(t *testing.T, uid string) string {
 		t.Helper()
 		var all strings.Builder
-		for _, table := range []string{"auth_users", "user_dictionary_state", "user_dictionary_entries", "user_dictionary_changes", "user_dictionary_overlay", "user_candidate_positions", "user_candidate_selections", "user_clipboard_settings", "user_clipboard", "user_preferences", "auth_sessions", "community_skins", "community_resources", "community_skin_downloads", "community_resource_saves", "admin_members", "admin_sessions", "admin_audit"} {
+		for _, table := range []string{"auth_users", "user_dictionary_state", "user_dictionary_entries", "user_dictionary_changes", "user_dictionary_overlay", "user_candidate_positions", "user_candidate_selections", "user_clipboard_settings", "user_clipboard", "user_preferences", "auth_sessions", "community_skins", "community_resources", "community_skin_downloads", "community_resource_saves", "community_candidate_skins", "community_candidate_skin_files", "community_candidate_skin_downloads", "community_candidate_skin_ratings", "admin_members", "admin_sessions", "admin_audit"} {
 			var raw string
 			column := "user_id"
 			if table == "auth_users" {
 				column = "id"
 			}
-			if table == "community_skins" || table == "community_resources" {
+			if table == "community_skins" || table == "community_resources" || table == "community_candidate_skins" {
 				column = "owner_id"
 			}
 			where := ` WHERE ` + column + `=$1`
+			if table == "community_candidate_skin_files" {
+				where = ` WHERE skin_id IN (SELECT id FROM community_candidate_skins WHERE owner_id=$1)`
+			}
 			args := []any{uid}
 			if strings.HasPrefix(table, "admin_") {
 				where = ""
@@ -161,6 +173,7 @@ func testUserDataTransactions(t *testing.T, native bool) {
 		"refresh": func(s *Store, f fixture) error { _, e := s.Refresh(t.Context(), f.user.RefreshToken); return e },
 	}
 
+	candidateManifest, candidateFiles := candidateFixture(t, "shared")
 	// Exercise handlers directly so the IP rate-limit write does not mask faults
 	// in the endpoint's own transaction. Authentication still uses PostgreSQL.
 	for name, spec := range map[string]struct {
@@ -178,22 +191,28 @@ func testUserDataTransactions(t *testing.T, native bool) {
 		"update resource": {"POST", (*Service).resourcePublish, func(f fixture) string {
 			return `{"id":"` + f.resource + `","kind":"reply","name":"changed","content":{"prompt":"changed"},"revision":1}`
 		}, 200},
-		"download skin":    {"POST", (*Service).communityDownload, func(f fixture) string { return `{}` }, 200},
-		"delete skin":      {"DELETE", (*Service).communityDelete, func(f fixture) string { return `` }, 200},
-		"delete resource":  {"DELETE", (*Service).resourceDelete, func(f fixture) string { return `` }, 200},
-		"save resource":    {"PUT", (*Service).resourceSave, func(f fixture) string { return `{"saved":true}` }, 200},
-		"unsave resource":  {"PUT", (*Service).resourceSave, func(f fixture) string { return `{"saved":false}` }, 200},
-		"profile read":     {"GET", (*Service).me, func(f fixture) string { return `` }, 200},
-		"preferences read": {"GET", (*Service).preferences, func(f fixture) string { return `` }, 200},
-		"positions read":   {"GET", (*Service).candidatePositions, func(f fixture) string { return `` }, 200},
-		"dictionary read":  {"GET", (*Service).dictionary, func(f fixture) string { return `` }, 200},
-		"changes read":     {"GET", (*Service).dictionaryChanges, func(f fixture) string { return `` }, 200},
-		"clipboard read":   {"GET", (*Service).clipboard, func(f fixture) string { return `` }, 200},
-		"profile update":   {"PATCH", (*Service).update, func(f fixture) string { return `{"display_name":"changed"}` }, 204},
-		"logout":           {"POST", (*Service).logout, func(f fixture) string { return `{}` }, 204},
-		"positions update": {"PUT", (*Service).candidatePositions, func(f fixture) string { return `{"revision":1,"context":"hi","code":"hi","word":"hello","position":1}` }, 200},
-		"clipboard append": {"POST", (*Service).clipboard, func(f fixture) string { return `{"text":"new text"}` }, 200},
-		"clipboard clear":  {"DELETE", (*Service).clipboard, func(f fixture) string { return `` }, 204},
+		"publish candidate skin": {"POST", (*Service).communityCandidatePublish, func(f fixture) string {
+			return candidatePublishBody(t, randomToken()[:8]+"-1234-1234-1234-"+randomToken()[:12], "new", candidateManifest, candidateFiles)
+		}, 201},
+		"download candidate skin": {"POST", (*Service).communityCandidateDownload, func(f fixture) string { return `` }, 200},
+		"rate candidate skin":     {"PUT", (*Service).communityCandidateRate, func(f fixture) string { return `{"stars":4}` }, 200},
+		"delete candidate skin":   {"DELETE", (*Service).communityCandidateDelete, func(f fixture) string { return `` }, 200},
+		"download skin":           {"POST", (*Service).communityDownload, func(f fixture) string { return `{}` }, 200},
+		"delete skin":             {"DELETE", (*Service).communityDelete, func(f fixture) string { return `` }, 200},
+		"delete resource":         {"DELETE", (*Service).resourceDelete, func(f fixture) string { return `` }, 200},
+		"save resource":           {"PUT", (*Service).resourceSave, func(f fixture) string { return `{"saved":true}` }, 200},
+		"unsave resource":         {"PUT", (*Service).resourceSave, func(f fixture) string { return `{"saved":false}` }, 200},
+		"profile read":            {"GET", (*Service).me, func(f fixture) string { return `` }, 200},
+		"preferences read":        {"GET", (*Service).preferences, func(f fixture) string { return `` }, 200},
+		"positions read":          {"GET", (*Service).candidatePositions, func(f fixture) string { return `` }, 200},
+		"dictionary read":         {"GET", (*Service).dictionary, func(f fixture) string { return `` }, 200},
+		"changes read":            {"GET", (*Service).dictionaryChanges, func(f fixture) string { return `` }, 200},
+		"clipboard read":          {"GET", (*Service).clipboard, func(f fixture) string { return `` }, 200},
+		"profile update":          {"PATCH", (*Service).update, func(f fixture) string { return `{"display_name":"changed"}` }, 204},
+		"logout":                  {"POST", (*Service).logout, func(f fixture) string { return `{}` }, 204},
+		"positions update":        {"PUT", (*Service).candidatePositions, func(f fixture) string { return `{"revision":1,"context":"hi","code":"hi","word":"hello","position":1}` }, 200},
+		"clipboard append":        {"POST", (*Service).clipboard, func(f fixture) string { return `{"text":"new text"}` }, 200},
+		"clipboard clear":         {"DELETE", (*Service).clipboard, func(f fixture) string { return `` }, 204},
 	} {
 		operations[name] = func(s *Store, f fixture) error {
 			r := jsonRequest(spec.method, "/test", spec.body(f), f.user.AccessToken)
@@ -201,6 +220,9 @@ func testUserDataTransactions(t *testing.T, native bool) {
 			r.SetPathValue("kind", "quick")
 			if name == "clipboard clear" {
 				r.SetPathValue("id", "")
+			}
+			if name == "rate candidate skin" {
+				r.SetPathValue("id", f.foreignCandidate)
 			}
 			w := httptest.NewRecorder()
 			spec.handler(&Service{store: s}, w, r)

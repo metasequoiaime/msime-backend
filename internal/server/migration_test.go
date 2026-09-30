@@ -80,14 +80,14 @@ func TestStartupMigratesAnEmptyDatabase(t *testing.T) {
 	var tables int
 	if err = admin.QueryRow(context.Background(), `SELECT count(*) FROM information_schema.tables
  WHERE table_schema=$1 AND table_name IN
- ('auth_users','user_preferences','user_dictionary_entries','community_skins','admin_members','translation_cache','candidate_skins','candidate_skin_resources')`,
+ ('auth_users','user_preferences','user_dictionary_entries','community_skins','admin_members','translation_cache','candidate_skins','candidate_skin_resources','community_candidate_skins','community_candidate_skin_files','community_candidate_skin_downloads','community_candidate_skin_ratings')`,
 		schema).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
 	s.CloseAccounts()
 	s.Close()
-	if tables != 8 {
-		t.Fatalf("startup migration created %d of 8 expected tables", tables)
+	if tables != 12 {
+		t.Fatalf("startup migration created %d of 12 expected tables", tables)
 	}
 
 	// 再起一次。迁移必须可重复执行 —— 多副本滚动升级时每个副本都会走这条路。

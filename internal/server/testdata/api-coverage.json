@@ -251,6 +251,29 @@
     "PUT /v1/community/skins/{id}/rating": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
     ],
+    "GET /v1/community/candidate-skins": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinBoundaries"
+    ],
+    "POST /v1/community/candidate-skins": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinBoundaries"
+    ],
+    "GET /v1/community/candidate-skins/{id}": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
+    ],
+    "DELETE /v1/community/candidate-skins/{id}": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
+    ],
+    "GET /v1/community/candidate-skins/{id}/preview": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
+    ],
+    "POST /v1/community/candidate-skins/{id}/download": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
+    ],
+    "PUT /v1/community/candidate-skins/{id}/rating": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
+    ],
     "GET /v1/community/resources": [
       "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation"
     ],
@@ -328,6 +351,9 @@
       "internal/account/admin_test.go::TestAdminDataAndActions",
       "internal/account/admin_test.go::TestAdminListFilters"
     ],
+    "GET /api/candidate-skins": [
+      "internal/account/admin_test.go::TestAdminDataAndActions"
+    ],
     "GET /api/dictionaries": [
       "internal/account/admin_test.go::TestAdminDataAndActions",
       "internal/account/admin_test.go::TestAdminListFilters"
@@ -344,6 +370,9 @@
       "internal/account/admin_user_test.go::TestAdminUserDetailsAndSessionRevocation"
     ],
     "GET /api/skins/{id}": [
+      "internal/account/admin_content_test.go::TestAdminContentDetails"
+    ],
+    "GET /api/candidate-skins/{id}": [
       "internal/account/admin_content_test.go::TestAdminContentDetails"
     ],
     "GET /api/dictionaries/{id}": [
@@ -411,6 +440,10 @@
     "internal/account/provider_contract_test.go::TestAccountConfigurationValidation",
     "internal/account/community_boundaries_test.go::TestCommunityDesignOptionalFieldsAndPhoto",
     "internal/account/community_boundaries_test.go::TestCommunityCatalogPaginationAndLimitsHTTP",
+    "internal/account/community_candidate_test.go::TestCommunityCandidateSkinBoundaries",
+    "internal/account/community_candidate_test.go::TestCommunityCandidatePackageValidation",
+    "internal/account/community_candidate_test.go::TestCommunityCandidateSkinSchemaRejectsUnsafeRows",
+    "internal/account/community_candidate_test.go::TestCandidateImageSlot",
     "internal/server/http_boundaries_test.go::TestChatAndCatalogBoundaryResponses",
     "internal/server/http_boundaries_test.go::TestRateBucketCapacityAndRecovery",
     "internal/server/http_boundaries_test.go::TestTranscriptionMultipartBoundariesAndProviderFormats",
