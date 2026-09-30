@@ -1,6 +1,6 @@
-# 水杉输入法共通后端（MSIME-Backend）
+# 水杉云（msime-cloud）
 
-水杉输入法共通网络后端，使用 Go 实现；HTTP 服务基于标准库，WebSocket 使用固定版本的 [coder/websocket](https://github.com/coder/websocket)。集中保存服务商凭据，向 Windows、macOS、iOS 和 Linux 提供 HTTP API 和实时语音 WebSocket。平台继续负责本地输入、焦点、候选合并、麦克风权限及上屏。
+水杉云是水杉输入法的共通网络后端，使用 Go 实现；HTTP 服务基于标准库，WebSocket 使用固定版本的 [coder/websocket](https://github.com/coder/websocket)。集中保存服务商凭据，向 Windows、macOS、iOS 和 Linux 提供 HTTP API 和实时语音 WebSocket。平台继续负责本地输入、焦点、候选合并、麦克风权限及上屏。
 
 当前服务与各平台源码接入已实现；已通过真实客户端到合成上游的网络测试，原生宿主验收仍在进行。完整需求与未完成项见 [需求核对](docs/requirements.md)。
 
