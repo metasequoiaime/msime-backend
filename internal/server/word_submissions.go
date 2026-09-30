@@ -28,7 +28,7 @@ import (
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 )
 
-// Anonymous word submissions from the website (msime-web#213). A visitor proposes words with their quanpin reading; after Cloudflare Turnstile and a per-address PostgreSQL rate limit, the server appends them to words.txt in metasequoiaime/msime-customdict on a rolling pull request that maintainers review. Nothing about the visitor is stored, and entries, notes and tokens are never logged.
+// Anonymous word submissions from the website (msime-web#213). A visitor proposes words with their quanpin reading; after Cloudflare Turnstile and a per-address PostgreSQL rate limit, the server appends them to words.txt in metasequoiaime/msime-dictionary on a rolling pull request that maintainers review. Nothing about the visitor is stored, and entries, notes and tokens are never logged.
 
 const (
 	wordSubmissionsPath      = "/v1/community/word-submissions"
@@ -39,7 +39,7 @@ const (
 	wordSubmissionTokenBytes = 2048
 	// Every community entry gets the same weight; submitters do not choose it.
 	wordSubmissionWeight   = 5000
-	wordSubmissionsFile    = "data/words.txt"
+	wordSubmissionsFile    = "custom/words.txt"
 	wordSubmissionBranches = "community-words/"
 	wordSubmissionTimeout  = 45 * time.Second
 	defaultTurnstileURL    = "https://challenges.cloudflare.com/turnstile/v0/siteverify"

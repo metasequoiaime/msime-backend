@@ -29,7 +29,7 @@ import (
 
 const (
 	wordsTestOrigin = "https://msime.app"
-	wordsTestRepo   = "/repos/metasequoiaime/msime-customdict"
+	wordsTestRepo   = "/repos/metasequoiaime/msime-dictionary"
 	wordsTestToken  = "ghs_installation_token"
 )
 
@@ -136,7 +136,7 @@ func (f *fakeWordsUpstream) serve(w http.ResponseWriter, r *http.Request) {
 		reply(200, f.pulls)
 	case "GET " + wordsTestRepo + "/git/ref/heads/main":
 		reply(200, map[string]any{"object": map[string]string{"sha": "base-commit"}})
-	case "GET " + wordsTestRepo + "/contents/data/words.txt":
+	case "GET " + wordsTestRepo + "/contents/custom/words.txt":
 		encoded := base64.StdEncoding.EncodeToString([]byte(f.content))
 		var wrapped []string
 		for len(encoded) > 60 {
@@ -145,7 +145,7 @@ func (f *fakeWordsUpstream) serve(w http.ResponseWriter, r *http.Request) {
 		reply(200, map[string]any{"type": "file", "encoding": "base64", "sha": f.sha, "content": strings.Join(append(wrapped, encoded), "\n") + "\n"})
 	case "POST " + wordsTestRepo + "/git/refs":
 		reply(201, map[string]any{"ref": body["ref"]})
-	case "PUT " + wordsTestRepo + "/contents/data/words.txt":
+	case "PUT " + wordsTestRepo + "/contents/custom/words.txt":
 		if body["sha"] != f.sha {
 			reply(409, map[string]string{"message": "sha mismatch"})
 			return
@@ -154,8 +154,8 @@ func (f *fakeWordsUpstream) serve(w http.ResponseWriter, r *http.Request) {
 		f.content, f.sha = string(decoded), f.sha+"+"
 		reply(200, map[string]any{"content": map[string]string{"sha": f.sha}})
 	case "POST " + wordsTestRepo + "/pulls":
-		f.pulls = append(f.pulls, map[string]any{"number": 12, "head": map[string]any{"ref": body["head"], "repo": map[string]string{"full_name": "metasequoiaime/msime-customdict"}}, "base": map[string]string{"ref": "main"}})
-		reply(201, map[string]any{"number": 12, "html_url": "https://github.com/metasequoiaime/msime-customdict/pull/12"})
+		f.pulls = append(f.pulls, map[string]any{"number": 12, "head": map[string]any{"ref": body["head"], "repo": map[string]string{"full_name": "metasequoiaime/msime-dictionary"}}, "base": map[string]string{"ref": "main"}})
+		reply(201, map[string]any{"number": 12, "html_url": "https://github.com/metasequoiaime/msime-dictionary/pull/12"})
 	default:
 		f.t.Errorf("unexpected GitHub call %s", key)
 		w.WriteHeader(404)
@@ -199,7 +199,7 @@ func wordsConfig(t *testing.T, upstream string) WordSubmissionsConfig {
 	t.Setenv("TEST_WORDS_APP_KEY", wordsKeyPEM(t, false))
 	return WordSubmissionsConfig{
 		Turnstile: TurnstileConfig{SiteKey: "0x4AAAAAAA-site-key", SecretEnv: "TEST_TURNSTILE_SECRET", SiteverifyURL: upstream + "/siteverify"},
-		GitHub:    WordsGitHubConfig{AppID: 42, InstallationID: 77, PrivateKeyEnv: "TEST_WORDS_APP_KEY", Repository: "metasequoiaime/msime-customdict", APIURL: upstream},
+		GitHub:    WordsGitHubConfig{AppID: 42, InstallationID: 77, PrivateKeyEnv: "TEST_WORDS_APP_KEY", Repository: "metasequoiaime/msime-dictionary", APIURL: upstream},
 	}
 }
 
@@ -493,14 +493,14 @@ func TestWordSubmissionClientAddress(t *testing.T) {
 func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	s, f, limiter := wordsFixture(t)
 	w := postWords(s, validWords)
-	if w.Code != 201 || strings.TrimSpace(w.Body.String()) != `{"pull_request_url":"https://github.com/metasequoiaime/msime-customdict/pull/12"}` {
+	if w.Code != 201 || strings.TrimSpace(w.Body.String()) != `{"pull_request_url":"https://github.com/metasequoiaime/msime-dictionary/pull/12"}` {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if strings.Join(limiter.calls, ",") != "word-submissions-10m|198.51.100.7,word-submissions-day|198.51.100.7" {
 		t.Fatal(limiter.calls)
 	}
 	tokenRequest := f.bodies["POST /app/installations/77/access_tokens"]
-	if raw, _ := json.Marshal(tokenRequest); string(raw) != `{"permissions":{"contents":"write","pull_requests":"write"},"repositories":["msime-customdict"]}` {
+	if raw, _ := json.Marshal(tokenRequest); string(raw) != `{"permissions":{"contents":"write","pull_requests":"write"},"repositories":["msime-dictionary"]}` {
 		t.Fatal("installation token must be scoped to the repository and two permissions", string(raw))
 	}
 	pullsQuery := f.query["GET "+wordsTestRepo+"/pulls"]
@@ -510,10 +510,10 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	if ref := f.bodies["POST "+wordsTestRepo+"/git/refs"]; ref["ref"] != "refs/heads/community-words/20260930-123456" || ref["sha"] != "base-commit" {
 		t.Fatal(ref)
 	}
-	if f.query["GET "+wordsTestRepo+"/contents/data/words.txt"].Get("ref") != "base-commit" {
+	if f.query["GET "+wordsTestRepo+"/contents/custom/words.txt"].Get("ref") != "base-commit" {
 		t.Fatal("words.txt must be read at the commit the new branch starts from")
 	}
-	put := f.bodies["PUT "+wordsTestRepo+"/contents/data/words.txt"]
+	put := f.bodies["PUT "+wordsTestRepo+"/contents/custom/words.txt"]
 	if put["sha"] != "sha-0" || put["branch"] != "community-words/20260930-123456" {
 		t.Fatal(put)
 	}
@@ -526,7 +526,7 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	}
 	pr := f.bodies["POST "+wordsTestRepo+"/pulls"]
 	body, _ := pr["body"].(string)
-	if pr["head"] != "community-words/20260930-123456" || pr["base"] != "main" || pr["title"] != wordsPullRequestTitle || !strings.Contains(body, "reviewed by maintainers") || !strings.Contains(body, "msime-customdict CI") || !strings.Contains(body, "dict-v*") || !strings.Contains(body, "MSIME-Windows") {
+	if pr["head"] != "community-words/20260930-123456" || pr["base"] != "main" || pr["title"] != wordsPullRequestTitle || !strings.Contains(body, "reviewed by maintainers") || !strings.Contains(body, "msime-dictionary CI") || !strings.Contains(body, "dict-v*") || !strings.Contains(body, "MSIME-Windows") {
 		t.Fatal(pr)
 	}
 	if strings.Contains(body, "扛把子") || strings.Contains(body, "octocat") {
@@ -541,7 +541,7 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	if f.tokens != 1 || f.count("POST "+wordsTestRepo+"/git/refs") != 1 || f.count("POST "+wordsTestRepo+"/pulls") != 1 {
 		t.Fatal("append must not create a branch, a pull request or a new token", f.calls)
 	}
-	if !strings.HasSuffix(f.content, "堪堪\tkan'kan\t5000\n") || f.bodies["PUT "+wordsTestRepo+"/contents/data/words.txt"]["sha"] != "sha-0+" {
+	if !strings.HasSuffix(f.content, "堪堪\tkan'kan\t5000\n") || f.bodies["PUT "+wordsTestRepo+"/contents/custom/words.txt"]["sha"] != "sha-0+" {
 		t.Fatal(f.content)
 	}
 }
@@ -555,16 +555,16 @@ func TestWordSubmissionAppendsToOpenPullRequest(t *testing.T) {
 		return map[string]any{"ref": ref, "repo": map[string]string{"full_name": repo}}
 	}
 	f.pulls = []map[string]any{
-		{"number": 3, "head": head("feat/other", "metasequoiaime/msime-customdict"), "base": map[string]string{"ref": "main"}},
-		{"number": 4, "head": head("community-words/20260101-000000", "someone/msime-customdict"), "base": map[string]string{"ref": "main"}},
+		{"number": 3, "head": head("feat/other", "metasequoiaime/msime-dictionary"), "base": map[string]string{"ref": "main"}},
+		{"number": 4, "head": head("community-words/20260101-000000", "someone/msime-dictionary"), "base": map[string]string{"ref": "main"}},
 		{"number": 5, "head": head("community-words/20260102-000000", ""), "base": map[string]string{"ref": "main"}},
-		{"number": 9, "head": head("community-words/20260915-080000", "metasequoiaime/msime-customdict"), "base": map[string]string{"ref": "main"}},
+		{"number": 9, "head": head("community-words/20260915-080000", "metasequoiaime/msime-dictionary"), "base": map[string]string{"ref": "main"}},
 	}
 	w := postWords(s, `{"entries":[{"word":"堪堪","pinyin":"kan'kan"}],"token":"turnstile-token"}`)
-	if w.Code != 201 || strings.TrimSpace(w.Body.String()) != `{"pull_request_url":"https://github.com/metasequoiaime/msime-customdict/pull/9"}` {
+	if w.Code != 201 || strings.TrimSpace(w.Body.String()) != `{"pull_request_url":"https://github.com/metasequoiaime/msime-dictionary/pull/9"}` {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if f.query["GET "+wordsTestRepo+"/contents/data/words.txt"].Get("ref") != "community-words/20260915-080000" || f.bodies["PUT "+wordsTestRepo+"/contents/data/words.txt"]["branch"] != "community-words/20260915-080000" {
+	if f.query["GET "+wordsTestRepo+"/contents/custom/words.txt"].Get("ref") != "community-words/20260915-080000" || f.bodies["PUT "+wordsTestRepo+"/contents/custom/words.txt"]["branch"] != "community-words/20260915-080000" {
 		t.Fatal("must append on the open rolling branch")
 	}
 	if f.count("GET "+wordsTestRepo+"/git/ref/heads/main") != 0 || f.count("POST "+wordsTestRepo+"/git/refs") != 0 || f.count("POST "+wordsTestRepo+"/pulls") != 0 {
@@ -574,22 +574,22 @@ func TestWordSubmissionAppendsToOpenPullRequest(t *testing.T) {
 
 func TestWordSubmissionConflictIsNotRetried(t *testing.T) {
 	s, f, _ := wordsFixture(t)
-	f.status["PUT "+wordsTestRepo+"/contents/data/words.txt"] = 409
+	f.status["PUT "+wordsTestRepo+"/contents/custom/words.txt"] = 409
 	w := postWords(s, validWords)
-	if w.Code != 409 || decodeBody(t, w)["code"] != "concurrent_update" || f.count("PUT "+wordsTestRepo+"/contents/data/words.txt") != 1 || f.count("POST "+wordsTestRepo+"/pulls") != 0 {
+	if w.Code != 409 || decodeBody(t, w)["code"] != "concurrent_update" || f.count("PUT "+wordsTestRepo+"/contents/custom/words.txt") != 1 || f.count("POST "+wordsTestRepo+"/pulls") != 0 {
 		t.Fatal(w.Code, w.Body.String(), f.calls)
 	}
 	s, f, _ = wordsFixture(t)
 	f.status["POST "+wordsTestRepo+"/git/refs"] = 422
-	if w = postWords(s, validWords); w.Code != 409 || f.count("PUT "+wordsTestRepo+"/contents/data/words.txt") != 0 {
+	if w = postWords(s, validWords); w.Code != 409 || f.count("PUT "+wordsTestRepo+"/contents/custom/words.txt") != 0 {
 		t.Fatal("same-second branch collision", w.Code, w.Body.String())
 	}
 }
 
 func TestWordSubmissionUncertainOutcome(t *testing.T) {
 	for name, override := range map[string]map[string]int{
-		"commit 5xx":          {"PUT " + wordsTestRepo + "/contents/data/words.txt": 502},
-		"commit dropped":      {"PUT " + wordsTestRepo + "/contents/data/words.txt": -1},
+		"commit 5xx":          {"PUT " + wordsTestRepo + "/contents/custom/words.txt": 502},
+		"commit dropped":      {"PUT " + wordsTestRepo + "/contents/custom/words.txt": -1},
 		"pull request 5xx":    {"POST " + wordsTestRepo + "/pulls": 500},
 		"pull request 422":    {"POST " + wordsTestRepo + "/pulls": 422},
 		"pull request broken": {"POST " + wordsTestRepo + "/pulls": 201},
@@ -601,10 +601,10 @@ func TestWordSubmissionUncertainOutcome(t *testing.T) {
 			}
 			w := postWords(s, validWords)
 			body := decodeBody(t, w)
-			if w.Code != 502 || body["uncertain"] != true || body["code"] != "outcome_unknown" || body["pulls_url"] != "https://github.com/metasequoiaime/msime-customdict/pulls" {
+			if w.Code != 502 || body["uncertain"] != true || body["code"] != "outcome_unknown" || body["pulls_url"] != "https://github.com/metasequoiaime/msime-dictionary/pulls" {
 				t.Fatal(w.Code, w.Body.String())
 			}
-			if f.count("PUT "+wordsTestRepo+"/contents/data/words.txt") != 1 || f.count("POST "+wordsTestRepo+"/pulls") > 1 {
+			if f.count("PUT "+wordsTestRepo+"/contents/custom/words.txt") != 1 || f.count("POST "+wordsTestRepo+"/pulls") > 1 {
 				t.Fatal("writes must never be retried", f.calls)
 			}
 		})
@@ -624,10 +624,10 @@ func TestWordSubmissionGitHubFailuresBeforeWriting(t *testing.T) {
 		"list malformed":   {map[string]int{"GET " + wordsTestRepo + "/pulls": 200}, "github_unavailable"},
 		"base branch":      {map[string]int{"GET " + wordsTestRepo + "/git/ref/heads/main": 404}, "github_unavailable"},
 		"base branch sha":  {map[string]int{"GET " + wordsTestRepo + "/git/ref/heads/main": 200}, "github_unavailable"},
-		"read file":        {map[string]int{"GET " + wordsTestRepo + "/contents/data/words.txt": 500}, "github_unavailable"},
-		"read file format": {map[string]int{"GET " + wordsTestRepo + "/contents/data/words.txt": 200}, "github_unavailable"},
+		"read file":        {map[string]int{"GET " + wordsTestRepo + "/contents/custom/words.txt": 500}, "github_unavailable"},
+		"read file format": {map[string]int{"GET " + wordsTestRepo + "/contents/custom/words.txt": 200}, "github_unavailable"},
 		"create branch":    {map[string]int{"POST " + wordsTestRepo + "/git/refs": 500}, "github_unavailable"},
-		"commit forbidden": {map[string]int{"PUT " + wordsTestRepo + "/contents/data/words.txt": 403}, "github_unavailable"},
+		"commit forbidden": {map[string]int{"PUT " + wordsTestRepo + "/contents/custom/words.txt": 403}, "github_unavailable"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, f, _ := wordsFixture(t)
@@ -651,7 +651,7 @@ func TestWordSubmissionGitHubFailuresBeforeWriting(t *testing.T) {
 	if w.Code != 400 || len(rejected) != 1 || rejected[0].(map[string]any)["index"] != 1.0 || rejected[0].(map[string]any)["code"] != "already_listed" {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if f.count("POST "+wordsTestRepo+"/git/refs") != 0 || f.count("PUT "+wordsTestRepo+"/contents/data/words.txt") != 0 {
+	if f.count("POST "+wordsTestRepo+"/git/refs") != 0 || f.count("PUT "+wordsTestRepo+"/contents/custom/words.txt") != 0 {
 		t.Fatal("a rejected submission must not write", f.calls)
 	}
 	// Non-base64 content is refused rather than rewritten.
@@ -667,7 +667,7 @@ func TestWordSubmissionsConfigValidation(t *testing.T) {
 	valid := func() WordSubmissionsConfig {
 		return WordSubmissionsConfig{
 			Turnstile: TurnstileConfig{SiteKey: "site-key", SecretEnv: "TEST_TURNSTILE_SECRET"},
-			GitHub:    WordsGitHubConfig{AppID: 1, InstallationID: 2, PrivateKeyEnv: "TEST_WORDS_APP_KEY", Repository: "metasequoiaime/msime-customdict"},
+			GitHub:    WordsGitHubConfig{AppID: 1, InstallationID: 2, PrivateKeyEnv: "TEST_WORDS_APP_KEY", Repository: "metasequoiaime/msime-dictionary"},
 		}
 	}
 	c := valid()
@@ -685,7 +685,7 @@ func TestWordSubmissionsConfigValidation(t *testing.T) {
 		"verify url":  func(c *WordSubmissionsConfig) { c.Turnstile.SiteverifyURL = "http://challenges.example/siteverify" },
 		"app id":      func(c *WordSubmissionsConfig) { c.GitHub.AppID = 0 },
 		"install id":  func(c *WordSubmissionsConfig) { c.GitHub.InstallationID = 0 },
-		"repository":  func(c *WordSubmissionsConfig) { c.GitHub.Repository = "msime-customdict" },
+		"repository":  func(c *WordSubmissionsConfig) { c.GitHub.Repository = "msime-dictionary" },
 		"branch":      func(c *WordSubmissionsConfig) { c.GitHub.Branch = "main..x" },
 		"own prefix":  func(c *WordSubmissionsConfig) { c.GitHub.Branch = "community-words/x" },
 		"api url":     func(c *WordSubmissionsConfig) { c.GitHub.APIURL = "https://api.github.com/?x=1" },
@@ -770,7 +770,7 @@ func TestWordSubmissionRateLimitInPostgreSQL(t *testing.T) {
 			t.Fatal("fourth submission in ten minutes", w.Code, w.Body.String())
 		}
 	}
-	if got := f.count("PUT " + wordsTestRepo + "/contents/data/words.txt"); got != 3 {
+	if got := f.count("PUT " + wordsTestRepo + "/contents/custom/words.txt"); got != 3 {
 		t.Fatal("rate-limited submission reached GitHub", got)
 	}
 	w := postWords(s, `{"entries":[{"word":"狂写","pinyin":"kuang'xie"}],"token":"turnstile-token"}`, func(r *http.Request) { r.RemoteAddr = "198.51.100.9:1" })

@@ -32,7 +32,7 @@ const wordsPullRequestBody = `This is the rolling pull request for words submitt
 
 - Submissions are opened by the MSIME word-submission GitHub App after a Cloudflare Turnstile check and a per-address rate limit. No account or personal data is collected.
 - Every entry is reviewed by maintainers before merge. Remove or fix entries on this branch as needed; new submissions keep appending here while this pull request is open.
-- The msime-customdict CI validates the format, readings and duplicates.
+- The msime-dictionary CI validates the format, readings and duplicates.
 - After merge, the entries reach msime and MSIME-Windows through the next ` + "`dict-v*`" + ` dictionary release.
 `
 

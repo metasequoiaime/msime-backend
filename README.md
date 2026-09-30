@@ -223,15 +223,15 @@ EveryAPI 合作服务实时语音配置：
 
 ## 官网词条提交
 
-官网表单（msime-web#213）匿名调用 `GET /v1/community/word-submissions`（返回 `{enabled, site_key}`）和 `POST /v1/community/word-submissions`（`{entries:[{word,pinyin}], note, token}`）。服务端校验 1–20 个词条（词语为 1–16 个汉字或〇，拼音为小写全拼、`'` 分隔、音节数等于字数、音节取自与官网相同的 402 音节表，ü 写作 v、lüe/nüe 写作 lve/nve）、备注不超过 500 字，再做 Cloudflare Turnstile 服务端校验（action `words`，hostname 必须属于 `allowed_origins`）和按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，复用 `auth_rates` 表，只存地址摘要）。通过后用专用 GitHub App 把 `词语<TAB>拼音<TAB>5000` 追加到 msime-customdict 的 `data/words.txt`：有开启的 `community-words/*` Pull Request 就追加提交，否则新建 `community-words/<UTC 时间>` 分支并开 PR。文件 blob SHA 冲突返回 409，写入结果未知返回 502 `uncertain:true`，服务端从不自动重试写入，也不删除或强推。词条、备注和令牌不写日志。
+官网表单（msime-web#213）匿名调用 `GET /v1/community/word-submissions`（返回 `{enabled, site_key}`）和 `POST /v1/community/word-submissions`（`{entries:[{word,pinyin}], note, token}`）。服务端校验 1–20 个词条（词语为 1–16 个汉字或〇，拼音为小写全拼、`'` 分隔、音节数等于字数、音节取自与官网相同的 402 音节表，ü 写作 v、lüe/nüe 写作 lve/nve）、备注不超过 500 字，再做 Cloudflare Turnstile 服务端校验（action `words`，hostname 必须属于 `allowed_origins`）和按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，复用 `auth_rates` 表，只存地址摘要）。通过后用专用 GitHub App 把 `词语<TAB>拼音<TAB>5000` 追加到 msime-dictionary 的 `custom/words.txt`：有开启的 `community-words/*` Pull Request 就追加提交，否则新建 `community-words/<UTC 时间>` 分支并开 PR。文件 blob SHA 冲突返回 409，写入结果未知返回 502 `uncertain:true`，服务端从不自动重试写入，也不删除或强推。词条、备注和令牌不写日志。
 
 需要用户体系（PostgreSQL）和包含官网的 `allowed_origins`（例如 `https://msime.app`）。`turnstile.site_key` 为空时功能关闭；填写后其余字段缺一不可，否则服务拒绝启动：
 
 ```json
-{"word_submissions":{"client_ip_header":"CF-Connecting-IP","turnstile":{"site_key":"0x4AAAA...","secret_env":"MSIME_TURNSTILE_SECRET"},"github":{"app_id":123456,"installation_id":7890123,"private_key_env":"MSIME_WORDS_GITHUB_APP_KEY","repository":"metasequoiaime/msime-customdict","branch":"main"}}}
+{"word_submissions":{"client_ip_header":"CF-Connecting-IP","turnstile":{"site_key":"0x4AAAA...","secret_env":"MSIME_TURNSTILE_SECRET"},"github":{"app_id":123456,"installation_id":7890123,"private_key_env":"MSIME_WORDS_GITHUB_APP_KEY","repository":"metasequoiaime/msime-dictionary","branch":"main"}}}
 ```
 
-GitHub App 只安装到 msime-customdict，仓库权限只给 Contents: Read and write 与 Pull requests: Read and write（Metadata 只读为默认）；服务端签发的安装令牌再次限定到该仓库和这两项权限。私钥（PEM，PKCS#1 或 PKCS#8，可用 `\n` 表示换行）通过 `private_key_env` 注入。`client_ip_header` 为空时只信任 TCP 对端；部署在反向代理后必须填写由代理覆盖写入的头（`CF-Connecting-IP`、`X-Real-IP`，或取最后一段的 `X-Forwarded-For`），否则所有访客共享同一份额度。客户端能自带的头不要填。
+GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and write 与 Pull requests: Read and write（Metadata 只读为默认）；服务端签发的安装令牌再次限定到该仓库和这两项权限。私钥（PEM，PKCS#1 或 PKCS#8，可用 `\n` 表示换行）通过 `private_key_env` 注入。`client_ip_header` 为空时只信任 TCP 对端；部署在反向代理后必须填写由代理覆盖写入的头（`CF-Connecting-IP`、`X-Real-IP`，或取最后一段的 `X-Forwarded-For`），否则所有访客共享同一份额度。客户端能自带的头不要填。
 
 ## 用户皮肤社区
 
