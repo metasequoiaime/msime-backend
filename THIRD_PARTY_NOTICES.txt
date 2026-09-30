@@ -2819,6 +2819,4 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-日语候选资源：Engine dict-v1.0.0 提供 dict_japanese.dat 和
-mozc_dictionary_oss_README.txt。资源准备脚本校验两者固定的 SHA-256，
-并将上游词典许可说明保留在模型旁。
+日语候选资源：Engine dict-v2.0.1 提供 dict_japanese.dat 和 mozc_dictionary_oss_README.txt。资源准备脚本校验两者固定的 SHA-256，并将上游词典许可说明保留在模型旁。
