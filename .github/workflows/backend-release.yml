@@ -43,6 +43,8 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # main 受规则集保护、只接受 PR，GITHUB_TOKEN 进不了绕过名单；发布要把版本提交和标签原子推上 main，所以用规则集放行的写权限 deploy key（secret RELEASE_DEPLOY_KEY）检出和推送。
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
