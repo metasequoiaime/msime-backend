@@ -116,6 +116,18 @@ func (a *Service) RateLimit(ctx context.Context, scope, subject string, limit in
 func IsPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/community/") || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
 }
+
+// accountRouteTimeout is the context each mounted route runs under: 15 s, except the two uploads whose body alone can take longer, the dictionary snapshot restore and a candidate-skin publish.
+func accountRouteTimeout(pattern string) time.Duration {
+	switch pattern {
+	case "PUT /v1/users/me/dictionary/snapshot":
+		return snapshotRestoreTimeout
+	case "POST /v1/community/candidate-skins":
+		return candidatePublishTimeout
+	default:
+		return 15 * time.Second
+	}
+}
 func Mount(mux *http.ServeMux, a *Service) {
 	for pattern, method := range map[string]func(*Service, http.ResponseWriter, *http.Request){
 		"POST /v1/community/resources/{id}/apply":          (*Service).resourceApply,
@@ -180,11 +192,7 @@ func Mount(mux *http.ServeMux, a *Service) {
 				writeError(w, 503, "user_auth_disabled")
 				return
 			}
-			timeout := 15 * time.Second
-			if pattern == "PUT /v1/users/me/dictionary/snapshot" {
-				timeout = snapshotRestoreTimeout
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			ctx, cancel := context.WithTimeout(r.Context(), accountRouteTimeout(pattern))
 			defer cancel()
 			r = r.WithContext(ctx)
 			host, _, e := net.SplitHostPort(r.RemoteAddr)

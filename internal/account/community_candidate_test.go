@@ -362,6 +362,47 @@ func TestCandidateImageSlot(t *testing.T) {
 		t.Fatal("free slot not acquired")
 	}
 	<-candidateImageSlots
+	// A decode that panics must still give its slot back, or two such requests would leave every later publish answering busy.
+	for range cap(candidateImageSlots) + 1 {
+		func() {
+			// Bounded, so a leaked pool fails the check below instead of blocking the test forever.
+			bounded, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			defer func() { _ = recover() }()
+			withCandidateImageSlot(bounded, func() { panic("synthetic decode failure") })
+		}()
+	}
+	if len(candidateImageSlots) != 0 {
+		t.Fatalf("%d image slots leaked after panicking work", len(candidateImageSlots))
+	}
+	ran := false
+	if !withCandidateImageSlot(context.Background(), func() { ran = true }) || !ran || len(candidateImageSlots) != 0 {
+		t.Fatal("work did not run with a slot, or its slot was not returned")
+	}
+	for range cap(candidateImageSlots) {
+		candidateImageSlots <- struct{}{}
+	}
+	if withCandidateImageSlot(cancelled, func() { t.Fatal("work ran without a slot") }) {
+		t.Fatal("reported success without a slot")
+	}
+	for range cap(candidateImageSlots) {
+		<-candidateImageSlots
+	}
+}
+
+func TestAccountRouteTimeoutCoversSlowUploads(t *testing.T) {
+	// A 3.2 MB publish on a slow uplink plus the image work must fit, as the snapshot restore does; everything else keeps the short context.
+	if got := accountRouteTimeout("POST /v1/community/candidate-skins"); got != candidatePublishTimeout || got < 60*time.Second {
+		t.Fatalf("publish timeout %v", got)
+	}
+	if got := accountRouteTimeout("PUT /v1/users/me/dictionary/snapshot"); got != snapshotRestoreTimeout {
+		t.Fatalf("snapshot timeout %v", got)
+	}
+	for _, pattern := range []string{"GET /v1/community/candidate-skins", "POST /v1/community/candidate-skins/{id}/download", "POST /v1/community/skins"} {
+		if got := accountRouteTimeout(pattern); got != 15*time.Second {
+			t.Fatalf("%s timeout %v", pattern, got)
+		}
+	}
 }
 
 func TestCommunityCandidateSkinLifecycle(t *testing.T) {

@@ -43,6 +43,9 @@ const (
 // candidateImageSlots bounds concurrent image decoding per process, because /v1/community routes bypass the server's MaxConcurrent limit and a package can decode up to 8 MP.
 var candidateImageSlots = make(chan struct{}, 2)
 
+// candidatePublishTimeout is how long one publish may take end to end: up to 3.2 MB of upload, then decoding and re-encoding up to 8 MP. The default 15 s route context and the server's read deadline would cut a slow uplink off mid-upload; the client waits 90 s.
+const candidatePublishTimeout = 90 * time.Second
+
 func acquireCandidateImageSlot(ctx context.Context) bool {
 	select {
 	case candidateImageSlots <- struct{}{}:
@@ -50,6 +53,16 @@ func acquireCandidateImageSlot(ctx context.Context) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// withCandidateImageSlot runs work while holding an image slot and gives the slot back however work ends, a panic included, so a failed decode can never shrink the pool. It reports false, without running work, when ctx ends before a slot frees.
+func withCandidateImageSlot(ctx context.Context, work func()) bool {
+	if !acquireCandidateImageSlot(ctx) {
+		return false
+	}
+	defer func() { <-candidateImageSlots }()
+	work()
+	return true
 }
 
 type CandidateSkinLicense struct {
@@ -381,6 +394,10 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	// Extend only this upload's socket deadlines, as the dictionary snapshot restore does; Mount gives the route the matching context.
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(candidatePublishTimeout))
+	_ = controller.SetWriteDeadline(time.Now().Add(candidatePublishTimeout + 5*time.Second))
 	var input struct {
 		ID          string            `json:"id"`
 		Name        string            `json:"name"`
@@ -437,12 +454,11 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		a.error(w, e)
 		return
 	}
-	if !acquireCandidateImageSlot(r.Context()) {
+	var clean map[string][]byte
+	if !withCandidateImageSlot(r.Context(), func() { clean, code = sanitizeCandidateImages(input.Files, pkg.Preview) }) {
 		writeError(w, 503, "candidate_skin_busy")
 		return
 	}
-	clean, code := sanitizeCandidateImages(input.Files, pkg.Preview)
-	<-candidateImageSlots
 	if code != "" {
 		writeError(w, 400, code)
 		return
