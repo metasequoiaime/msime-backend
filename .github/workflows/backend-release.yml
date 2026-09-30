@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'metasequoiaime/MSIME-Backend'
+    if: github.repository == 'metasequoiaime/msime-cloud'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -104,7 +104,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ghcr.io/metasequoiaime/msime-backend:${{ needs.release.outputs.version }}
           labels: |
-            org.opencontainers.image.source=https://github.com/metasequoiaime/MSIME-Backend
+            org.opencontainers.image.source=https://github.com/metasequoiaime/msime-cloud
             org.opencontainers.image.revision=${{ needs.release.outputs.revision }}
             org.opencontainers.image.version=${{ needs.release.outputs.version }}
           cache-from: type=gha
