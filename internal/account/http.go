@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/oauth2"
 )
 
 type Service struct {
@@ -34,6 +36,11 @@ type Service struct {
 	cancel    context.CancelFunc
 	done      chan struct{}
 	once      sync.Once
+
+	// tokenKey is the AES-256 key sealing provider refresh tokens; set only when the Google desktop client is configured.
+	tokenKey []byte
+	// googleTokenURL overrides the Google token endpoint in tests; empty means the production endpoint.
+	googleTokenURL string
 }
 
 func New(ctx context.Context, c Config) (*Service, error) {
@@ -71,6 +78,10 @@ func New(ctx context.Context, c Config) (*Service, error) {
 	lifetime, cancel := context.WithCancel(context.Background())
 	a := &Service{store: db, config: c, client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, cancel: cancel, done: make(chan struct{})}
 	a.verifiers = makeVerifiers(lifetime, c, a.client)
+	if c.Google.Desktop.ClientID != "" {
+		// Validate already proved the key decodes to 32 bytes.
+		a.tokenKey, _ = c.providerTokenKey()
+	}
 	a.sender = delivery{config: c}
 	go func() {
 		defer close(a.done)
@@ -326,6 +337,16 @@ func (a *Service) begin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_purpose")
 		return
 	}
+	// A Google target selects the server-exchange flow for desktop apps; without one, Google keeps the ID token flow.
+	exchange := v.Provider == "google" && v.Target != ""
+	if exchange && a.config.Google.Desktop.ClientID == "" {
+		writeError(w, 503, "provider_disabled")
+		return
+	}
+	if exchange && !loopbackTarget(v.Target) {
+		writeError(w, 400, "invalid_target")
+		return
+	}
 	c := Challenge{Provider: v.Provider}
 	id := randomToken()
 	c.IDHash = hash(id)
@@ -402,6 +423,12 @@ func (a *Service) begin(w http.ResponseWriter, r *http.Request) {
 			values := url.Values{"appid": {a.config.Wechat.AppID}, "redirect_uri": {a.config.Wechat.RedirectURI}, "response_type": {"code"}, "scope": {"snsapi_login"}, "state": {id}}
 			response["authorization_url"] = "https://open.weixin.qq.com/connect/qrconnect?" + values.Encode() + "#wechat_redirect"
 		}
+		if exchange {
+			// The desktop client checks state on its loopback callback; the server binds the code to this challenge through the stored PKCE verifier and redirect URI.
+			c.CodeVerifier = oauth2.GenerateVerifier()
+			c.RedirectURI = v.Target
+			response["authorization_url"] = a.googleDesktop(v.Target).AuthCodeURL(randomToken(), oauth2.AccessTypeOffline, oauth2.S256ChallengeOption(c.CodeVerifier), oauth2.SetAuthURLParam("nonce", c.Nonce), oauth2.SetAuthURLParam("prompt", "consent"))
+		}
 	}
 	if e := a.store.PutChallenge(r.Context(), c); e != nil {
 		a.error(w, e)
@@ -444,6 +471,7 @@ func (a *Service) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var identity Identity
+	var grant *providerGrant
 	if c.Provider == "email" || c.Provider == "phone" {
 		if len(v.Credential) != 6 || subtle.ConstantTimeCompare([]byte(c.CodeHash), []byte(a.codeHash(v.ChallengeID, v.Credential))) != 1 {
 			a.error(w, ErrInvalid)
@@ -458,13 +486,13 @@ func (a *Service) login(w http.ResponseWriter, r *http.Request) {
 		}
 		identity = Identity{c.Provider, c.Subject + ":" + a.codeHash("anonymous", v.Credential)}
 	} else {
-		identity, e = a.identity(r.Context(), c, v.Credential)
+		identity, grant, e = a.identity(r.Context(), c, v.Credential)
 		if e != nil {
 			a.error(w, e)
 			return
 		}
 	}
-	t, e := a.store.Complete(r.Context(), c, identity)
+	t, e := a.store.completeWith(r.Context(), c, identity, grant)
 	if e != nil {
 		a.error(w, e)
 		return

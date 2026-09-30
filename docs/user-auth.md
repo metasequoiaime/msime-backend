@@ -14,13 +14,15 @@
 msime-server -config /config/config.json -migrate-users
 ```
 
-迁移使用事务和 PostgreSQL advisory lock，可重复运行，多副本同时启动也会串行执行、后到的跑成空操作。生产可由运维迁移，再给运行账号授予本数据库的 CONNECT、public schema USAGE 和六张 `auth_*` 表的 SELECT/INSERT/UPDATE/DELETE；运行账号不需要超级用户、建库或建角色权限。连接生产 PostgreSQL 应启用 TLS；使用私有 CA 时挂载 CA 并设置 `sslmode=verify-full&sslrootcert=...`。
+迁移使用事务和 PostgreSQL advisory lock，可重复运行，多副本同时启动也会串行执行、后到的跑成空操作。生产可由运维迁移，再给运行账号授予本数据库的 CONNECT、public schema USAGE 和七张 `auth_*` 表的 SELECT/INSERT/UPDATE/DELETE；运行账号不需要超级用户、建库或建角色权限。连接生产 PostgreSQL 应启用 TLS；使用私有 CA 时挂载 CA 并设置 `sslmode=verify-full&sslrootcert=...`。
 
 数据库保存用户、身份、验证码摘要、会话摘要和限流计数；不保存明文验证码或会话令牌，不按同名邮箱自动合并第三方身份。服务每小时清理过期挑战、会话和限流计数。数据库需要纳入备份；本服务不提供数据备份功能。
 
 ## 提供方
 
 - Apple / Google：`client_ids` 配置本应用注册的 Client ID。客户端先请求挑战，将返回的 `nonce` 原样传入官方登录 SDK，再把 ID Token 提交给后端。后端校验签名、发行方、受众、有效期和 nonce。不得使用其他应用的 Client ID。
+- Google 桌面端（macOS/Windows/Linux）：在 `google.desktop` 配置 Google Cloud 中类型为「桌面应用」的 `client_id` 和密钥环境变量名 `secret_env`（示例配置为 `MSIME_GOOGLE_DESKTOP_CLIENT_SECRET`），该 `client_id` 必须同时列在 `client_ids` 中；同时通过 `token_key_env`（示例配置为 `MSIME_PROVIDER_TOKEN_KEY`）指定的环境变量提供标准 base64 编码的 32 字节密钥。客户端在本机监听回环端口，创建挑战时把 `http://127.0.0.1:<端口>/callback`（或 `[::1]`）作为 `target`；服务端生成 nonce、state 和 PKCE verifier，返回 `authorization_url`。客户端在浏览器打开该地址，回调时校验 `state` 与 URL 中的一致，再把 `code` 作为 credential 提交。服务端用客户端密钥和 PKCE verifier 换码并校验 ID Token，同一事务内登录、更新 Google 资料（邮箱、昵称、头像）并以 AES-256-GCM 加密保存 refresh token（附加数据为 `provider:subject`）；Google 未返回 refresh token 时保留已保存的那个。客户端不持有密钥。不传 `target` 时仍是 ID Token 流程。
+- Google 桌面端上线顺序：`GET /v1/auth/providers` 的 `google` 只反映 `client_ids` 是否非空，不区分桌面端是否可用；只要 `client_ids` 已配置（生产已有网页/Android 的 Client ID），桌面客户端就会显示 Google 登录按钮，而未配置 `google.desktop` 时带 `target` 的挑战返回 503 `provider_disabled`。旧版本服务不读取挑战上的 `redirect_uri` 和 PKCE verifier，滚动发布期间若登录请求落到旧副本，会把授权码当作 ID Token 校验并返回 401。因此按以下顺序上线：先发布新版本服务（不配置 `google.desktop`），确认所有副本都已更新；再写入密钥与 `token_key_env` 对应的环境变量并配置 `google.desktop`，重新发布；最后才发布带 Google 登录的桌面客户端。回退服务版本前先移除 `google.desktop`。
 - 微信：配置本应用 `app_id`、密钥环境变量及已登记的 HTTPS `redirect_uri`。这是网站扫码登录，不是小程序或移动应用 SDK 登录。前端打开 `authorization_url`，在回调验证 `state == challenge_id`，再提交 code。回调页面由客户端项目提供。
 - 阿里云短信：配置 region、AccessKey 环境变量、审核通过的签名及短信模板。模板参数为 `code`，六位数字、五分钟有效。手机号使用 `+8613800138000` 这样的 E.164 格式。国际短信还需相应发送资质与模板。
 - Lark 邮箱：配置实际 SMTP 主机、邮箱账号、发件地址和应用密码。支持 465 隐式 TLS 或 587 STARTTLS，强制证书验证。示例主机需按邮箱所在区域确认；不会自动发送测试邮件。

@@ -52,7 +52,23 @@ type Identity struct {
 }
 type Challenge struct {
 	IDHash, Provider, Subject, Nonce, CodeHash, LinkUser string
-	Attempts                                             int
+	// Set only for the Google server-exchange flow: the PKCE verifier and the loopback redirect URI the code was issued for.
+	CodeVerifier, RedirectURI string
+	Attempts                  int
+}
+
+// providerProfile holds the Google ID token claims mirrored onto auth_identities.
+type providerProfile struct {
+	Email         string
+	EmailVerified bool
+	Name, Picture string
+}
+
+// providerGrant is what a provider login stores next to the identity. SealedRefresh is already encrypted; empty means keep whatever is stored.
+type providerGrant struct {
+	Profile       *providerProfile
+	SealedRefresh []byte
+	Scope         string
 }
 type Principal struct {
 	UserID, SessionID string
@@ -153,7 +169,10 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_candidate_skins ccs ON ccs.owner_id=u.id
  LEFT JOIN community_candidate_skin_files ccf ON false
  LEFT JOIN community_candidate_skin_downloads ccd ON ccd.user_id=u.id
- LEFT JOIN community_candidate_skin_ratings ccr ON ccr.user_id=u.id WHERE false`).Scan(&n)
+ LEFT JOIN community_candidate_skin_ratings ccr ON ccr.user_id=u.id
+ LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture='' AND ai.updated_at IS NULL
+ LEFT JOIN auth_challenges ch ON false AND ch.code_verifier||ch.redirect_uri=''
+ LEFT JOIN auth_provider_tokens pt ON false WHERE false`).Scan(&n)
 }
 func (s *Store) Rate(ctx context.Context, key string, limit int, window time.Duration) error {
 	var n int
@@ -169,13 +188,13 @@ func (s *Store) Rate(ctx context.Context, key string, limit int, window time.Dur
 	return nil
 }
 func (s *Store) PutChallenge(ctx context.Context, c Challenge) error {
-	_, e := s.pool.Exec(ctx, `INSERT INTO auth_challenges(id_hash,provider,subject,nonce,code_hash,link_user,expires_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),now()+interval '5 minutes')`, c.IDHash, c.Provider, c.Subject, c.Nonce, c.CodeHash, c.LinkUser)
+	_, e := s.pool.Exec(ctx, `INSERT INTO auth_challenges(id_hash,provider,subject,nonce,code_hash,link_user,code_verifier,redirect_uri,expires_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,now()+interval '5 minutes')`, c.IDHash, c.Provider, c.Subject, c.Nonce, c.CodeHash, c.LinkUser, c.CodeVerifier, c.RedirectURI)
 	return e
 }
 func (s *Store) Attempt(ctx context.Context, id string) (Challenge, error) {
 	var c Challenge
 	e := s.pool.QueryRow(ctx, `UPDATE auth_challenges SET attempts=attempts+1 WHERE id_hash=$1 AND expires_at>now() AND attempts<5
- RETURNING id_hash,provider,subject,nonce,code_hash,COALESCE(link_user,''),attempts`, hash(id)).Scan(&c.IDHash, &c.Provider, &c.Subject, &c.Nonce, &c.CodeHash, &c.LinkUser, &c.Attempts)
+ RETURNING id_hash,provider,subject,nonce,code_hash,COALESCE(link_user,''),code_verifier,redirect_uri,attempts`, hash(id)).Scan(&c.IDHash, &c.Provider, &c.Subject, &c.Nonce, &c.CodeHash, &c.LinkUser, &c.CodeVerifier, &c.RedirectURI, &c.Attempts)
 	if errors.Is(e, pgx.ErrNoRows) {
 		e = ErrInvalid
 	}
@@ -185,6 +204,11 @@ func (s *Store) DropChallenge(ctx context.Context, idHash string) {
 	s.pool.Exec(ctx, "DELETE FROM auth_challenges WHERE id_hash=$1", idHash)
 }
 func (s *Store) Complete(ctx context.Context, c Challenge, identity Identity) (Tokens, error) {
+	return s.completeWith(ctx, c, identity, nil)
+}
+
+// completeWith consumes the challenge, resolves or creates the user and, when grant is set, records the provider profile and sealed refresh token in the same transaction.
+func (s *Store) completeWith(ctx context.Context, c Challenge, identity Identity, grant *providerGrant) (Tokens, error) {
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
 		return Tokens{}, e
@@ -219,6 +243,19 @@ func (s *Store) Complete(ctx context.Context, c Challenge, identity Identity) (T
 			}
 		}
 		if _, e = tx.Exec(ctx, "INSERT INTO auth_identities(provider,subject,user_id) VALUES($1,$2,$3)", identity.Provider, identity.Subject, uid); e != nil {
+			return Tokens{}, e
+		}
+	}
+	if grant != nil && grant.Profile != nil {
+		p := grant.Profile
+		if _, e = tx.Exec(ctx, "UPDATE auth_identities SET email=$3,email_verified=$4,name=$5,picture=$6,updated_at=now() WHERE provider=$1 AND subject=$2", identity.Provider, identity.Subject, p.Email, p.EmailVerified, p.Name, p.Picture); e != nil {
+			return Tokens{}, e
+		}
+	}
+	// Google omits refresh_token on repeat consents; an absent one keeps the stored token rather than erasing it.
+	if grant != nil && len(grant.SealedRefresh) > 0 {
+		if _, e = tx.Exec(ctx, `INSERT INTO auth_provider_tokens(provider,subject,refresh_token,scope,updated_at) VALUES($1,$2,$3,$4,now())
+ ON CONFLICT(provider,subject) DO UPDATE SET refresh_token=excluded.refresh_token,scope=excluded.scope,updated_at=now()`, identity.Provider, identity.Subject, grant.SealedRefresh, grant.Scope); e != nil {
 			return Tokens{}, e
 		}
 	}

@@ -28,3 +28,17 @@ CREATE TABLE IF NOT EXISTS auth_rates (
  key text PRIMARY KEY, count integer NOT NULL, expires_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS auth_rates_expiry ON auth_rates(expires_at);
+-- Google profile claims and the server-exchange flow (additive: old binaries ignore these columns and the defaults keep their inserts valid).
+ALTER TABLE auth_identities ADD COLUMN IF NOT EXISTS email text NOT NULL DEFAULT '';
+ALTER TABLE auth_identities ADD COLUMN IF NOT EXISTS email_verified boolean NOT NULL DEFAULT false;
+ALTER TABLE auth_identities ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT '';
+ALTER TABLE auth_identities ADD COLUMN IF NOT EXISTS picture text NOT NULL DEFAULT '';
+ALTER TABLE auth_identities ADD COLUMN IF NOT EXISTS updated_at timestamptz;
+ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS code_verifier text NOT NULL DEFAULT '';
+ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS redirect_uri text NOT NULL DEFAULT '';
+-- refresh_token is AES-256-GCM nonce||ciphertext with AAD provider:subject; the key never reaches the database.
+CREATE TABLE IF NOT EXISTS auth_provider_tokens (
+ provider text NOT NULL, subject text NOT NULL, refresh_token bytea NOT NULL, scope text NOT NULL DEFAULT '',
+ updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(provider, subject),
+ FOREIGN KEY(provider, subject) REFERENCES auth_identities(provider, subject) ON DELETE CASCADE
+);
