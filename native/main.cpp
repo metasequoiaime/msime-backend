@@ -193,6 +193,8 @@ static json execute(const json& request, const std::filesystem::path& resources,
     }
     if(op=="dictionary")return query_dictionary_catalog(request,dictionary_root);
     if (op == "listed_pinyin_batch") return listed_pinyin_batch(request, dictionary_root / assets::main_dictionary);
+    if (op == "listed_english_batch") return listed_english_batch(request, dictionary_root / assets::english_dictionary);
+    if (op == "pinyin_weight_medians") return pinyin_weight_medians(dictionary_root / assets::main_dictionary);
     if (op == "validate_dictionary") {
         const auto kind = request.at("kind").get<std::string>();
         PersonalDictionaryKind type;

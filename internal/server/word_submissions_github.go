@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -20,19 +21,22 @@ import (
 
 // Outcomes of the GitHub part of a submission. Anything that fails before the first write that could carry entries is errWordsUnavailable (nothing was submitted, the visitor may simply try again). A write that GitHub may or may not have applied is errWordsUncertain and is never retried, because a retry could duplicate the entries.
 var (
-	errWordsConflict      = errors.New("words.txt changed concurrently")
+	errWordsConflict      = errors.New("dictionary file changed concurrently")
 	errWordsUncertain     = errors.New("GitHub write outcome unknown")
 	errWordsUnavailable   = errors.New("GitHub unavailable")
 	errWordsMisconfigured = errors.New("GitHub App credentials rejected")
 )
 
-const wordsPullRequestTitle = "Community word submissions"
+const wordsPullRequestBody = `This is the rolling pull request for dictionary entries submitted anonymously through the forms on the MSIME website (msime.app). Each commit on this branch is one submission of one kind; its commit message lists the entries together with the submitter's note, if any.
 
-const wordsPullRequestBody = `This is the rolling pull request for words submitted anonymously through the word form on the MSIME website (msime.app). Each commit on this branch is one submission: it appends ` + "`word<TAB>pinyin<TAB>5000`" + ` lines to ` + "`custom/words.txt`" + `, and its commit message lists the entries together with the submitter's note, if any.
+- Words append ` + "`word<TAB>pinyin<TAB>weight`" + ` lines to ` + "`custom/words.txt`" + `. The weight is the median weight of the base dictionary's entries with the same number of syllables, kept within the range words.txt already uses.
+- English words append ` + "`word<TAB>display<TAB>1`" + ` lines to ` + "`custom/english.txt`" + `, where word is the lowercase key that is typed and display the form the candidate shows. No dictionary build reads this file yet.
+- Translations append ` + "`source<TAB>gloss`" + ` lines to ` + "`custom/translations.txt`" + `. A later line for the same source overrides an earlier one, so a submission may correct an existing translation.
 
 - Submissions are opened by the MSIME word-submission GitHub App after a Cloudflare Turnstile check and a per-address rate limit. No account or personal data is collected.
 - Every entry is reviewed by maintainers before merge. Remove or fix entries on this branch as needed; new submissions keep appending here while this pull request is open.
-- The msime-dictionary CI validates the format, readings and duplicates.
+- The msime-dictionary CI validates the format, readings, weights and duplicates of words.txt additions. English words and translations are checked by review only.
+- Squash-merge this pull request. Its title is kept at what this branch adds over the base branch (for example ` + "`feat(custom): add 3 words, 1 English word and 2 translations`" + `) and becomes the commit that release-please turns into the next ` + "`sources-v*`" + ` release.
 - Merging here does not ship the entries by itself. They reach users once msime moves its custom-dictionary pin in ` + "`resources/dictionary-sources.lock.json`" + ` to a msime-dictionary commit that contains them and cuts the next ` + "`dict-v*`" + ` release on metasequoiaime/msime with ` + "`release-dictionary.yml`" + `; msime's desktop builds take that release.
 `
 
@@ -67,7 +71,7 @@ func (ws *wordSubmitter) githubRequest(ctx context.Context, token, method, path 
 		return githubResponse{}, err
 	}
 	defer resp.Body.Close()
-	// words.txt comes back base64-encoded inside JSON; 8 MiB leaves room for a file several times the size of today's.
+	// Files come back base64-encoded inside JSON; 8 MiB leaves room for a file several times the size of today's largest, translations.txt.
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20+1))
 	if err != nil {
 		return githubResponse{status: resp.StatusCode}, err
@@ -129,7 +133,8 @@ func (ws *wordSubmitter) installationToken(ctx context.Context) (string, error) 
 }
 
 type githubPull struct {
-	Number int `json:"number"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
 	Head   struct {
 		Ref  string `json:"ref"`
 		Repo *struct {
@@ -157,8 +162,8 @@ func (f githubFile) text() (string, bool) {
 	return string(raw), err == nil && utf8.Valid(raw)
 }
 
-// submit appends the entries to words.txt on the open rolling pull request, or on a new community-words/<UTC timestamp> branch with a new pull request when none is open, and returns the pull request number. Branch names carry a timestamp, so a merged or closed pull request is never reused. It never deletes, force-pushes or retries a write.
-func (ws *wordSubmitter) submit(ctx context.Context, entries []wordSubmissionEntry, note string) (int, error) {
+// submit appends the submission to its file on the open rolling pull request, or on a new community-words/<UTC timestamp> branch with a new pull request when none is open, and returns the pull request number. Every kind shares that one branch and pull request. Branch names carry a timestamp, so a merged or closed pull request is never reused. It never deletes, force-pushes or retries a write.
+func (ws *wordSubmitter) submit(ctx context.Context, sub submission) (int, error) {
 	ws.writes.Lock()
 	defer ws.writes.Unlock()
 	token, err := ws.installationToken(ctx)
@@ -176,6 +181,17 @@ func (ws *wordSubmitter) submit(ctx context.Context, entries []wordSubmissionEnt
 			return phaseError(errWordsUnavailable, phase, r, errors.New("invalid response"))
 		}
 		return nil
+	}
+	readText := func(phase, ref string) (githubFile, string, error) {
+		var file githubFile
+		if err := read(phase, "/contents/"+sub.kind.file+"?"+url.Values{"ref": {ref}}.Encode(), &file); err != nil {
+			return file, "", err
+		}
+		content, ok := file.text()
+		if !ok {
+			return file, "", phaseError(errWordsUnavailable, phase, githubResponse{status: 200}, errors.New("unexpected content encoding"))
+		}
+		return file, content, nil
 	}
 	var pulls []githubPull
 	if err = read("list pull requests", "/pulls?"+url.Values{"state": {"open"}, "base": {g.Branch}, "per_page": {"100"}, "sort": {"created"}, "direction": {"asc"}}.Encode(), &pulls); err != nil {
@@ -207,16 +223,22 @@ func (ws *wordSubmitter) submit(ctx context.Context, entries []wordSubmissionEnt
 		}
 		branch, readRef = wordSubmissionBranches+ws.now().UTC().Format("20060102-150405"), base.Object.SHA
 	}
-	var file githubFile
-	if err = read("read "+wordSubmissionsFile, "/contents/"+wordSubmissionsFile+"?"+url.Values{"ref": {readRef}}.Encode(), &file); err != nil {
+	// The base branch's copy gives the weight range words.txt entries must keep, and what the rolling pull request adds for its title. A new branch starts at the base, so there the file just read is that copy.
+	baseContent := ""
+	if open != nil {
+		if _, baseContent, err = readText("read base "+sub.kind.file, g.Branch); err != nil {
+			return 0, err
+		}
+	}
+	file, content, err := readText("read "+sub.kind.file, readRef)
+	if err != nil {
 		return 0, err
 	}
-	content, ok := file.text()
-	if !ok {
-		return 0, phaseError(errWordsUnavailable, "read "+wordSubmissionsFile, githubResponse{status: 200}, errors.New("unexpected content encoding"))
+	if open == nil {
+		baseContent = content
 	}
 	// Checked before creating a branch so a rejected submission leaves nothing behind.
-	if listed := listedWords(content, entries); len(listed) > 0 {
+	if listed := listedLines(content, sub.lines); len(listed) > 0 {
 		return 0, listed
 	}
 	if open == nil {
@@ -231,26 +253,28 @@ func (ws *wordSubmitter) submit(ctx context.Context, entries []wordSubmissionEnt
 			return 0, phaseError(errWordsUnavailable, "create branch", r, err)
 		}
 	}
-	// The blob SHA makes this a compare-and-swap: if words.txt changed on the branch since it was read, GitHub rejects the write and the visitor is asked to submit again.
-	r, err := ws.githubRequest(ctx, token, "PUT", repo+"/contents/"+wordSubmissionsFile, map[string]string{
-		"message": wordsCommitMessage(entries, note),
-		"content": base64.StdEncoding.EncodeToString([]byte(appendWordLines(content, entries))),
+	// The blob SHA makes this a compare-and-swap: if the file changed on the branch since it was read, GitHub rejects the write and the visitor is asked to submit again.
+	updated := appendSubmissionLines(content, sub, baseContent)
+	r, err := ws.githubRequest(ctx, token, "PUT", repo+"/contents/"+sub.kind.file, map[string]string{
+		"message": submissionCommitMessage(sub),
+		"content": base64.StdEncoding.EncodeToString([]byte(updated)),
 		"sha":     file.SHA,
 		"branch":  branch,
 	})
 	switch {
 	case err != nil || r.status >= 500:
-		return 0, phaseError(errWordsUncertain, "commit "+wordSubmissionsFile, r, err)
+		return 0, phaseError(errWordsUncertain, "commit "+sub.kind.file, r, err)
 	case r.status == 409 || r.status == 422:
-		return 0, phaseError(errWordsConflict, "commit "+wordSubmissionsFile, r, nil)
+		return 0, phaseError(errWordsConflict, "commit "+sub.kind.file, r, nil)
 	case !r.ok():
-		return 0, phaseError(errWordsUnavailable, "commit "+wordSubmissionsFile, r, nil)
+		return 0, phaseError(errWordsUnavailable, "commit "+sub.kind.file, r, nil)
 	}
 	if open != nil {
+		ws.retitle(ctx, token, *open, map[string]int{sub.kind.name: addedLines(baseContent, updated)})
 		return open.Number, nil
 	}
 	// From here on the entries are committed, so failing to open the pull request is reported as uncertain rather than as not submitted.
-	r, err = ws.githubRequest(ctx, token, "POST", repo+"/pulls", map[string]any{"title": wordsPullRequestTitle, "head": branch, "base": g.Branch, "body": wordsPullRequestBody})
+	r, err = ws.githubRequest(ctx, token, "POST", repo+"/pulls", map[string]any{"title": submissionTitle(map[string]int{sub.kind.name: len(sub.lines)}), "head": branch, "base": g.Branch, "body": wordsPullRequestBody})
 	var created struct {
 		Number int `json:"number"`
 	}
@@ -258,4 +282,53 @@ func (ws *wordSubmitter) submit(ctx context.Context, entries []wordSubmissionEnt
 		return 0, phaseError(errWordsUncertain, "open pull request", r, err)
 	}
 	return created.Number, nil
+}
+
+// retitle keeps the rolling pull request's title at what its branch adds over the base branch in every submission file; counts already holds the file just written. The entries are committed by now, so a failure here is only logged: the next submission corrects the title, and maintainers can still edit it before merging.
+func (ws *wordSubmitter) retitle(ctx context.Context, token string, open githubPull, counts map[string]int) {
+	for _, kind := range submissionKinds {
+		if _, done := counts[kind.name]; done {
+			continue
+		}
+		base, err := ws.fileText(ctx, token, kind.file, ws.config.GitHub.Branch)
+		head := ""
+		if err == nil {
+			head, err = ws.fileText(ctx, token, kind.file, open.Head.Ref)
+		}
+		if err != nil {
+			slog.Warn("word submissions: pull request title not updated", "pull", open.Number, "reason", err.Error())
+			return
+		}
+		counts[kind.name] = addedLines(base, head)
+	}
+	title := submissionTitle(counts)
+	if title == open.Title {
+		return
+	}
+	r, err := ws.githubRequest(ctx, token, "PATCH", "/repos/"+ws.config.GitHub.Repository+"/pulls/"+strconv.Itoa(open.Number), map[string]string{"title": title})
+	if err != nil || !r.ok() {
+		slog.Warn("word submissions: pull request title not updated", "pull", open.Number, "status", r.status)
+	}
+}
+
+// fileText reads a file at ref for counting only; a file the ref does not have reads as empty.
+func (ws *wordSubmitter) fileText(ctx context.Context, token, path, ref string) (string, error) {
+	r, err := ws.githubRequest(ctx, token, "GET", "/repos/"+ws.config.GitHub.Repository+"/contents/"+path+"?"+url.Values{"ref": {ref}}.Encode(), nil)
+	switch {
+	case err != nil:
+		return "", err
+	case r.status == 404:
+		return "", nil
+	case !r.ok():
+		return "", errors.New("read " + path + ": status " + strconv.Itoa(r.status))
+	}
+	var file githubFile
+	if json.Unmarshal(r.body, &file) != nil {
+		return "", errors.New("read " + path + ": invalid response")
+	}
+	content, ok := file.text()
+	if !ok {
+		return "", errors.New("read " + path + ": unexpected content encoding")
+	}
+	return content, nil
 }

@@ -327,7 +327,13 @@
       "internal/server/word_submissions_test.go::TestWordSubmissionAppendsToOpenPullRequest",
       "internal/server/word_submissions_test.go::TestWordSubmissionConflictIsNotRetried",
       "internal/server/word_submissions_test.go::TestWordSubmissionUncertainOutcome",
-      "internal/server/word_submissions_test.go::TestWordSubmissionGitHubFailuresBeforeWriting"
+      "internal/server/word_submissions_test.go::TestWordSubmissionGitHubFailuresBeforeWriting",
+      "internal/server/word_submissions_test.go::TestWordSubmissionKindValidation",
+      "internal/server/word_submissions_test.go::TestWordSubmissionEnglishAndTranslations",
+      "internal/server/word_submissions_test.go::TestWordSubmissionMissingFiles",
+      "internal/server/word_submissions_test.go::TestWordSubmissionWeightMedians",
+      "internal/server/word_submissions_test.go::TestWordSubmissionRejectsShippedWords",
+      "internal/server/word_submissions_test.go::TestWordSubmissionRejectsShippedEnglish"
     ]
   },
   "admin_and_docs": {
