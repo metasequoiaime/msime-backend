@@ -13087,12 +13087,12 @@
         }
       },
       "post": {
-        "summary": "匿名提交词条到 msime-customdict 滚动 Pull Request",
+        "summary": "匿名提交词条到 msime-dictionary 滚动 Pull Request",
         "tags": [
           "词条提交"
         ],
         "security": [],
-        "description": "仅接受 allowed_origins 中网站发出的浏览器请求（必须携带 Origin）。请求体最多 16 KiB。服务端依次校验词条、Cloudflare Turnstile（action 为 words，hostname 属于 allowed_origins）以及按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，只计通过人机验证的请求），然后用仅限 msime-customdict、仅有 contents:write 与 pull_requests:write 的 GitHub App 安装令牌把 `词语<TAB>拼音<TAB>5000` 追加到 words.txt：已有开启的 community-words/* Pull Request 时追加提交，否则从主分支新建 community-words/<UTC yyyymmdd-hhmmss> 分支并开 Pull Request。写入使用文件 blob SHA 做乐观并发，冲突返回 409，服务端从不自动重试 GitHub 写入。备注会公开写入提交说明，@、#、GH- 与 :// 会插入零宽空格。服务不保存访客信息，不记录词条、备注或令牌。",
+        "description": "仅接受 allowed_origins 中网站发出的浏览器请求（必须携带 Origin）。请求体最多 16 KiB。服务端依次校验词条、Cloudflare Turnstile（action 为 words，hostname 属于 allowed_origins）以及按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，只计通过人机验证的请求），然后用仅限 msime-dictionary、仅有 contents:write 与 pull_requests:write 的 GitHub App 安装令牌把 `词语<TAB>拼音<TAB>5000` 追加到 words.txt：已有开启的 community-words/* Pull Request 时追加提交，否则从主分支新建 community-words/<UTC yyyymmdd-hhmmss> 分支并开 Pull Request。写入使用文件 blob SHA 做乐观并发，冲突返回 409，服务端从不自动重试 GitHub 写入。备注会公开写入提交说明，@、#、GH- 与 :// 会插入零宽空格。服务不保存访客信息，不记录词条、备注或令牌。",
         "requestBody": {
           "required": true,
           "content": {
@@ -13160,7 +13160,7 @@
                     "pull_request_url": {
                       "type": "string",
                       "format": "uri",
-                      "example": "https://github.com/metasequoiaime/msime-customdict/pull/12"
+                      "example": "https://github.com/metasequoiaime/msime-dictionary/pull/12"
                     }
                   },
                   "required": [

@@ -28,12 +28,12 @@ var (
 
 const wordsPullRequestTitle = "Community word submissions"
 
-const wordsPullRequestBody = `This is the rolling pull request for words submitted anonymously through the word form on the MSIME website (msime.app). Each commit on this branch is one submission: it appends ` + "`word<TAB>pinyin<TAB>5000`" + ` lines to ` + "`words.txt`" + `, and its commit message lists the entries together with the submitter's note, if any.
+const wordsPullRequestBody = `This is the rolling pull request for words submitted anonymously through the word form on the MSIME website (msime.app). Each commit on this branch is one submission: it appends ` + "`word<TAB>pinyin<TAB>5000`" + ` lines to ` + "`custom/words.txt`" + `, and its commit message lists the entries together with the submitter's note, if any.
 
 - Submissions are opened by the MSIME word-submission GitHub App after a Cloudflare Turnstile check and a per-address rate limit. No account or personal data is collected.
 - Every entry is reviewed by maintainers before merge. Remove or fix entries on this branch as needed; new submissions keep appending here while this pull request is open.
-- The msime-customdict CI validates the format, readings and duplicates.
-- After merge, the entries reach msime and MSIME-Windows through the next ` + "`dict-v*`" + ` dictionary release.
+- The msime-dictionary CI validates the format, readings and duplicates.
+- Merging here does not ship the entries by itself. They reach users once msime moves its custom-dictionary pin in ` + "`resources/dictionary-sources.lock.json`" + ` to a msime-dictionary commit that contains them and cuts the next ` + "`dict-v*`" + ` release on metasequoiaime/msime with ` + "`release-dictionary.yml`" + `; msime's desktop builds take that release.
 `
 
 type githubResponse struct {

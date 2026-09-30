@@ -78,7 +78,7 @@
       "app_id": 0,
       "installation_id": 0,
       "private_key_env": "MSIME_WORDS_GITHUB_APP_KEY",
-      "repository": "metasequoiaime/msime-customdict",
+      "repository": "metasequoiaime/msime-dictionary",
       "branch": "main"
     }
   },
