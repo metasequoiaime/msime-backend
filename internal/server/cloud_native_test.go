@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -40,6 +42,22 @@ func TestCloudNativeWholeInputCorrection(t *testing.T) {
 				t.Fatal(result)
 			}
 		})
+	}
+}
+
+func TestCloudNativeShippedWords(t *testing.T) {
+	binary, resources := os.Getenv("MSIME_ENGINE_TEST_BINARY"), os.Getenv("MSIME_ENGINE_TEST_RESOURCES")
+	if binary == "" || resources == "" {
+		t.Skip("需要真实 Engine 与发布词库")
+	}
+	s := fixture(t, nil)
+	s.config.Engine.Binary = binary
+	s.config.Engine.Resources = resources
+	entries := []wordSubmissionEntry{{"测试", "ce'shi"}, {"测试", "ce'si"}, {"未来可期", "wei'lai'ke'qi"}, {"中华人民共和国", "zhong'hua'ren'min'gong'he'guo"}, {"测测测测测测测测", "ce'ce'ce'ce'ce'ce'ce'ce"}}
+	err := s.shippedWords(context.Background(), entries)
+	var listed alreadyListedError
+	if !errors.As(err, &listed) || len(listed) != 2 || listed[0] != 0 || listed[1] != 3 {
+		t.Fatal(err, listed)
 	}
 }
 

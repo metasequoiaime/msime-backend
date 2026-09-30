@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -657,6 +659,42 @@ func TestWordSubmissionGitHubFailuresBeforeWriting(t *testing.T) {
 	// Non-base64 content is refused rather than rewritten.
 	if _, ok := (githubFile{Type: "file", Encoding: "base64", SHA: "x", Content: "!!"}).text(); ok {
 		t.Fatal("invalid base64 accepted")
+	}
+}
+
+func fakeEngine(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "msime-engine")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestWordSubmissionRejectsShippedWords(t *testing.T) {
+	s, f, _ := wordsFixture(t)
+	request := filepath.Join(t.TempDir(), "request.json")
+	s.config.Engine.Binary = fakeEngine(t, `cat > "`+request+`"; echo '{"listed":[false,true]}'`)
+	w := postWords(s, `{"entries":[{"word":"堪堪","pinyin":"kan'kan"},{"word":"测试","pinyin":"ce'shi"}],"token":"turnstile-token"}`)
+	body := decodeBody(t, w)
+	rejected, _ := body["rejected"].([]any)
+	if w.Code != 400 || len(rejected) != 1 || rejected[0].(map[string]any)["index"] != 1.0 || rejected[0].(map[string]any)["code"] != "already_listed" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if raw, _ := os.ReadFile(request); string(raw) != `{"entries":[{"code":"kan'kan","word":"堪堪"},{"code":"ce'shi","word":"测试"}],"operation":"listed_pinyin_batch"}` {
+		t.Fatal(string(raw))
+	}
+	if f.tokens != 0 || f.count("PUT "+wordsTestRepo+"/contents/custom/words.txt") != 0 {
+		t.Fatal("an entry in the base dictionary must be rejected before GitHub is contacted", f.calls)
+	}
+
+	// The check-words gate in msime-dictionary repeats the check, so a broken or short Engine answer does not block submissions.
+	for _, script := range []string{"exit 1", `echo '{"listed":[true]}'`, `echo '{"error":"resources_unavailable"}'`} {
+		s, f, _ := wordsFixture(t)
+		s.config.Engine.Binary = fakeEngine(t, "cat >/dev/null; "+script)
+		if w := postWords(s, validWords); w.Code != 201 || f.count("PUT "+wordsTestRepo+"/contents/custom/words.txt") != 1 {
+			t.Fatal(script, w.Code, w.Body.String())
+		}
 	}
 }
 

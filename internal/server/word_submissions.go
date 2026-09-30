@@ -326,7 +326,10 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	number, err := ws.submit(ctx, input.Entries, note)
+	var number int
+	if err = s.shippedWords(ctx, input.Entries); err == nil {
+		number, err = ws.submit(ctx, input.Entries, note)
+	}
 	var listed alreadyListedError
 	switch {
 	case err == nil:
@@ -512,6 +515,38 @@ func appendWordLines(content string, entries []wordSubmissionEntry) string {
 }
 
 type alreadyListedError []int
+
+// shippedWords rejects entries the base dictionary in the Engine resources already holds, before GitHub is touched. The msime-dictionary check-words gate repeats this against the current release, so an unavailable Engine only logs and lets the submission through.
+func (s *Server) shippedWords(ctx context.Context, entries []wordSubmissionEntry) error {
+	batch := make([]map[string]string, len(entries))
+	for i, e := range entries {
+		batch[i] = map[string]string{"code": e.Pinyin, "word": e.Word}
+	}
+	raw, err := s.config.Engine.Query(ctx, map[string]any{"operation": "listed_pinyin_batch", "entries": batch})
+	var out struct {
+		Listed []bool `json:"listed"`
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &out)
+	}
+	if err == nil && len(out.Listed) != len(entries) {
+		err = errors.New("listed count mismatch")
+	}
+	if err != nil {
+		slog.Warn("word submissions: base dictionary check skipped", "reason", err.Error())
+		return nil
+	}
+	var listed alreadyListedError
+	for i, found := range out.Listed {
+		if found {
+			listed = append(listed, i)
+		}
+	}
+	if len(listed) == 0 {
+		return nil
+	}
+	return listed
+}
 
 func (alreadyListedError) Error() string { return "entries already listed" }
 

@@ -116,3 +116,49 @@ query_dictionary_catalog(const nlohmann::json &request,
           {"has_more", more},
           {"normalized", text}};
 }
+
+// Which (code, word) pairs the shipped pinyin dictionary already holds. Codes are ' separated syllables exactly as stored; the table name comes from Engine.
+inline nlohmann::json listed_pinyin_batch(const nlohmann::json &request,
+                                          const std::filesystem::path &path) {
+  using namespace backend_ranking;
+  const auto &entries = request.at("entries");
+  if (!entries.is_array() || entries.empty() || entries.size() > 50)
+    return {{"error", "invalid_request"}};
+  sqlite3 *raw = nullptr;
+  if (sqlite3_open_v2(path.string().c_str(), &raw, SQLITE_OPEN_READONLY,
+                      nullptr) != SQLITE_OK) {
+    if (raw)
+      sqlite3_close(raw);
+    return {{"error", "resources_unavailable"}};
+  }
+  DB db(raw, sqlite3_close);
+  auto listed = json::array();
+  for (const auto &entry : entries) {
+    const auto code = entry.at("code").get<std::string>();
+    const auto word = entry.at("word").get<std::string>();
+    const auto table = quanpin::build_table_name(quanpin::split_segments(code));
+    if (word.empty() || table.empty() || table.find('"') != std::string::npos)
+      return {{"error", "invalid_request"}};
+    auto exists = prepare(
+        db.get(), "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1");
+    if (!exists)
+      return {{"error", "engine_failure"}};
+    bind_text(exists.get(), 1, table);
+    if (sqlite3_step(exists.get()) != SQLITE_ROW) {
+      listed.push_back(false);
+      continue;
+    }
+    auto stmt = prepare(db.get(), ("SELECT 1 FROM \"" + table +
+                                   "\" WHERE key=?1 AND value=?2 LIMIT 1")
+                                      .c_str());
+    if (!stmt)
+      return {{"error", "engine_failure"}};
+    bind_text(stmt.get(), 1, code);
+    bind_text(stmt.get(), 2, word);
+    const int step = sqlite3_step(stmt.get());
+    if (step != SQLITE_ROW && step != SQLITE_DONE)
+      return {{"error", "engine_failure"}};
+    listed.push_back(step == SQLITE_ROW);
+  }
+  return {{"listed", listed}};
+}
