@@ -120,6 +120,9 @@ func clientSafeResource(name string, max int) bool {
 	return true
 }
 
+// SafeResource exposes clientSafeResource to other packages that accept package paths from clients, so they apply exactly the client's rule.
+func SafeResource(name string, max int) bool { return clientSafeResource(name, max) }
+
 // packageFiles answers what the client learns from the filesystem: whether a relative path exists (as a file or a directory) and whether it is a regular file. skin.toml is a file of every package.
 type packageFiles map[string]bool
 

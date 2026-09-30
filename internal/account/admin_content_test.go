@@ -2,6 +2,9 @@ package account
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -66,6 +69,63 @@ func TestAdminContentDetails(t *testing.T) {
 		if w := call("GET", "/api/"+path, ""); w.Code != 404 {
 			t.Fatal(path, w.Code)
 		}
+	}
+	// Candidate-skin details carry the manifest text and per-file digests, never image bytes.
+	candidate := "ac334455-1234-4234-8234-123456789abc"
+	manifest, files := candidateFixture(t, "shared")
+	if _, err := db.pool.Exec(ctx, `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,description,version,license_code,license_assets,manifest,preview_path,request_sha256) VALUES($1,$2,'shared','Candidate','Window skin','1.0','MIT','CC-BY-4.0',$3,'preview.png',$4)`, candidate, user.User.ID, []byte(manifest), hash(candidate)); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range files {
+		if _, err := db.pool.Exec(ctx, `INSERT INTO community_candidate_skin_files(skin_id,path,bytes) VALUES($1,$2,$3)`, candidate, path, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, query := range []string{`INSERT INTO community_candidate_skin_downloads(skin_id,user_id) VALUES($1,$2)`, `INSERT INTO community_candidate_skin_ratings(skin_id,user_id,stars) VALUES($1,$2,3)`} {
+		if _, err := db.pool.Exec(ctx, query, candidate, user.User.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := call("GET", "/api/candidate-skins/"+candidate, "")
+	var detail struct {
+		Owner     string `json:"owner_id"`
+		PackageID string `json:"package_id"`
+		Content   string `json:"content"`
+		License   struct {
+			Assets string `json:"assets"`
+		} `json:"license"`
+		Files []struct {
+			Path   string `json:"path"`
+			Size   int    `json:"size"`
+			SHA256 string `json:"sha256"`
+		} `json:"files"`
+		Downloads int     `json:"downloads"`
+		Rating    float64 `json:"rating_average"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.Owner != user.User.ID || detail.PackageID != "shared" || detail.Content != manifest || detail.License.Assets != "CC-BY-4.0" || len(detail.Files) != 2 || detail.Files[0].Path != "assets/deco.jpg" || detail.Downloads != 1 || detail.Rating != 3 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, f := range detail.Files {
+		sum := sha256.Sum256(files[f.Path])
+		if f.Size != len(files[f.Path]) || f.SHA256 != hex.EncodeToString(sum[:]) {
+			t.Fatal("file digest", f)
+		}
+		if strings.Contains(w.Body.String(), base64.StdEncoding.EncodeToString(files[f.Path])) || strings.Contains(w.Body.String(), `"bytes"`) {
+			t.Fatal("image bytes leaked")
+		}
+	}
+	if w := call("GET", "/api/candidate-skins/missing", ""); w.Code != 404 {
+		t.Fatal(w.Code)
+	}
+	if w := call("POST", "/api/actions", `{"action":"delete_candidate_skin","id":"`+candidate+`"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := call("POST", "/api/actions", `{"action":"delete_candidate_skin","id":"`+candidate+`"}`); w.Code != 404 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var candidateRows int
+	if err := db.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM community_candidate_skin_files WHERE skin_id=$1)+(SELECT count(*) FROM community_candidate_skin_downloads WHERE skin_id=$1)+(SELECT count(*) FROM community_candidate_skin_ratings WHERE skin_id=$1)`, candidate).Scan(&candidateRows); err != nil || candidateRows != 0 {
+		t.Fatal(candidateRows, err)
 	}
 	if w := call("GET", "/api/skins/bad/path", ""); w.Code != 400 {
 		t.Fatal(w.Code)

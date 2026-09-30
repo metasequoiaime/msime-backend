@@ -68,10 +68,15 @@ func TestAdminDataAndActions(t *testing.T) {
 	if _, err := db.pool.Exec(ctx, `INSERT INTO community_resources(id,owner_id,kind,name,content) VALUES('dict-test',$1,'dictionary','Dict','{"entries":[]}'),('reply-test',$1,'reply','Reply','{"prompt":"Hello"}')`, user.User.ID); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"users", "skins", "dictionaries", "replies", "downloads", "crashes", "audit"} {
+	insertCandidateSkin(t, db, "ad334455-1234-4234-8234-123456789abc", user.User.ID, "Candidate")
+	for _, path := range []string{"users", "skins", "candidate-skins", "dictionaries", "replies", "downloads", "crashes", "audit"} {
 		if w := call("GET", "/api/"+path, "", false); w.Code != 200 || !strings.Contains(w.Body.String(), `"items"`) {
 			t.Fatal(path, w.Body.String())
 		}
+	}
+	// The candidate-skin list carries metadata and sizes, never manifest or image bytes.
+	if w := call("GET", "/api/candidate-skins", "", false); !strings.Contains(w.Body.String(), `"package_id":"shared"`) || !strings.Contains(w.Body.String(), `"file_count":1`) || strings.Contains(w.Body.String(), "schema_version") || strings.Contains(w.Body.String(), `"bytes"`) {
+		t.Fatal(w.Body.String())
 	}
 	for _, path := range []string{"users?page=0", "users?page=oops", "users?page=10001"} {
 		if w := call("GET", "/api/"+path, "", false); w.Code != 400 {
@@ -81,7 +86,7 @@ func TestAdminDataAndActions(t *testing.T) {
 	if w := call("GET", "/api/users?q=%27%3B%20DROP%20TABLE%20auth_users%3B--", "", false); w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
-	for _, action := range []struct{ action, id string }{{"resolve_crash", "test-crash-000001"}, {"reopen_crash", "test-crash-000001"}, {"revoke_sessions", user.User.ID}, {"delete_skin", "skin-test"}, {"delete_dictionary", "dict-test"}, {"delete_reply", "reply-test"}} {
+	for _, action := range []struct{ action, id string }{{"resolve_crash", "test-crash-000001"}, {"reopen_crash", "test-crash-000001"}, {"revoke_sessions", user.User.ID}, {"delete_skin", "skin-test"}, {"delete_candidate_skin", "ad334455-1234-4234-8234-123456789abc"}, {"delete_dictionary", "dict-test"}, {"delete_reply", "reply-test"}} {
 		body, _ := json.Marshal(map[string]string{"action": action.action, "id": action.id})
 		w := call("POST", "/api/actions", string(body), false)
 		if w.Code != 200 {
@@ -92,7 +97,7 @@ func TestAdminDataAndActions(t *testing.T) {
 		t.Fatal("session not revoked", err)
 	}
 	var audits int
-	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM admin_audit WHERE actor='google:test:admin@example.test'`).Scan(&audits); err != nil || audits != 6 {
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM admin_audit WHERE actor='google:test:admin@example.test'`).Scan(&audits); err != nil || audits != 7 {
 		t.Fatal(audits, err)
 	}
 	if w := call("POST", "/api/actions", `{"action":"delete_skin","id":"missing"}`, false); w.Code != 404 {

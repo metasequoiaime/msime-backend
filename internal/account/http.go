@@ -116,22 +116,41 @@ func (a *Service) RateLimit(ctx context.Context, scope, subject string, limit in
 func IsPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/community/") || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
 }
+
+// accountRouteTimeout is the context each mounted route runs under: 15 s, except the two uploads whose body alone can take longer, the dictionary snapshot restore and a candidate-skin publish.
+func accountRouteTimeout(pattern string) time.Duration {
+	switch pattern {
+	case "PUT /v1/users/me/dictionary/snapshot":
+		return snapshotRestoreTimeout
+	case "POST /v1/community/candidate-skins":
+		return candidatePublishTimeout
+	default:
+		return 15 * time.Second
+	}
+}
 func Mount(mux *http.ServeMux, a *Service) {
 	for pattern, method := range map[string]func(*Service, http.ResponseWriter, *http.Request){
-		"POST /v1/community/resources/{id}/apply": (*Service).resourceApply,
-		"GET /v1/community/resources":             (*Service).resourceList,
-		"POST /v1/community/resources":            (*Service).resourcePublish,
-		"GET /v1/community/resources/{id}":        (*Service).resourceDetail,
-		"DELETE /v1/community/resources/{id}":     (*Service).resourceDelete,
-		"PUT /v1/community/resources/{id}/save":   (*Service).resourceSave,
-		"PUT /v1/community/resources/{id}/rating": (*Service).resourceRate,
-		"GET /v1/community/stats":                 (*Service).communityStats,
-		"GET /v1/community/skins":                 (*Service).communityList,
-		"POST /v1/community/skins":                (*Service).communityPublish,
-		"GET /v1/community/skins/{id}":            (*Service).communityDetail,
-		"DELETE /v1/community/skins/{id}":         (*Service).communityDelete,
-		"POST /v1/community/skins/{id}/download":  (*Service).communityDownload,
-		"PUT /v1/community/skins/{id}/rating":     (*Service).communityRate,
+		"POST /v1/community/resources/{id}/apply":          (*Service).resourceApply,
+		"GET /v1/community/resources":                      (*Service).resourceList,
+		"POST /v1/community/resources":                     (*Service).resourcePublish,
+		"GET /v1/community/resources/{id}":                 (*Service).resourceDetail,
+		"DELETE /v1/community/resources/{id}":              (*Service).resourceDelete,
+		"PUT /v1/community/resources/{id}/save":            (*Service).resourceSave,
+		"PUT /v1/community/resources/{id}/rating":          (*Service).resourceRate,
+		"GET /v1/community/stats":                          (*Service).communityStats,
+		"GET /v1/community/candidate-skins":                (*Service).communityCandidateList,
+		"POST /v1/community/candidate-skins":               (*Service).communityCandidatePublish,
+		"GET /v1/community/candidate-skins/{id}":           (*Service).communityCandidateDetail,
+		"DELETE /v1/community/candidate-skins/{id}":        (*Service).communityCandidateDelete,
+		"GET /v1/community/candidate-skins/{id}/preview":   (*Service).communityCandidatePreview,
+		"POST /v1/community/candidate-skins/{id}/download": (*Service).communityCandidateDownload,
+		"PUT /v1/community/candidate-skins/{id}/rating":    (*Service).communityCandidateRate,
+		"GET /v1/community/skins":                          (*Service).communityList,
+		"POST /v1/community/skins":                         (*Service).communityPublish,
+		"GET /v1/community/skins/{id}":                     (*Service).communityDetail,
+		"DELETE /v1/community/skins/{id}":                  (*Service).communityDelete,
+		"POST /v1/community/skins/{id}/download":           (*Service).communityDownload,
+		"PUT /v1/community/skins/{id}/rating":              (*Service).communityRate,
 
 		"DELETE /v1/users/me/dictionary/candidates":         (*Service).candidateDelete,
 		"PUT /v1/users/me/dictionary/snapshot":              (*Service).restoreDictionarySnapshot,
@@ -173,11 +192,7 @@ func Mount(mux *http.ServeMux, a *Service) {
 				writeError(w, 503, "user_auth_disabled")
 				return
 			}
-			timeout := 15 * time.Second
-			if pattern == "PUT /v1/users/me/dictionary/snapshot" {
-				timeout = snapshotRestoreTimeout
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			ctx, cancel := context.WithTimeout(r.Context(), accountRouteTimeout(pattern))
 			defer cancel()
 			r = r.WithContext(ctx)
 			host, _, e := net.SplitHostPort(r.RemoteAddr)

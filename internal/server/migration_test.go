@@ -80,14 +80,14 @@ func TestStartupMigratesAnEmptyDatabase(t *testing.T) {
 	var tables int
 	if err = admin.QueryRow(context.Background(), `SELECT count(*) FROM information_schema.tables
  WHERE table_schema=$1 AND table_name IN
- ('auth_users','user_preferences','user_dictionary_entries','community_skins','admin_members','translation_cache','candidate_skins','candidate_skin_resources')`,
+ ('auth_users','user_preferences','user_dictionary_entries','community_skins','admin_members','translation_cache','candidate_skins','candidate_skin_resources','community_candidate_skins','community_candidate_skin_files','community_candidate_skin_downloads','community_candidate_skin_ratings')`,
 		schema).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
 	s.CloseAccounts()
 	s.Close()
-	if tables != 8 {
-		t.Fatalf("startup migration created %d of 8 expected tables", tables)
+	if tables != 12 {
+		t.Fatalf("startup migration created %d of 12 expected tables", tables)
 	}
 
 	// 再起一次。迁移必须可重复执行 —— 多副本滚动升级时每个副本都会走这条路。
@@ -162,5 +162,42 @@ func TestStartupMigratesCandidateSkinTablesAddedLater(t *testing.T) {
 	var tables int
 	if err = admin.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema=$1 AND table_name IN ('candidate_skins','candidate_skin_resources')`, schema).Scan(&tables); err != nil || tables != 2 {
 		t.Fatal(tables, err)
+	}
+}
+
+// A database migrated before community candidate skin packages existed keeps every older table, so only the Ready probe on each community_candidate_skin table makes startup create it. Each table is dropped on its own, so a missing probe for any one of them fails.
+func TestStartupMigratesCommunityCandidateSkinTablesAddedLater(t *testing.T) {
+	for _, table := range []string{"community_candidate_skins", "community_candidate_skin_files", "community_candidate_skin_downloads", "community_candidate_skin_ratings"} {
+		t.Run(table, func(t *testing.T) {
+			admin, schema := disposableSchema(t)
+			ctx := context.Background()
+			db, err := account.Open(ctx, os.Getenv("MSIME_TEST_DATABASE_URL"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+			// CASCADE drops only the child tables' foreign keys when the parent table goes; the child tables stay.
+			if _, err = admin.Exec(ctx, "DROP TABLE "+pgx.Identifier{schema}.Sanitize()+"."+pgx.Identifier{table}.Sanitize()+" CASCADE"); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
+			t.Setenv("TEST_CLIENT_TOKEN", testToken)
+			s, err := New(Config{
+				Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
+				Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
+			})
+			if err != nil {
+				t.Fatalf("missing %s was not migrated at startup: %v", table, err)
+			}
+			defer s.Close()
+			defer s.CloseAccounts()
+			var exists bool
+			if err = admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2)`, schema, table).Scan(&exists); err != nil || !exists {
+				t.Fatal(table, exists, err)
+			}
+		})
 	}
 }

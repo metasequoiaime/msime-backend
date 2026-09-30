@@ -11301,6 +11301,839 @@
         }
       }
     },
+    "/v1/community/candidate-skins": {
+      "get": {
+        "summary": "浏览候选窗皮肤",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "mine"
+              ],
+              "default": ""
+            }
+          }
+        ],
+        "description": "公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，需要用户会话。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "skins": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "package_id": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "author": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "string"
+                          },
+                          "license": {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string"
+                              },
+                              "assets": {
+                                "type": "string"
+                              },
+                              "source": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "assets",
+                              "source"
+                            ]
+                          },
+                          "size": {
+                            "type": "integer",
+                            "description": "重新编码后的图片总字节数"
+                          },
+                          "file_count": {
+                            "type": "integer",
+                            "description": "图片数量，不含 skin.toml"
+                          },
+                          "downloads": {
+                            "type": "integer"
+                          },
+                          "rating_count": {
+                            "type": "integer"
+                          },
+                          "rating_average": {
+                            "type": "number"
+                          },
+                          "owned": {
+                            "type": "boolean"
+                          },
+                          "my_rating": {
+                            "type": "integer"
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      }
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        }
+      },
+      "post": {
+        "summary": "发布候选窗皮肤包",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [],
+        "description": "请求最多 3,200,000 字节（高于其他 JSON 接口的 64 KiB）。只接受 skin.toml 加 PNG/JPEG 图片（最多 3 个文件，均须被清单引用）：单个图片不超过 1 MiB、合计不超过 2 MiB，每边 1 到 2048 像素、整包不超过 800 万像素；必须用 preview 指定一张包内图片作为预览图（重新编码后不超过 256 KiB），[license] 必须填写非空 assets。服务器解码后重新编码图片，去除 EXIF、XMP、ICC 等元数据。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 款，每小时最多发布 10 次。发布后不能修改，更新请发布新作品。 详见 docs/skin-community.md。",
+        "responses": {
+          "201": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "package_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "assets": {
+                          "type": "string"
+                        },
+                        "source": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "assets",
+                        "source"
+                      ]
+                    },
+                    "size": {
+                      "type": "integer",
+                      "description": "重新编码后的图片总字节数"
+                    },
+                    "file_count": {
+                      "type": "integer",
+                      "description": "图片数量，不含 skin.toml"
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          },
+          "200": {
+            "description": "同一发布请求的安全重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "package_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "assets": {
+                          "type": "string"
+                        },
+                        "source": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "assets",
+                        "source"
+                      ]
+                    },
+                    "size": {
+                      "type": "integer",
+                      "description": "重新编码后的图片总字节数"
+                    },
+                    "file_count": {
+                      "type": "integer",
+                      "description": "图片数量，不含 skin.toml"
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 280
+                  },
+                  "manifest": {
+                    "type": "string",
+                    "maxLength": 65536,
+                    "description": "原样的 skin.toml 文本"
+                  },
+                  "files": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "maxProperties": 3,
+                    "additionalProperties": {
+                      "type": "string",
+                      "format": "byte"
+                    },
+                    "description": "键为包内相对路径（仅 png/jpg/jpeg），值为标准 base64。"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "description",
+                  "manifest",
+                  "files"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/community/candidate-skins/{id}": {
+      "get": {
+        "summary": "候选窗皮肤详情",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "公开详情；登录时额外返回自己的评分与是否为作者。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "package_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "assets": {
+                          "type": "string"
+                        },
+                        "source": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "assets",
+                        "source"
+                      ]
+                    },
+                    "size": {
+                      "type": "integer",
+                      "description": "重新编码后的图片总字节数"
+                    },
+                    "file_count": {
+                      "type": "integer",
+                      "description": "图片数量，不含 skin.toml"
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        }
+      },
+      "delete": {
+        "summary": "作者下架候选窗皮肤",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "仅作者可下架，连带删除图片、下载和评分记录。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        }
+      }
+    },
+    "/v1/community/candidate-skins/{id}/preview": {
+      "get": {
+        "summary": "候选窗皮肤预览图",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "公开返回重新编码后的预览图，data 为标准 base64。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "content_type": {
+                      "type": "string",
+                      "enum": [
+                        "image/png",
+                        "image/jpeg"
+                      ]
+                    },
+                    "data": {
+                      "type": "string",
+                      "format": "byte"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        }
+      }
+    },
+    "/v1/community/candidate-skins/{id}/download": {
+      "post": {
+        "summary": "下载候选窗皮肤包并去重计数",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "返回原样清单和重新编码后的图片；下载人数按账号去重。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "package_id": {
+                      "type": "string"
+                    },
+                    "manifest": {
+                      "type": "string"
+                    },
+                    "files": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "maxProperties": 3,
+                      "additionalProperties": {
+                        "type": "string",
+                        "format": "byte"
+                      },
+                      "description": "键为包内相对路径（仅 png/jpg/jpeg），值为标准 base64。"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        }
+      }
+    },
+    "/v1/community/candidate-skins/{id}/rating": {
+      "put": {
+        "summary": "为候选窗皮肤评分",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "评分需先下载且不能自评，重复提交更新同一条评分。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "stars": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stars": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5
+                  }
+                },
+                "required": [
+                  "stars"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/community/resources": {
       "get": {
         "summary": "浏览词库和回复模板",
