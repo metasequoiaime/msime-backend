@@ -61,6 +61,7 @@ type fakeWordsUpstream struct {
 	turnstileStatus int
 	pulls           []map[string]any
 	content         string
+	base            string
 	sha             string
 	status          map[string]int
 	calls           map[string]int
@@ -71,7 +72,7 @@ type fakeWordsUpstream struct {
 
 func newFakeWordsUpstream(t *testing.T) *fakeWordsUpstream {
 	f := &fakeWordsUpstream{t: t, turnstile: map[string]any{"success": true, "action": "words", "hostname": "msime.app"}, turnstileStatus: 200,
-		content: "未来可期\twei'lai'ke'qi\t1\n", sha: "sha-0", status: map[string]int{}, calls: map[string]int{}, bodies: map[string]map[string]any{}, query: map[string]url.Values{}}
+		content: "未来可期\twei'lai'ke'qi\t1\n", base: "未来可期\twei'lai'ke'qi\t1\n", sha: "sha-0", status: map[string]int{}, calls: map[string]int{}, bodies: map[string]map[string]any{}, query: map[string]url.Values{}}
 	f.server = httptest.NewTLSServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.server.Close)
 	return f
@@ -140,12 +141,16 @@ func (f *fakeWordsUpstream) serve(w http.ResponseWriter, r *http.Request) {
 	case "GET " + wordsTestRepo + "/git/ref/heads/main":
 		reply(200, map[string]any{"object": map[string]string{"sha": "base-commit"}})
 	case "GET " + wordsTestRepo + "/contents/custom/words.txt":
-		encoded := base64.StdEncoding.EncodeToString([]byte(f.content))
+		content, sha := f.content, f.sha
+		if r.URL.Query().Get("ref") == "main" {
+			content, sha = f.base, "base-sha"
+		}
+		encoded := base64.StdEncoding.EncodeToString([]byte(content))
 		var wrapped []string
 		for len(encoded) > 60 {
 			wrapped, encoded = append(wrapped, encoded[:60]), encoded[60:]
 		}
-		reply(200, map[string]any{"type": "file", "encoding": "base64", "sha": f.sha, "content": strings.Join(append(wrapped, encoded), "\n") + "\n"})
+		reply(200, map[string]any{"type": "file", "encoding": "base64", "sha": sha, "content": strings.Join(append(wrapped, encoded), "\n") + "\n"})
 	case "POST " + wordsTestRepo + "/git/refs":
 		reply(201, map[string]any{"ref": body["ref"]})
 	case "PUT " + wordsTestRepo + "/contents/custom/words.txt":
@@ -156,6 +161,8 @@ func (f *fakeWordsUpstream) serve(w http.ResponseWriter, r *http.Request) {
 		decoded, _ := base64.StdEncoding.DecodeString(body["content"].(string))
 		f.content, f.sha = string(decoded), f.sha+"+"
 		reply(200, map[string]any{"content": map[string]string{"sha": f.sha}})
+	case "PATCH " + wordsTestRepo + "/pulls/9", "PATCH " + wordsTestRepo + "/pulls/12":
+		reply(200, map[string]any{"title": body["title"]})
 	case "POST " + wordsTestRepo + "/pulls":
 		f.pulls = append(f.pulls, map[string]any{"number": 12, "head": map[string]any{"ref": body["head"], "repo": map[string]string{"full_name": "metasequoiaime/msime-dictionary"}}, "base": map[string]string{"ref": "main"}})
 		reply(201, map[string]any{"number": 12, "html_url": "https://github.com/metasequoiaime/msime-dictionary/pull/12"})
@@ -529,7 +536,7 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	}
 	pr := f.bodies["POST "+wordsTestRepo+"/pulls"]
 	body, _ := pr["body"].(string)
-	if pr["head"] != "community-words/20260930-123456" || pr["base"] != "main" || pr["title"] != wordsPullRequestTitle || !strings.Contains(body, "reviewed by maintainers") || !strings.Contains(body, "msime-dictionary CI") || !strings.Contains(body, "dict-v*") || !strings.Contains(body, "resources/dictionary-sources.lock.json") || !strings.Contains(body, "custom/words.txt") {
+	if pr["head"] != "community-words/20260930-123456" || pr["base"] != "main" || pr["title"] != "feat(words): add 2 community-submitted words" || !strings.Contains(body, "reviewed by maintainers") || !strings.Contains(body, "msime-dictionary CI") || !strings.Contains(body, "dict-v*") || !strings.Contains(body, "resources/dictionary-sources.lock.json") || !strings.Contains(body, "custom/words.txt") {
 		t.Fatal(pr)
 	}
 	if strings.Contains(body, "扛把子") || strings.Contains(body, "octocat") {
@@ -547,6 +554,9 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	if !strings.HasSuffix(f.content, "堪堪\tkan'kan\t5000\n") || f.bodies["PUT "+wordsTestRepo+"/contents/custom/words.txt"]["sha"] != "sha-0+" {
 		t.Fatal(f.content)
 	}
+	if title := f.bodies["PATCH "+wordsTestRepo+"/pulls/12"]["title"]; title != "feat(words): add 3 community-submitted words" {
+		t.Fatal("the rolling pull request title must count every entry on the branch", title)
+	}
 }
 
 func TestWordSubmissionAppendsToOpenPullRequest(t *testing.T) {
@@ -561,8 +571,10 @@ func TestWordSubmissionAppendsToOpenPullRequest(t *testing.T) {
 		{"number": 3, "head": head("feat/other", "metasequoiaime/msime-dictionary"), "base": map[string]string{"ref": "main"}},
 		{"number": 4, "head": head("community-words/20260101-000000", "someone/msime-dictionary"), "base": map[string]string{"ref": "main"}},
 		{"number": 5, "head": head("community-words/20260102-000000", ""), "base": map[string]string{"ref": "main"}},
-		{"number": 9, "head": head("community-words/20260915-080000", "metasequoiaime/msime-dictionary"), "base": map[string]string{"ref": "main"}},
+		{"number": 9, "title": "Community word submissions", "head": head("community-words/20260915-080000", "metasequoiaime/msime-dictionary"), "base": map[string]string{"ref": "main"}},
 	}
+	// A maintainer already edited the branch: one earlier entry is kept, a comment and a blank line were added.
+	f.content = f.base + "扛把子\tkang'ba'zi\t5000\n# reviewed\n\n"
 	w := postWords(s, `{"entries":[{"word":"堪堪","pinyin":"kan'kan"}],"token":"turnstile-token"}`)
 	if w.Code != 201 || strings.TrimSpace(w.Body.String()) != `{"pull_request_url":"https://github.com/metasequoiaime/msime-dictionary/pull/9"}` {
 		t.Fatal(w.Code, w.Body.String())
@@ -572,6 +584,19 @@ func TestWordSubmissionAppendsToOpenPullRequest(t *testing.T) {
 	}
 	if f.count("GET "+wordsTestRepo+"/git/ref/heads/main") != 0 || f.count("POST "+wordsTestRepo+"/git/refs") != 0 || f.count("POST "+wordsTestRepo+"/pulls") != 0 {
 		t.Fatal(f.calls)
+	}
+	if title := f.bodies["PATCH "+wordsTestRepo+"/pulls/9"]["title"]; title != "feat(words): add 2 community-submitted words" || f.query["GET "+wordsTestRepo+"/contents/custom/words.txt"] == nil {
+		t.Fatal(title)
+	}
+
+	// An up-to-date title is left alone, and a failed retitle does not fail a submission whose entries are already committed.
+	f.pulls[3]["title"] = "feat(words): add 3 community-submitted words"
+	if w = postWords(s, `{"entries":[{"word":"鼎鼎","pinyin":"ding'ding"}],"token":"turnstile-token"}`); w.Code != 201 || f.count("PATCH "+wordsTestRepo+"/pulls/9") != 1 {
+		t.Fatal(w.Code, f.calls)
+	}
+	f.status["PATCH "+wordsTestRepo+"/pulls/9"] = 500
+	if w = postWords(s, `{"entries":[{"word":"赫赫","pinyin":"he'he"}],"token":"turnstile-token"}`); w.Code != 201 || f.count("PATCH "+wordsTestRepo+"/pulls/9") != 2 {
+		t.Fatal(w.Code, f.calls)
 	}
 }
 
