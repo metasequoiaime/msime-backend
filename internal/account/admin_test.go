@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAdminDataAndActions(t *testing.T) {
@@ -77,6 +78,36 @@ func TestAdminDataAndActions(t *testing.T) {
 	// The candidate-skin list carries metadata and sizes, never manifest or image bytes.
 	if w := call("GET", "/api/candidate-skins", "", false); !strings.Contains(w.Body.String(), `"package_id":"shared"`) || !strings.Contains(w.Body.String(), `"file_count":1`) || strings.Contains(w.Body.String(), "schema_version") || strings.Contains(w.Body.String(), `"bytes"`) {
 		t.Fatal(w.Body.String())
+	}
+	// Private library rows are listed for moderation, marked and filterable by visibility.
+	insertCandidateSkin(t, db, "ad334455-1234-4234-8234-000000000002", user.User.ID, "Library")
+	if _, err := db.pool.Exec(ctx, `UPDATE community_candidate_skins SET visibility='private' WHERE id='ad334455-1234-4234-8234-000000000002'`); err != nil {
+		t.Fatal(err)
+	}
+	for query, want := range map[string]string{"": "", "?visibility=public": "ad334455-1234-4234-8234-123456789abc", "?visibility=private": "ad334455-1234-4234-8234-000000000002"} {
+		w := call("GET", "/api/candidate-skins"+query, "", false)
+		var list struct {
+			Items []struct {
+				ID         string    `json:"id"`
+				Visibility string    `json:"visibility"`
+				UpdatedAt  time.Time `json:"updated_at"`
+			} `json:"items"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &list) != nil {
+			t.Fatal(query, w.Body.String())
+		}
+		if want == "" {
+			if len(list.Items) != 2 || list.Items[0].Visibility == "" || list.Items[0].UpdatedAt.IsZero() {
+				t.Fatal(query, w.Body.String())
+			}
+		} else if len(list.Items) != 1 || list.Items[0].ID != want {
+			t.Fatal(query, w.Body.String())
+		}
+	}
+	for _, path := range []string{"candidate-skins?visibility=unlisted", "skins?visibility=public"} {
+		if w := call("GET", "/api/"+path, "", false); w.Code != 400 {
+			t.Fatal(path, w.Code)
+		}
 	}
 	for _, path := range []string{"users?page=0", "users?page=oops", "users?page=10001"} {
 		if w := call("GET", "/api/"+path, "", false); w.Code != 400 {

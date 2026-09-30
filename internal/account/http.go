@@ -128,12 +128,12 @@ func IsPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/community/") || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
 }
 
-// accountRouteTimeout is the context each mounted route runs under: 15 s, except the two uploads whose body alone can take longer, the dictionary snapshot restore and a candidate-skin publish.
+// accountRouteTimeout is the context each mounted route runs under: 15 s, except the uploads whose body alone can take longer: the dictionary snapshot restore and a candidate-skin publish or replacement.
 func accountRouteTimeout(pattern string) time.Duration {
 	switch pattern {
 	case "PUT /v1/users/me/dictionary/snapshot":
 		return snapshotRestoreTimeout
-	case "POST /v1/community/candidate-skins":
+	case "POST /v1/community/candidate-skins", "PUT /v1/community/candidate-skins/{id}":
 		return candidatePublishTimeout
 	default:
 		return 15 * time.Second
@@ -151,7 +151,10 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"GET /v1/community/stats":                          (*Service).communityStats,
 		"GET /v1/community/candidate-skins":                (*Service).communityCandidateList,
 		"POST /v1/community/candidate-skins":               (*Service).communityCandidatePublish,
+		"GET /v1/community/candidate-skins/sync":           (*Service).communityCandidateSync,
 		"GET /v1/community/candidate-skins/{id}":           (*Service).communityCandidateDetail,
+		"PUT /v1/community/candidate-skins/{id}":           (*Service).communityCandidateReplace,
+		"PATCH /v1/community/candidate-skins/{id}":         (*Service).communityCandidateVisibility,
 		"DELETE /v1/community/candidate-skins/{id}":        (*Service).communityCandidateDelete,
 		"GET /v1/community/candidate-skins/{id}/preview":   (*Service).communityCandidatePreview,
 		"POST /v1/community/candidate-skins/{id}/download": (*Service).communityCandidateDownload,

@@ -74,37 +74,42 @@ msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID
 
 ## 候选窗皮肤包分享
 
-用户可以把自己的候选窗皮肤包（msime-skins 格式，`skin.toml` 加 PNG/JPEG 图片）公开发布到社区，其他用户下载后安装到外部皮肤目录。接口位于 `/v1/community/candidate-skins`，数据存放在 `community_candidate_skins`、`community_candidate_skin_files`、`community_candidate_skin_downloads` 和 `community_candidate_skin_ratings` 四张独立的表中，与上面的精选 `candidate_skins` 表和 `/v1/skins` 目录互不影响：用户上传不会进入 `/v1/skins`。
+用户可以把自己的候选窗皮肤包（msime-skins 格式，`skin.toml` 加 PNG/JPEG 图片）公开发布到社区，其他用户下载后安装到外部皮肤目录。同一张表也是账号的皮肤库：登录后客户端把本机外部皮肤以私有（`private`）作品同步上来，私有作品只有作者本人能看到、预览和下载，作者可以随时把它转为公开。接口位于 `/v1/community/candidate-skins`，数据存放在 `community_candidate_skins`、`community_candidate_skin_files`、`community_candidate_skin_downloads` 和 `community_candidate_skin_ratings` 四张独立的表中，与上面的精选 `candidate_skins` 表和 `/v1/skins` 目录互不影响：用户上传不会进入 `/v1/skins`。
 
 ### 接口
 
-- `GET /v1/community/candidate-skins?q=&offset=0&scope=`：公开目录，按发布时间倒序每页 20 条，返回 `skins` 和 `has_more`，不含清单和图片字节。`scope=mine` 只列出自己的作品，需要用户会话；其他 scope 返回 400 `invalid_scope`。
-- `GET /v1/community/candidate-skins/{id}`：公开详情；登录时额外返回自己的评分与是否为作者。
-- `GET /v1/community/candidate-skins/{id}/preview`：公开返回预览图 `{path,content_type,data}`，data 为标准 base64，content_type 为 `image/png` 或 `image/jpeg`。
-- `POST /v1/community/candidate-skins`：需要用户会话，提交 `{id,name,description,manifest,files}`。manifest 为原样的 skin.toml 文本，files 的键为包内相对路径、值为标准 base64。首次发布返回 201，同一请求重试返回 200。
-- `POST /v1/community/candidate-skins/{id}/download`：需要用户会话，返回 `{id,package_id,manifest,files}`，每个账号只计一次下载。
-- `PUT /v1/community/candidate-skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。必须已下载，作者不可自评；重复提交更新同一条评分。
-- `DELETE /v1/community/candidate-skins/{id}`：仅作者可下架，连带删除图片、下载和评分记录；不删除其他设备已安装的副本。
+- `GET /v1/community/candidate-skins?q=&offset=0&scope=&fields=`：公开目录，按发布时间倒序每页 20 条，返回 `skins` 和 `has_more`，不含清单和图片字节。`scope=mine` 只列出自己的作品，需要用户会话；其他 scope 返回 400 `invalid_scope`。只有 `scope=mine&fields=sync` 会包含自己的私有作品，其余情况只列公开作品。
+- `GET /v1/community/candidate-skins/{id}?fields=`：公开详情；登录时额外返回自己的评分与是否为作者。私有作品只有作者带 `fields=sync` 时可见，其他情况与不存在一样返回 404 `skin_not_found`。
+- `GET /v1/community/candidate-skins/{id}/preview`：返回预览图 `{path,content_type,data}`，data 为标准 base64，content_type 为 `image/png` 或 `image/jpeg`。公开作品任何人可取，私有作品仅作者可取，否则 404。
+- `POST /v1/community/candidate-skins`：需要用户会话，提交 `{id,name,description,manifest,files,visibility?}`。manifest 为原样的 skin.toml 文本，files 的键为包内相对路径、值为标准 base64；`visibility` 为 `public` 或 `private`，缺省为 `public`，其他值返回 400 `invalid_visibility`。首次发布返回 201，同一请求重试返回 200。
+- `GET /v1/community/candidate-skins/sync`：需要用户会话（否则 401 `user_session_required`），返回 `{"skins":[{id,package_id,request_sha256,visibility,updated_at}]}`：自己的全部作品（含私有），按 `updated_at` 倒序，不分页（每个账号最多 100 款）。
+- `PUT /v1/community/candidate-skins/{id}`：仅作者可替换（否则 404 `skin_not_found`），提交 `{name,description,manifest,files}`，校验、大小上限、超时和图片重新编码都与发布相同。清单 `id` 必须与原作品的 `package_id` 相同，否则 409 `candidate_skin_package_mismatch`；公开作品的新清单必须声明 `[license] assets`，否则 400 `candidate_skin_license_required`。替换清单、图片、标题、说明、version、license 和预览图，重新计算 `request_sha256` 并更新 `updated_at`；保留 id、可见性、created_at、下载与评分。与已存 `request_sha256` 相同时直接返回 200，不写入也不计限流。
+- `PATCH /v1/community/candidate-skins/{id}`：仅作者可切换（否则 404），提交 `{"visibility":"public"|"private"}`，返回 200 和作品。转为公开要求已存的 license assets 非空（否则 400 `candidate_skin_license_required`），占用公开配额（满额 409 `candidate_skin_publish_limit`），并计入每小时发布限流；设为当前值时不做任何修改。切换会更新 `updated_at`，已有下载与评分保留。
+- `POST /v1/community/candidate-skins/{id}/download`：需要用户会话，返回 `{id,package_id,manifest,files}`，每个账号只计一次下载。私有作品仅作者可下载，否则 404。
+- `PUT /v1/community/candidate-skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。必须已下载，作者不可自评；重复提交更新同一条评分。私有作品返回 404。
+- `DELETE /v1/community/candidate-skins/{id}`：仅作者可下架或删除，连带删除图片、下载和评分记录；不删除其他设备已安装的副本。
 
 摘要字段：id、package_id、name、description、author、version、license（code、assets、source，缺省为空字符串）、size（重新编码后的图片总字节数）、file_count（图片数量，不含 skin.toml）、downloads、rating_count、rating_average、owned、my_rating、created_at。
+
+同步字段 `visibility`、`updated_at` 和 `request_sha256`（上传请求原始字节的摘要，仅作者可见，其他人看到的作品不带该字段）只在客户端声明支持时出现：列表和详情带 `fields=sync`（其他值返回 400 `invalid_fields`），发布请求体带 `visibility` 键，以及 sync、PUT、PATCH 三个接口。已发布的客户端按拒绝未知字段的方式解析摘要，也会拒绝 license assets 为空的条目，所以没有声明支持的响应与引入私有作品之前逐字节相同，并且永远不含私有作品。
 
 ### 限制与校验
 
 - 只接受 `skin.toml` 加 PNG/JPEG 图片（扩展名 png、jpg、jpeg，不区分大小写），最多 3 个图片文件，每个文件都必须被清单引用：只能是 `preview`、`candidate_window.decoration.image` 和 `candidate_window.background.image`。不接受样式表（`toolbar_stylesheet`）、字体、SVG、GIF 或 WebP；Go 标准库不能重新编码 WebP，支持它需要新增依赖。
 - 单个图片不超过 1 MiB、合计不超过 2 MiB，上传时和重新编码后都要满足；skin.toml 另计，最多 65,536 字节。每边 1 到 2048 像素，整包解码像素合计不超过 800 万，尺寸在完整解码前从文件头读取。每张 JPEG 最多 32 个扫描段（SOS）：Go 的解码器对每个扫描都要遍历整张图，且不限制扫描数，常见渐进式 JPEG 约 10 个扫描；超过的返回 `candidate_skin_image_invalid`。
 - 必须用 `preview` 指定一张包内的 PNG/JPEG 作为预览图，重新编码后不超过 256 KiB。
-- `skin.toml` 必须包含 `[license]` 且 `assets` 非空。客户端发布时还要求用户勾选确认拥有素材权利。清单的 `version` 和 `[license]` 的 `code`、`assets`、`source` 不能含控制字符（包括换行和制表符），否则返回 `invalid_candidate_skin_package`：客户端会拒绝含控制字符的列表项，一条这样的记录会让所在的整页列表失败。
+- 公开作品的 `skin.toml` 必须包含 `[license]` 且 `assets` 非空；私有作品可以省略，转为公开前需先用 PUT 补上。客户端发布时还要求用户勾选确认拥有素材权利。清单的 `version` 和 `[license]` 的 `code`、`assets`、`source` 不能含控制字符（包括换行和制表符），否则返回 `invalid_candidate_skin_package`：客户端会拒绝含控制字符的列表项，一条这样的记录会让所在的整页列表失败。
 - 路径规则与客户端 `safe_resource` 一致：相对路径，每段只含 `A-Za-z0-9._-`，不允许空段、`.`、`..` 或反斜杠；键不能是 `skin.toml`，转小写后不能重复。
 - 清单用与客户端加载器一致的规则校验（`internal/skins/client.go` 的 `ParseStored`），包括 ID 格式、保留主题 ID 与四个内置 ID、schema_version、base、supports 和窗口参数。
 - 服务器按扩展名选择解码器解码每张图片后重新编码（PNG 最高压缩、JPEG 质量 90），因此会去除 EXIF、XMP、ICC 和文本块，APNG 只保留第一帧；扩展名与内容不符的图片被拒绝。去掉 ICC 可能带来轻微色差，Go 的 PNG 编码器也可能让已优化的 PNG 变大，接近上限的包可能在重新编码后被拒绝。
 - 标题最多 32 个 Unicode 字符，说明最多 280 个，均先去除首尾空白；与清单里的 `name` 无关。标题不能含控制字符，说明只允许换行和制表符两种控制字符。发布请求最多 3,200,000 字节。
-- 每个账号最多 20 款，每小时最多发布 10 次（按账号计，数据库限流）；图片解码每个进程最多同时 2 个，繁忙时返回 503 `candidate_skin_busy`。
+- 每个账号最多 100 款（超出 409 `candidate_skin_library_limit`），其中公开最多 20 款（超出 409 `candidate_skin_publish_limit`）。公开发布和转为公开共用每小时 10 次，私有创建和 PUT 替换共用另一份每小时 60 次（均按账号计，数据库限流）；图片解码每个进程最多同时 2 个，繁忙时返回 503 `candidate_skin_busy`。
 
-错误码：400 `invalid_json`、`invalid_skin_metadata`、`invalid_community_id`、`invalid_candidate_skin_package`、`candidate_skin_file_type`、`candidate_skin_file_path`、`candidate_skin_too_large`、`candidate_skin_image_invalid`、`candidate_skin_license_required`、`candidate_skin_preview_required`；409 `candidate_skin_id_conflict`、`candidate_skin_publish_limit`；429 `rate_limit_exceeded`；503 `candidate_skin_busy`、`auth_unavailable`。
+错误码：400 `invalid_json`、`invalid_skin_metadata`、`invalid_community_id`、`invalid_visibility`、`invalid_fields`、`invalid_candidate_skin_package`、`candidate_skin_file_type`、`candidate_skin_file_path`、`candidate_skin_too_large`、`candidate_skin_image_invalid`、`candidate_skin_license_required`、`candidate_skin_preview_required`；404 `skin_not_found`；409 `candidate_skin_id_conflict`、`candidate_skin_publish_limit`、`candidate_skin_library_limit`、`candidate_skin_package_mismatch`；429 `rate_limit_exceeded`；503 `candidate_skin_busy`、`auth_unavailable`。
 
 ### ID 与版本
 
-`id` 是客户端生成的发布 UUID，用于网络失败后的安全重试：同一账号用相同内容重试返回原作品，内容不同或属于其他账号返回 409。已提交作品的重试在每小时发布限流之前就会返回，不计入次数，因此丢失响应后的重试不会变成 429。两个账号同时用同一 UUID 发布时，后提交的一方同样得到 409。`package_id` 是清单里的 `id`，也是客户端安装的目录名。服务端不改写 skin.toml。不同作者可以发布相同的 `package_id`，安装时会替换本机同名皮肤，客户端会先请求确认。作品发布后不能原地修改，更新需要用新的 UUID 发布新作品，评分不继承。
+`id` 是客户端生成的发布 UUID，用于网络失败后的安全重试：同一账号用相同内容重试返回原作品，内容不同或属于其他账号返回 409。已提交作品的重试在每小时发布限流之前就会返回，不计入次数，因此丢失响应后的重试不会变成 429。两个账号同时用同一 UUID 发布时，后提交的一方同样得到 409。`package_id` 是清单里的 `id`，也是客户端安装的目录名。服务端不改写 skin.toml。不同作者可以发布相同的 `package_id`，安装时会替换本机同名皮肤，客户端会先请求确认。作者可以用 PUT 原地替换同一 `package_id` 的新版本，id、下载与评分保留；换成另一个 `package_id` 需要用新的 UUID 发布新作品。
 
 ### 部署与审核
 
@@ -114,6 +119,6 @@ msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID
 GRANT SELECT, INSERT, UPDATE, DELETE ON community_candidate_skins, community_candidate_skin_files, community_candidate_skin_downloads, community_candidate_skin_ratings TO msime_backend;
 ```
 
-先迁移再滚动更新，旧二进制不读这四张表。每个账号满额时约占 40 MiB bytea，需计入数据库容量与备份。账号注销级联删除作品、图片、评分和下载记录。
+先迁移再滚动更新，旧二进制不读这四张表。加入私有作品的版本在启动时给 `community_candidate_skins` 增加 `visibility`（已有行为 `public`）和 `updated_at`（已有行取其 `created_at`）两列，并把 license assets 的列约束换成命名约束 `community_candidate_skins_license_check`（公开行要求非空，私有行可为空），重复执行不会改变任何东西；旧二进制仍能读写这张表。但旧二进制不认识 `visibility`，会把私有作品当公开作品列出和下发，所以必须等所有副本都换成新版本后再让客户端开始同步私有作品，回滚到旧版本前也要先处理私有行。每个账号满额时约占 200 MiB bytea（100 款，每款最多 2 MiB 图片），需计入数据库容量与备份。账号注销级联删除作品、图片、评分和下载记录。
 
-发布即公开，不做事前审核。管理后台 API 提供 `GET /api/candidate-skins`、`GET /api/candidate-skins/{id}`（元数据、清单文本和每个文件的路径、大小、SHA-256，不含图片字节）和审计过的 `delete_candidate_skin` 操作用于事后下架；管理后台网页暂未提供对应页面。
+公开作品发布即公开，不做事前审核。管理后台 API 提供 `GET /api/candidate-skins`（可用 `visibility=public|private` 筛选）、`GET /api/candidate-skins/{id}`（元数据、可见性、清单文本和每个文件的路径、大小、SHA-256，不含图片字节）和审计过的 `delete_candidate_skin` 操作用于事后下架；管理后台网页暂未提供对应页面。

@@ -11338,9 +11338,22 @@
               ],
               "default": ""
             }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "sync"
+              ],
+              "default": ""
+            },
+            "description": "sync 表示在响应中接收同步字段并可看到自己的私有作品。"
           }
         ],
-        "description": "公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，需要用户会话。 详见 docs/skin-community.md。",
+        "description": "公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，需要用户会话；只有 scope=mine 且 fields=sync 时才包含自己的私有作品。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11420,6 +11433,24 @@
                           "created_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "visibility": {
+                            "type": "string",
+                            "enum": [
+                              "private",
+                              "public"
+                            ],
+                            "description": "同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。"
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "同步字段，替换包或切换可见性时更新。"
+                          },
+                          "request_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
                           }
                         }
                       }
@@ -11442,10 +11473,10 @@
             "description": "尚未下载或正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在或非作者"
+            "description": "皮肤不存在、为他人的私有作品或非作者"
           },
           "409": {
-            "description": "发布配额已满或 UUID 冲突"
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
           },
           "415": {
             "description": "需要 application/json"
@@ -11469,7 +11500,7 @@
           }
         ],
         "parameters": [],
-        "description": "请求最多 3,200,000 字节（高于其他 JSON 接口的 64 KiB）。只接受 skin.toml 加 PNG/JPEG 图片（最多 3 个文件，均须被清单引用）：单个图片不超过 1 MiB、合计不超过 2 MiB，每边 1 到 2048 像素、整包不超过 800 万像素；必须用 preview 指定一张包内图片作为预览图（重新编码后不超过 256 KiB），[license] 必须填写非空 assets。服务器解码后重新编码图片，去除 EXIF、XMP、ICC 等元数据。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 款，每小时最多发布 10 次。发布后不能修改，更新请发布新作品。 详见 docs/skin-community.md。",
+        "description": "请求最多 3,200,000 字节（高于其他 JSON 接口的 64 KiB）。只接受 skin.toml 加 PNG/JPEG 图片（最多 3 个文件，均须被清单引用）：单个图片不超过 1 MiB、合计不超过 2 MiB，每边 1 到 2048 像素、整包不超过 800 万像素；必须用 preview 指定一张包内图片作为预览图（重新编码后不超过 256 KiB），公开作品的 [license] 必须填写非空 assets，私有作品可省略。服务器解码后重新编码图片，去除 EXIF、XMP、ICC 等元数据。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 100 款，其中公开最多 20 款。公开发布每小时最多 10 次，私有创建与替换共用每小时 60 次。 详见 docs/skin-community.md。",
         "responses": {
           "201": {
             "description": "成功",
@@ -11543,6 +11574,24 @@
                     "created_at": {
                       "type": "string",
                       "format": "date-time"
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "public"
+                      ],
+                      "description": "同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "同步字段，替换包或切换可见性时更新。"
+                    },
+                    "request_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
                     }
                   }
                 }
@@ -11559,10 +11608,10 @@
             "description": "尚未下载或正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在或非作者"
+            "description": "皮肤不存在、为他人的私有作品或非作者"
           },
           "409": {
-            "description": "发布配额已满或 UUID 冲突"
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
           },
           "415": {
             "description": "需要 application/json"
@@ -11645,6 +11694,24 @@
                     "created_at": {
                       "type": "string",
                       "format": "date-time"
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "public"
+                      ],
+                      "description": "同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "同步字段，替换包或切换可见性时更新。"
+                    },
+                    "request_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
                     }
                   }
                 }
@@ -11686,6 +11753,14 @@
                       "format": "byte"
                     },
                     "description": "键为包内相对路径（仅 png/jpg/jpeg），值为标准 base64。"
+                  },
+                  "visibility": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "public"
+                    ],
+                    "description": "缺省为 public；带上该字段即选择在响应中接收同步字段。"
                   }
                 },
                 "required": [
@@ -11698,6 +11773,97 @@
                 "additionalProperties": false
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/community/candidate-skins/sync": {
+      "get": {
+        "summary": "同步自己的候选窗皮肤库",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [],
+        "description": "返回自己的全部作品（含私有），按 updated_at 倒序，不分页。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "skins": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "package_id": {
+                            "type": "string"
+                          },
+                          "request_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "visibility": {
+                            "type": "string",
+                            "enum": [
+                              "private",
+                              "public"
+                            ]
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "package_id",
+                          "request_sha256",
+                          "visibility",
+                          "updated_at"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在、为他人的私有作品或非作者"
+          },
+          "409": {
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
           }
         }
       }
@@ -11718,9 +11884,22 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "sync"
+              ],
+              "default": ""
+            },
+            "description": "sync 表示在响应中接收同步字段并可看到自己的私有作品。"
           }
         ],
-        "description": "公开详情；登录时额外返回自己的评分与是否为作者。 详见 docs/skin-community.md。",
+        "description": "公开详情；登录时额外返回自己的评分与是否为作者。私有作品仅作者带 fields=sync 可见，其他情况返回 404。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11794,6 +11973,24 @@
                     "created_at": {
                       "type": "string",
                       "format": "date-time"
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "public"
+                      ],
+                      "description": "同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "同步字段，替换包或切换可见性时更新。"
+                    },
+                    "request_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
                     }
                   }
                 }
@@ -11810,10 +12007,10 @@
             "description": "尚未下载或正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在或非作者"
+            "description": "皮肤不存在、为他人的私有作品或非作者"
           },
           "409": {
-            "description": "发布配额已满或 UUID 冲突"
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
           },
           "415": {
             "description": "需要 application/json"
@@ -11823,6 +12020,362 @@
           },
           "503": {
             "description": "服务不可用或图片处理繁忙"
+          }
+        }
+      },
+      "put": {
+        "summary": "作者替换候选窗皮肤包",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "仅作者可替换，校验与限制同发布；清单 id 须与原包相同，否则 409。保留 id、可见性、发布时间、下载与评分，重新计算 request_sha256 并更新 updated_at；与已存内容相同时不写入。计入每小时 60 次的私有额度。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "package_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "assets": {
+                          "type": "string"
+                        },
+                        "source": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "assets",
+                        "source"
+                      ]
+                    },
+                    "size": {
+                      "type": "integer",
+                      "description": "重新编码后的图片总字节数"
+                    },
+                    "file_count": {
+                      "type": "integer",
+                      "description": "图片数量，不含 skin.toml"
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "public"
+                      ],
+                      "description": "同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "同步字段，替换包或切换可见性时更新。"
+                    },
+                    "request_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在、为他人的私有作品或非作者"
+          },
+          "409": {
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 280
+                  },
+                  "manifest": {
+                    "type": "string",
+                    "maxLength": 65536,
+                    "description": "原样的 skin.toml 文本，id 须与原包相同"
+                  },
+                  "files": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "maxProperties": 3,
+                    "additionalProperties": {
+                      "type": "string",
+                      "format": "byte"
+                    },
+                    "description": "键为包内相对路径（仅 png/jpg/jpeg），值为标准 base64。"
+                  }
+                },
+                "required": [
+                  "name",
+                  "description",
+                  "manifest",
+                  "files"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "作者切换候选窗皮肤可见性",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "仅作者可切换。转为公开须声明 assets 许可、占用公开配额，并计入每小时 10 次的发布额度。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "package_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "assets": {
+                          "type": "string"
+                        },
+                        "source": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "assets",
+                        "source"
+                      ]
+                    },
+                    "size": {
+                      "type": "integer",
+                      "description": "重新编码后的图片总字节数"
+                    },
+                    "file_count": {
+                      "type": "integer",
+                      "description": "图片数量，不含 skin.toml"
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "public"
+                      ],
+                      "description": "同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "同步字段，替换包或切换可见性时更新。"
+                    },
+                    "request_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在、为他人的私有作品或非作者"
+          },
+          "409": {
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "visibility": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "public"
+                    ]
+                  }
+                },
+                "required": [
+                  "visibility"
+                ],
+                "additionalProperties": false
+              }
+            }
           }
         }
       },
@@ -11874,10 +12427,10 @@
             "description": "尚未下载或正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在或非作者"
+            "description": "皮肤不存在、为他人的私有作品或非作者"
           },
           "409": {
-            "description": "发布配额已满或 UUID 冲突"
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
           },
           "415": {
             "description": "需要 application/json"
@@ -11909,7 +12462,7 @@
             }
           }
         ],
-        "description": "公开返回重新编码后的预览图，data 为标准 base64。 详见 docs/skin-community.md。",
+        "description": "返回重新编码后的预览图，data 为标准 base64；私有作品仅作者可取。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11947,10 +12500,10 @@
             "description": "尚未下载或正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在或非作者"
+            "description": "皮肤不存在、为他人的私有作品或非作者"
           },
           "409": {
-            "description": "发布配额已满或 UUID 冲突"
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
           },
           "415": {
             "description": "需要 application/json"
@@ -11986,7 +12539,7 @@
             }
           }
         ],
-        "description": "返回原样清单和重新编码后的图片；下载人数按账号去重。 详见 docs/skin-community.md。",
+        "description": "返回原样清单和重新编码后的图片；下载人数按账号去重。私有作品仅作者可下载。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -12030,10 +12583,10 @@
             "description": "尚未下载或正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在或非作者"
+            "description": "皮肤不存在、为他人的私有作品或非作者"
           },
           "409": {
-            "description": "发布配额已满或 UUID 冲突"
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
           },
           "415": {
             "description": "需要 application/json"
@@ -12069,7 +12622,7 @@
             }
           }
         ],
-        "description": "评分需先下载且不能自评，重复提交更新同一条评分。 详见 docs/skin-community.md。",
+        "description": "评分需先下载且不能自评，重复提交更新同一条评分；私有作品返回 404。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -12096,10 +12649,10 @@
             "description": "尚未下载或正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在或非作者"
+            "description": "皮肤不存在、为他人的私有作品或非作者"
           },
           "409": {
-            "description": "发布配额已满或 UUID 冲突"
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
           },
           "415": {
             "description": "需要 application/json"

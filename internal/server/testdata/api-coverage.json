@@ -264,6 +264,15 @@
     "GET /v1/community/candidate-skins/{id}": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
     ],
+    "GET /v1/community/candidate-skins/sync": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinSync"
+    ],
+    "PUT /v1/community/candidate-skins/{id}": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinSync"
+    ],
+    "PATCH /v1/community/candidate-skins/{id}": [
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinSync"
+    ],
     "DELETE /v1/community/candidate-skins/{id}": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
     ],

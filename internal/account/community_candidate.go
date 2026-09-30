@@ -35,9 +35,13 @@ const (
 	// Go's JPEG decoder walks every block of the image once per scan and sets no limit on the scan count, so decode cost is scans times pixels and a small file with thousands of scans pins a core. Standard progressive scripts use about ten scans and optimising encoders stay near twenty.
 	maxCandidateJPEGScans = 32
 	// Covers 2 MiB of images in base64 (2,796,204 bytes) plus a JSON-escaped 64 KiB manifest, keys and metadata.
-	maxCandidatePublishBytes  = 3_200_000
+	maxCandidatePublishBytes = 3_200_000
+	// Public rows are the gallery quota; private rows are an account's synced library, so the total bound is higher.
 	maxCandidateSkinsPerUser  = 20
+	maxCandidateLibraryRows   = 100
 	candidatePublishesPerHour = 10
+	// Private creates and replacements are background sync traffic, so they get their own hourly budget instead of the gallery's.
+	candidateLibraryWritesPerHour = 60
 )
 
 // candidateImageSlots bounds concurrent image decoding per process, because /v1/community routes bypass the server's MaxConcurrent limit and a package can decode up to 8 MP.
@@ -71,7 +75,7 @@ type CandidateSkinLicense struct {
 	Source string `json:"source"`
 }
 
-// CommunityCandidateSkin is the list and detail item; it never carries the manifest or image bytes.
+// CommunityCandidateSkin is the list and detail item; it never carries the manifest or image bytes. Visibility, UpdatedAt and RequestSHA256 are the sync fields: released clients decode items with unknown fields denied, so a response carries them only when the client opted in (see candidateLegacy). RequestSHA256 is set only for the owner.
 type CommunityCandidateSkin struct {
 	ID            string               `json:"id"`
 	PackageID     string               `json:"package_id"`
@@ -88,6 +92,26 @@ type CommunityCandidateSkin struct {
 	Owned         bool                 `json:"owned"`
 	MyRating      int                  `json:"my_rating"`
 	CreatedAt     time.Time            `json:"created_at"`
+	Visibility    string               `json:"visibility,omitempty"`
+	UpdatedAt     time.Time            `json:"updated_at,omitzero"`
+	RequestSHA256 string               `json:"request_sha256,omitempty"`
+}
+
+// candidateLegacy strips the sync fields, so a client that did not opt in gets the item exactly as before private rows existed.
+func candidateLegacy(v CommunityCandidateSkin) CommunityCandidateSkin {
+	v.Visibility, v.UpdatedAt, v.RequestSHA256 = "", time.Time{}, ""
+	return v
+}
+
+// candidateSyncFields reads the fields=sync opt-in of list and detail; ok is false for any other non-empty value.
+func candidateSyncFields(r *http.Request) (sync bool, ok bool) {
+	switch r.URL.Query().Get("fields") {
+	case "":
+		return false, true
+	case "sync":
+		return true, true
+	}
+	return false, false
 }
 
 const candidateSelect = `SELECT s.id,s.package_id,s.name,s.description,
@@ -96,13 +120,14 @@ const candidateSelect = `SELECT s.id,s.package_id,s.name,s.description,
  (SELECT count(*) FROM community_candidate_skin_downloads WHERE skin_id=s.id),
  (SELECT count(*) FROM community_candidate_skin_ratings WHERE skin_id=s.id),
  COALESCE((SELECT avg(stars) FROM community_candidate_skin_ratings WHERE skin_id=s.id),0),
- s.owner_id=$1,COALESCE((SELECT stars FROM community_candidate_skin_ratings WHERE skin_id=s.id AND user_id=$1),0),s.created_at
+ s.owner_id=$1,COALESCE((SELECT stars FROM community_candidate_skin_ratings WHERE skin_id=s.id AND user_id=$1),0),s.created_at,
+ s.visibility,s.updated_at,CASE WHEN s.owner_id=$1 THEN s.request_sha256 ELSE '' END
  FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id
  CROSS JOIN LATERAL (SELECT COALESCE(sum(size),0) AS size,count(*) AS files FROM community_candidate_skin_files WHERE skin_id=s.id) f `
 
 func scanCandidateSkin(row interface{ Scan(...any) error }) (CommunityCandidateSkin, error) {
 	var s CommunityCandidateSkin
-	err := row.Scan(&s.ID, &s.PackageID, &s.Name, &s.Description, &s.Author, &s.Version, &s.License.Code, &s.License.Assets, &s.License.Source, &s.Size, &s.FileCount, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.CreatedAt)
+	err := row.Scan(&s.ID, &s.PackageID, &s.Name, &s.Description, &s.Author, &s.Version, &s.License.Code, &s.License.Assets, &s.License.Source, &s.Size, &s.FileCount, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.CreatedAt, &s.Visibility, &s.UpdatedAt, &s.RequestSHA256)
 	return s, err
 }
 
@@ -175,8 +200,8 @@ func candidateRequestDigest(name, description, manifest string, files map[string
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// validCandidatePackage validates the manifest with the shared client-dialect port, then applies the v1 sharing rules around it: images only, a required image preview, a declared asset license, and no unreferenced files.
-func validCandidatePackage(manifest string, files map[string][]byte) (skins.Package, string) {
+// validCandidatePackage validates the manifest with the shared client-dialect port, then applies the v1 sharing rules around it: images only, a required image preview, a declared asset license when requireLicense (every public row), and no unreferenced files.
+func validCandidatePackage(manifest string, files map[string][]byte, requireLicense bool) (skins.Package, string) {
 	var head struct {
 		ID string `toml:"id"`
 	}
@@ -201,11 +226,12 @@ func validCandidatePackage(manifest string, files map[string][]byte) (skins.Pack
 	if _, uploaded := files[pkg.Preview]; !uploaded || candidateExtension(pkg.Preview) == "" {
 		return pkg, "candidate_skin_file_type"
 	}
-	if pkg.License == nil || strings.TrimSpace(pkg.License.Assets) == "" {
+	license := candidatePackageLicense(pkg)
+	if requireLicense && strings.TrimSpace(license.Assets) == "" {
 		return pkg, "candidate_skin_license_required"
 	}
 	// ParseStored bounds these strings by length only, while clients reject a listed item whose version or license carries a control character, so one such row would fail every gallery page that contains it.
-	for _, text := range []string{pkg.Version, pkg.License.Code, pkg.License.Assets, pkg.License.Source} {
+	for _, text := range []string{pkg.Version, license.Code, license.Assets, license.Source} {
 		if strings.ContainsFunc(text, unicode.IsControl) {
 			return pkg, "invalid_candidate_skin_package"
 		}
@@ -226,6 +252,14 @@ func validCandidatePackage(manifest string, files map[string][]byte) (skins.Pack
 		}
 	}
 	return pkg, ""
+}
+
+// candidatePackageLicense is the manifest's [license] table, empty when a private package declares none.
+func candidatePackageLicense(pkg skins.Package) CandidateSkinLicense {
+	if pkg.License == nil {
+		return CandidateSkinLicense{}
+	}
+	return CandidateSkinLicense{Code: pkg.License.Code, Assets: pkg.License.Assets, Source: pkg.License.Source}
 }
 
 // candidateJPEGScans counts the SOS markers the Go decoder would process, following its marker loop: bytes outside a marker are skipped, fill bytes and restart markers carry no length, and the entropy-coded data after an SOS header ends at the first 0xFF that is not followed by 0x00 or a restart marker. It stops at EOI or at the end of the data and leaves structural errors to the decoder.
@@ -333,12 +367,18 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, "invalid_scope")
 		return
 	}
+	sync, ok := candidateSyncFields(r)
+	if !ok {
+		writeError(w, 400, "invalid_fields")
+		return
+	}
 	viewer := a.communityViewer(r)
 	if scope == "mine" && viewer == "" {
 		writeError(w, 401, "user_session_required")
 		return
 	}
-	rows, e := a.store.pool.Query(r.Context(), candidateSelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($3='' OR s.owner_id=$1) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $4`, viewer, search, scope, offset)
+	// Private rows appear only in the author's own opted-in list: released clients reject an item whose license assets are empty, which a private row may have, and one such item would fail the whole page.
+	rows, e := a.store.pool.Query(r.Context(), candidateSelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($3='' OR s.owner_id=$1) AND (s.visibility='public' OR ($3<>'' AND $5)) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $4`, viewer, search, scope, offset, sync)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -350,6 +390,9 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 		if e != nil {
 			a.error(w, e)
 			return
+		}
+		if !sync {
+			v = candidateLegacy(v)
 		}
 		items = append(items, v)
 	}
@@ -364,7 +407,13 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 	write(w, 200, map[string]any{"skins": items, "has_more": more})
 }
 func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Request) {
-	v, e := scanCandidateSkin(a.store.pool.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2`, a.communityViewer(r), r.PathValue("id")))
+	sync, ok := candidateSyncFields(r)
+	if !ok {
+		writeError(w, 400, "invalid_fields")
+		return
+	}
+	// A private row is the owner's alone, and only an opted-in client can decode it; everyone else gets the same 404 as for a missing id.
+	v, e := scanCandidateSkin(a.store.pool.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2 AND (s.visibility='public' OR ($3 AND s.owner_id=$1))`, a.communityViewer(r), r.PathValue("id"), sync))
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -373,12 +422,15 @@ func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Reques
 		a.error(w, e)
 		return
 	}
+	if !sync {
+		v = candidateLegacy(v)
+	}
 	write(w, 200, v)
 }
 func (a *Service) communityCandidatePreview(w http.ResponseWriter, r *http.Request) {
 	var path string
 	var data []byte
-	e := a.store.pool.QueryRow(r.Context(), `SELECT f.path,f.bytes FROM community_candidate_skins s JOIN community_candidate_skin_files f ON f.skin_id=s.id AND f.path=s.preview_path WHERE s.id=$1`, r.PathValue("id")).Scan(&path, &data)
+	e := a.store.pool.QueryRow(r.Context(), `SELECT f.path,f.bytes FROM community_candidate_skins s JOIN community_candidate_skin_files f ON f.skin_id=s.id AND f.path=s.preview_path WHERE s.id=$1 AND (s.visibility='public' OR s.owner_id=$2)`, r.PathValue("id"), a.communityViewer(r)).Scan(&path, &data)
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -404,9 +456,25 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		Description string            `json:"description"`
 		Manifest    string            `json:"manifest"`
 		Files       map[string][]byte `json:"files"`
+		// Absent means public. Sending it is also the client's opt-in to the sync fields in the response.
+		Visibility *string `json:"visibility"`
 	}
 	if !readSized(w, r, &input, maxCandidatePublishBytes) {
 		return
+	}
+	sync, visibility := input.Visibility != nil, "public"
+	if sync {
+		visibility = *input.Visibility
+	}
+	if visibility != "public" && visibility != "private" {
+		writeError(w, 400, "invalid_visibility")
+		return
+	}
+	respond := func(status int, v CommunityCandidateSkin) {
+		if !sync {
+			v = candidateLegacy(v)
+		}
+		write(w, status, v)
 	}
 	input.ID = strings.ToLower(input.ID)
 	if len(input.ID) != 36 || !validCommunityID(input.ID) {
@@ -425,7 +493,7 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	digest := candidateRequestDigest(input.Name, input.Description, input.Manifest, input.Files)
-	pkg, code := validCandidatePackage(input.Manifest, input.Files)
+	pkg, code := validCandidatePackage(input.Manifest, input.Files, visibility == "public")
 	if code != "" {
 		writeError(w, 400, code)
 		return
@@ -443,14 +511,14 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 			a.error(w, e)
 			return
 		}
-		write(w, 200, v)
+		respond(200, v)
 		return
 	}
 	if !errors.Is(e, pgx.ErrNoRows) {
 		a.error(w, e)
 		return
 	}
-	if e := a.RateLimit(r.Context(), "candidate-publish", p.UserID, candidatePublishesPerHour, time.Hour); e != nil {
+	if e := a.candidateWriteRate(r.Context(), p.UserID, visibility); e != nil {
 		a.error(w, e)
 		return
 	}
@@ -481,26 +549,30 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 			a.error(w, e)
 			return
 		}
-		write(w, 200, v)
+		respond(200, v)
 		return
 	}
 	if !errors.Is(e, pgx.ErrNoRows) {
 		a.error(w, e)
 		return
 	}
-	var count int
-	if e = tx.QueryRow(r.Context(), `SELECT count(*) FROM community_candidate_skins WHERE owner_id=$1`, p.UserID).Scan(&count); e != nil {
+	var total, public int
+	if e = tx.QueryRow(r.Context(), `SELECT count(*),count(*) FILTER (WHERE visibility='public') FROM community_candidate_skins WHERE owner_id=$1`, p.UserID).Scan(&total, &public); e != nil {
 		a.error(w, e)
 		return
 	}
-	if count >= maxCandidateSkinsPerUser {
+	if total >= maxCandidateLibraryRows {
+		writeError(w, 409, "candidate_skin_library_limit")
+		return
+	}
+	if visibility == "public" && public >= maxCandidateSkinsPerUser {
 		writeError(w, 409, "candidate_skin_publish_limit")
 		return
 	}
-	license := CandidateSkinLicense{Code: pkg.License.Code, Assets: pkg.License.Assets, Source: pkg.License.Source}
+	license := candidatePackageLicense(pkg)
 	// The row lock covers only this account, so another account can commit the same id between the probe and this insert; ON CONFLICT waits for that commit and then reports it as a conflict instead of a unique violation.
-	inserted, e := tx.Exec(r.Context(), `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,description,version,license_code,license_assets,license_source,manifest,preview_path,request_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING`,
-		input.ID, p.UserID, pkg.ID, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest)
+	inserted, e := tx.Exec(r.Context(), `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,description,version,license_code,license_assets,license_source,manifest,preview_path,request_sha256,visibility) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(id) DO NOTHING`,
+		input.ID, p.UserID, pkg.ID, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest, visibility)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -509,16 +581,9 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		writeError(w, 409, "candidate_skin_id_conflict")
 		return
 	}
-	paths := make([]string, 0, len(clean))
-	for path := range clean {
-		paths = append(paths, path)
-	}
-	slices.Sort(paths)
-	for _, path := range paths {
-		if _, e = tx.Exec(r.Context(), `INSERT INTO community_candidate_skin_files(skin_id,path,bytes) VALUES($1,$2,$3)`, input.ID, path, clean[path]); e != nil {
-			a.error(w, e)
-			return
-		}
+	if e = insertCandidateFiles(r.Context(), tx, input.ID, clean); e != nil {
+		a.error(w, e)
+		return
 	}
 	v, e := scanCandidateSkin(tx.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2`, p.UserID, input.ID))
 	if e == nil {
@@ -528,7 +593,30 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		a.error(w, e)
 		return
 	}
-	write(w, 201, v)
+	respond(201, v)
+}
+
+// candidateWriteRate charges one package write to its hourly budget: the gallery's for anything that becomes public, the library's for a private create or a replacement.
+func (a *Service) candidateWriteRate(ctx context.Context, userID, visibility string) error {
+	if visibility == "public" {
+		return a.RateLimit(ctx, "candidate-publish", userID, candidatePublishesPerHour, time.Hour)
+	}
+	return a.RateLimit(ctx, "candidate-library", userID, candidateLibraryWritesPerHour, time.Hour)
+}
+
+// insertCandidateFiles stores the re-encoded images of one package in path order.
+func insertCandidateFiles(ctx context.Context, tx pgx.Tx, id string, clean map[string][]byte) error {
+	paths := make([]string, 0, len(clean))
+	for path := range clean {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+	for _, path := range paths {
+		if _, e := tx.Exec(ctx, `INSERT INTO community_candidate_skin_files(skin_id,path,bytes) VALUES($1,$2,$3)`, id, path, clean[path]); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 func (a *Service) communityCandidateDownload(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.principal(w, r, false)
@@ -543,7 +631,7 @@ func (a *Service) communityCandidateDownload(w http.ResponseWriter, r *http.Requ
 	defer tx.Rollback(r.Context())
 	var packageID string
 	var manifest []byte
-	e = tx.QueryRow(r.Context(), `SELECT package_id,manifest FROM community_candidate_skins WHERE id=$1 FOR SHARE`, r.PathValue("id")).Scan(&packageID, &manifest)
+	e = tx.QueryRow(r.Context(), `SELECT package_id,manifest FROM community_candidate_skins WHERE id=$1 AND (visibility='public' OR owner_id=$2) FOR SHARE`, r.PathValue("id"), p.UserID).Scan(&packageID, &manifest)
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -599,16 +687,16 @@ func (a *Service) communityCandidateRate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	result, e := a.store.pool.Exec(r.Context(), `INSERT INTO community_candidate_skin_ratings(skin_id,user_id,stars)
- SELECT s.id,$2,$3 FROM community_candidate_skins s WHERE s.id=$1 AND s.owner_id<>$2 AND EXISTS(SELECT 1 FROM community_candidate_skin_downloads WHERE skin_id=s.id AND user_id=$2)
+ SELECT s.id,$2,$3 FROM community_candidate_skins s WHERE s.id=$1 AND s.visibility='public' AND s.owner_id<>$2 AND EXISTS(SELECT 1 FROM community_candidate_skin_downloads WHERE skin_id=s.id AND user_id=$2)
  ON CONFLICT(skin_id,user_id) DO UPDATE SET stars=excluded.stars`, r.PathValue("id"), p.UserID, input.Stars)
 	if e != nil {
 		a.error(w, e)
 		return
 	}
 	if result.RowsAffected() == 0 {
-		// A missing skin is 404; an existing one the caller owns or has not downloaded is 403.
+		// A missing or private skin is 404; an existing public one the caller owns or has not downloaded is 403.
 		var exists bool
-		if e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_candidate_skins WHERE id=$1)`, r.PathValue("id")).Scan(&exists); e != nil {
+		if e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_candidate_skins WHERE id=$1 AND visibility='public')`, r.PathValue("id")).Scan(&exists); e != nil {
 			a.error(w, e)
 			return
 		}
@@ -636,4 +724,221 @@ func (a *Service) communityCandidateDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	write(w, 200, map[string]bool{"deleted": true})
+}
+
+// communityCandidateSync lists every row the account owns, private ones included, as the identifiers a client needs to reconcile its local packages. It is not paginated: an account holds at most maxCandidateLibraryRows rows.
+func (a *Service) communityCandidateSync(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.principal(w, r, false)
+	if !ok {
+		return
+	}
+	rows, e := a.store.pool.Query(r.Context(), `SELECT id,package_id,request_sha256,visibility,updated_at FROM community_candidate_skins WHERE owner_id=$1 ORDER BY updated_at DESC,id`, p.UserID)
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	defer rows.Close()
+	type entry struct {
+		ID            string    `json:"id"`
+		PackageID     string    `json:"package_id"`
+		RequestSHA256 string    `json:"request_sha256"`
+		Visibility    string    `json:"visibility"`
+		UpdatedAt     time.Time `json:"updated_at"`
+	}
+	items := []entry{}
+	for rows.Next() {
+		var v entry
+		if e = rows.Scan(&v.ID, &v.PackageID, &v.RequestSHA256, &v.Visibility, &v.UpdatedAt); e != nil {
+			a.error(w, e)
+			return
+		}
+		items = append(items, v)
+	}
+	if e = rows.Err(); e != nil {
+		a.error(w, e)
+		return
+	}
+	write(w, 200, map[string]any{"skins": items})
+}
+
+// communityCandidateReplace overwrites the package of a row the caller owns with a new upload of the same package id, validated exactly like a publish. The id, visibility, creation time, downloads and ratings stay; an upload identical to the stored one is answered without a write.
+func (a *Service) communityCandidateReplace(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.principal(w, r, false)
+	if !ok {
+		return
+	}
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(candidatePublishTimeout))
+	_ = controller.SetWriteDeadline(time.Now().Add(candidatePublishTimeout + 5*time.Second))
+	var input struct {
+		Name        string            `json:"name"`
+		Description string            `json:"description"`
+		Manifest    string            `json:"manifest"`
+		Files       map[string][]byte `json:"files"`
+	}
+	if !readSized(w, r, &input, maxCandidatePublishBytes) {
+		return
+	}
+	id := r.PathValue("id")
+	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
+	if !resourceText(input.Name, 1, 32, false) || !resourceText(input.Description, 0, 280, true) {
+		writeError(w, 400, "invalid_skin_metadata")
+		return
+	}
+	if code := validCandidateFiles(input.Manifest, input.Files); code != "" {
+		writeError(w, 400, code)
+		return
+	}
+	digest := candidateRequestDigest(input.Name, input.Description, input.Manifest, input.Files)
+	pkg, code := validCandidatePackage(input.Manifest, input.Files, false)
+	if code != "" {
+		writeError(w, 400, code)
+		return
+	}
+	// check answers from the stored row: done reports that the response is already written, either an error or the unchanged item.
+	check := func(q interface {
+		QueryRow(context.Context, string, ...any) pgx.Row
+	}, lock string) (done bool) {
+		var packageID, visibility, stored string
+		e := q.QueryRow(r.Context(), `SELECT package_id,visibility,request_sha256 FROM community_candidate_skins WHERE id=$1 AND owner_id=$2`+lock, id, p.UserID).Scan(&packageID, &visibility, &stored)
+		switch {
+		case errors.Is(e, pgx.ErrNoRows):
+			writeError(w, 404, "skin_not_found")
+		case e != nil:
+			a.error(w, e)
+		case packageID != pkg.ID:
+			writeError(w, 409, "candidate_skin_package_mismatch")
+		case stored == digest:
+			v, e := scanCandidateSkin(q.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2`, p.UserID, id))
+			if e != nil {
+				a.error(w, e)
+			} else {
+				write(w, 200, v)
+			}
+		case visibility == "public" && strings.TrimSpace(candidatePackageLicense(pkg).Assets) == "":
+			writeError(w, 400, "candidate_skin_license_required")
+		default:
+			return false
+		}
+		return true
+	}
+	if check(a.store.pool, "") {
+		return
+	}
+	if e := a.candidateWriteRate(r.Context(), p.UserID, "private"); e != nil {
+		a.error(w, e)
+		return
+	}
+	var clean map[string][]byte
+	if !withCandidateImageSlot(r.Context(), func() { clean, code = sanitizeCandidateImages(input.Files, pkg.Preview) }) {
+		writeError(w, 503, "candidate_skin_busy")
+		return
+	}
+	if code != "" {
+		writeError(w, 400, code)
+		return
+	}
+	tx, e := a.store.userDataTransaction(r.Context(), p.UserID)
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	// The account lock serialises this with the author's other writes; the row lock also holds off a download reading half-replaced files.
+	if check(tx, " FOR UPDATE") {
+		return
+	}
+	license := candidatePackageLicense(pkg)
+	if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET name=$2,description=$3,version=$4,license_code=$5,license_assets=$6,license_source=$7,manifest=$8,preview_path=$9,request_sha256=$10,updated_at=now() WHERE id=$1`,
+		id, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest); e != nil {
+		a.error(w, e)
+		return
+	}
+	if _, e = tx.Exec(r.Context(), `DELETE FROM community_candidate_skin_files WHERE skin_id=$1`, id); e != nil {
+		a.error(w, e)
+		return
+	}
+	if e = insertCandidateFiles(r.Context(), tx, id, clean); e != nil {
+		a.error(w, e)
+		return
+	}
+	v, e := scanCandidateSkin(tx.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2`, p.UserID, id))
+	if e == nil {
+		e = tx.Commit(r.Context())
+	}
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	write(w, 200, v)
+}
+
+// communityCandidateVisibility moves a row the caller owns between the private library and the public gallery. Going public needs a declared asset license and a free public slot, and is charged to the gallery's hourly budget; setting the current visibility again changes nothing.
+func (a *Service) communityCandidateVisibility(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.principal(w, r, false)
+	if !ok {
+		return
+	}
+	var input struct {
+		Visibility string `json:"visibility"`
+	}
+	if !read(w, r, &input) {
+		return
+	}
+	if input.Visibility != "public" && input.Visibility != "private" {
+		writeError(w, 400, "invalid_visibility")
+		return
+	}
+	id := r.PathValue("id")
+	tx, e := a.store.userDataTransaction(r.Context(), p.UserID)
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var visibility, assets string
+	e = tx.QueryRow(r.Context(), `SELECT visibility,license_assets FROM community_candidate_skins WHERE id=$1 AND owner_id=$2 FOR UPDATE`, id, p.UserID).Scan(&visibility, &assets)
+	if errors.Is(e, pgx.ErrNoRows) {
+		writeError(w, 404, "skin_not_found")
+		return
+	}
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	if visibility != input.Visibility {
+		if input.Visibility == "public" {
+			if strings.TrimSpace(assets) == "" {
+				writeError(w, 400, "candidate_skin_license_required")
+				return
+			}
+			var public int
+			if e = tx.QueryRow(r.Context(), `SELECT count(*) FROM community_candidate_skins WHERE owner_id=$1 AND visibility='public'`, p.UserID).Scan(&public); e != nil {
+				a.error(w, e)
+				return
+			}
+			if public >= maxCandidateSkinsPerUser {
+				writeError(w, 409, "candidate_skin_publish_limit")
+				return
+			}
+			if e = a.candidateWriteRate(r.Context(), p.UserID, "public"); e != nil {
+				a.error(w, e)
+				return
+			}
+		}
+		if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET visibility=$2,updated_at=now() WHERE id=$1`, id, input.Visibility); e != nil {
+			a.error(w, e)
+			return
+		}
+	}
+	v, e := scanCandidateSkin(tx.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2`, p.UserID, id))
+	if e == nil {
+		e = tx.Commit(r.Context())
+	}
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	write(w, 200, v)
 }
