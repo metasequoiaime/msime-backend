@@ -526,7 +526,7 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 	}
 	pr := f.bodies["POST "+wordsTestRepo+"/pulls"]
 	body, _ := pr["body"].(string)
-	if pr["head"] != "community-words/20260930-123456" || pr["base"] != "main" || pr["title"] != wordsPullRequestTitle || !strings.Contains(body, "reviewed by maintainers") || !strings.Contains(body, "msime-dictionary CI") || !strings.Contains(body, "dict-v*") || !strings.Contains(body, "MSIME-Windows") {
+	if pr["head"] != "community-words/20260930-123456" || pr["base"] != "main" || pr["title"] != wordsPullRequestTitle || !strings.Contains(body, "reviewed by maintainers") || !strings.Contains(body, "msime-dictionary CI") || !strings.Contains(body, "dict-v*") || !strings.Contains(body, "resources/dictionary-sources.lock.json") || !strings.Contains(body, "custom/words.txt") {
 		t.Fatal(pr)
 	}
 	if strings.Contains(body, "扛把子") || strings.Contains(body, "octocat") {
