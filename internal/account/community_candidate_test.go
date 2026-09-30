@@ -133,7 +133,7 @@ func candidatePipeline(manifest string, files map[string][]byte) string {
 	if code := validCandidateFiles(manifest, files); code != "" {
 		return code
 	}
-	pkg, code := validCandidatePackage(manifest, files)
+	pkg, code := validCandidatePackage(manifest, files, true)
 	if code != "" {
 		return code
 	}
@@ -233,7 +233,7 @@ func TestCommunityCandidatePackageValidation(t *testing.T) {
 		})
 	}
 	// ParseStored accepts a stylesheet that exists; the outer v1 rule still refuses it even when the structural .css check is bypassed.
-	if _, code := validCandidatePackage(edit("preview = ", "toolbar_stylesheet = 'toolbar.css'\npreview = "), with(map[string][]byte{"toolbar.css": []byte("a{}")})); code != "candidate_skin_file_type" {
+	if _, code := validCandidatePackage(edit("preview = ", "toolbar_stylesheet = 'toolbar.css'\npreview = "), with(map[string][]byte{"toolbar.css": []byte("a{}")}), true); code != "candidate_skin_file_type" {
 		t.Fatal("stylesheet accepted", code)
 	}
 	// A background image joins the referenced set.
@@ -394,6 +394,9 @@ func TestAccountRouteTimeoutCoversSlowUploads(t *testing.T) {
 	// A 3.2 MB publish on a slow uplink plus the image work must fit, as the snapshot restore does; everything else keeps the short context.
 	if got := accountRouteTimeout("POST /v1/community/candidate-skins"); got != candidatePublishTimeout || got < 60*time.Second {
 		t.Fatalf("publish timeout %v", got)
+	}
+	if got := accountRouteTimeout("PUT /v1/community/candidate-skins/{id}"); got != candidatePublishTimeout {
+		t.Fatalf("replace timeout %v", got)
 	}
 	if got := accountRouteTimeout("PUT /v1/users/me/dictionary/snapshot"); got != snapshotRestoreTimeout {
 		t.Fatalf("snapshot timeout %v", got)
@@ -786,5 +789,288 @@ func TestCommunityCandidateSkinSchemaRejectsUnsafeRows(t *testing.T) {
 	}
 	if _, err := db.pool.Exec(t.Context(), `INSERT INTO community_candidate_skin_files(skin_id,path,bytes) VALUES($1,'assets/Deco.JPEG',decode('00','hex'))`, id); err != nil {
 		t.Fatal("safe row refused", err)
+	}
+}
+
+func candidateSyncBody(t *testing.T, id, name, visibility, manifest string, files map[string][]byte) string {
+	t.Helper()
+	fields := map[string]any{"id": id, "name": name, "description": "A synced skin", "manifest": manifest, "files": files}
+	if visibility != "" {
+		fields["visibility"] = visibility
+	}
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func candidateReplaceBody(t *testing.T, name, manifest string, files map[string][]byte) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"name": name, "description": "A synced skin", "manifest": manifest, "files": files})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestCommunityCandidateSkinSync(t *testing.T) {
+	db := testStore(t)
+	a := &Service{store: db}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	owner := complete(t, db, Identity{"email", "candidate-sync-owner@example.test"})
+	other := complete(t, db, Identity{"email", "candidate-sync-other@example.test"})
+	manifest, files := candidateFixture(t, "synced")
+	unlicensed := strings.Replace(manifest, "assets = 'CC-BY-4.0'\n", "", 1)
+	decode := func(w *httptest.ResponseRecorder) CommunityCandidateSkin {
+		t.Helper()
+		var v CommunityCandidateSkin
+		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+			t.Fatal(w.Body.String(), err)
+		}
+		return v
+	}
+	decodeRaw := func(w *httptest.ResponseRecorder) map[string]json.RawMessage {
+		t.Helper()
+		var v map[string]json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+			t.Fatal(w.Body.String(), err)
+		}
+		return v
+	}
+	listIDs := func(path, token string) []string {
+		t.Helper()
+		var page struct {
+			Skins []map[string]json.RawMessage `json:"skins"`
+		}
+		w := apiRequest(t, mux, "GET", path, "", token, 200)
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+			t.Fatal(w.Body.String(), err)
+		}
+		ids := []string{}
+		for _, item := range page.Skins {
+			var id string
+			_ = json.Unmarshal(item["id"], &id)
+			if _, synced := item["visibility"]; synced != strings.Contains(path, "fields=sync") {
+				t.Fatal(path, "sync fields do not follow the opt-in", w.Body.String())
+			}
+			ids = append(ids, id)
+		}
+		return ids
+	}
+
+	// A publish without the visibility key is public and answers in the released shape; one with the key carries the sync fields.
+	legacy := "aa334455-1234-4234-8234-000000000001"
+	w := apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidateSyncBody(t, legacy, "Legacy", "", manifest, files), owner.AccessToken, 201)
+	for _, key := range []string{"visibility", "updated_at", "request_sha256"} {
+		if _, present := decodeRaw(w)[key]; present {
+			t.Fatal("released clients would reject", key, w.Body.String())
+		}
+	}
+	private := "AA334455-1234-4234-8234-000000000002"
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidateSyncBody(t, private, "Private", "private", unlicensed, files), owner.AccessToken, 201)
+	created := decode(w)
+	private = strings.ToLower(private)
+	if created.ID != private || created.Visibility != "private" || created.RequestSHA256 != candidateRequestDigest("Private", "A synced skin", unlicensed, files) || created.UpdatedAt.IsZero() || created.License.Assets != "" {
+		t.Fatal(w.Body.String())
+	}
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidateSyncBody(t, private, "Private", "private", unlicensed, files), owner.AccessToken, 200)
+	for _, tc := range []struct{ visibility, manifest, code string }{
+		{"secret", manifest, "invalid_visibility"},
+		{"public", unlicensed, "candidate_skin_license_required"},
+	} {
+		w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidateSyncBody(t, "aa334455-1234-4234-8234-000000000009", "Bad", tc.visibility, tc.manifest, files), owner.AccessToken, 400)
+		if !strings.Contains(w.Body.String(), tc.code) {
+			t.Fatal(tc.code, w.Body.String())
+		}
+	}
+	// Private creates are charged to the library budget, never the gallery's.
+	var charged int
+	if err := db.pool.QueryRow(t.Context(), `SELECT (SELECT count FROM auth_rates WHERE key=$1)*100+(SELECT count FROM auth_rates WHERE key=$2)`, "candidate-publish:"+hash(owner.User.ID), "candidate-library:"+hash(owner.User.ID)).Scan(&charged); err != nil || charged != 101 {
+		t.Fatal("rate budgets", charged, err)
+	}
+
+	// Only the author's opted-in responses show a private row; everyone else gets 404.
+	if ids := listIDs("/v1/community/candidate-skins", owner.AccessToken); len(ids) != 1 || ids[0] != legacy {
+		t.Fatal(ids)
+	}
+	if ids := listIDs("/v1/community/candidate-skins?scope=mine", owner.AccessToken); len(ids) != 1 || ids[0] != legacy {
+		t.Fatal(ids)
+	}
+	if ids := listIDs("/v1/community/candidate-skins?scope=mine&fields=sync", owner.AccessToken); len(ids) != 2 || ids[0] != private {
+		t.Fatal(ids)
+	}
+	if ids := listIDs("/v1/community/candidate-skins?fields=sync", owner.AccessToken); len(ids) != 1 || ids[0] != legacy {
+		t.Fatal(ids)
+	}
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins?fields=all", "", owner.AccessToken, 400)
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+private, "", owner.AccessToken, 404)
+	w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+private+"?fields=sync", "", owner.AccessToken, 200)
+	if detail := decode(w); detail.Visibility != "private" || detail.RequestSHA256 != created.RequestSHA256 || !detail.Owned {
+		t.Fatal(w.Body.String())
+	}
+	w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+legacy+"?fields=sync", "", other.AccessToken, 200)
+	if detail := decode(w); detail.Visibility != "public" || detail.RequestSHA256 != "" || detail.UpdatedAt.IsZero() {
+		t.Fatal("another account saw the request digest", w.Body.String())
+	}
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+private+"?fields=sync", "", other.AccessToken, 404)
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+private+"/preview", "", owner.AccessToken, 200)
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+private+"/preview", "", other.AccessToken, 404)
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+private+"/preview", "", "", 404)
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins/"+private+"/download", "", other.AccessToken, 404)
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins/"+private+"/download", "", owner.AccessToken, 200)
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+private+"/rating", `{"stars":5}`, other.AccessToken, 404)
+
+	// The sync listing is the author's whole library, newest change first.
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/sync", "", "", 401)
+	var library struct {
+		Skins []struct {
+			ID            string    `json:"id"`
+			PackageID     string    `json:"package_id"`
+			RequestSHA256 string    `json:"request_sha256"`
+			Visibility    string    `json:"visibility"`
+			UpdatedAt     time.Time `json:"updated_at"`
+		} `json:"skins"`
+	}
+	w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins/sync", "", owner.AccessToken, 200)
+	if err := json.Unmarshal(w.Body.Bytes(), &library); err != nil || len(library.Skins) != 2 || library.Skins[0].ID != private || library.Skins[0].PackageID != "synced" || library.Skins[0].RequestSHA256 != created.RequestSHA256 || library.Skins[0].Visibility != "private" || library.Skins[1].Visibility != "public" {
+		t.Fatal(w.Body.String(), err)
+	}
+	w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins/sync", "", other.AccessToken, 200)
+	if strings.TrimSpace(w.Body.String()) != `{"skins":[]}` {
+		t.Fatal(w.Body.String())
+	}
+
+	// A replacement keeps the row's identity and counters and swaps the package.
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins/"+legacy+"/download", "", other.AccessToken, 200)
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+legacy+"/rating", `{"stars":4}`, other.AccessToken, 200)
+	w = apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+private, candidateReplaceBody(t, "Private", unlicensed, files), owner.AccessToken, 200)
+	if same := decode(w); !same.UpdatedAt.Equal(created.UpdatedAt) || same.RequestSHA256 != created.RequestSHA256 {
+		t.Fatal("an identical replacement wrote", w.Body.String())
+	}
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+private, candidateReplaceBody(t, "Stolen", manifest, files), other.AccessToken, 404)
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/aa334455-1234-4234-8234-00000000ffff", candidateReplaceBody(t, "Missing", manifest, files), owner.AccessToken, 404)
+	otherManifest, _ := candidateFixture(t, "renamed")
+	w = apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+private, candidateReplaceBody(t, "Private", otherManifest, files), owner.AccessToken, 409)
+	if !strings.Contains(w.Body.String(), "candidate_skin_package_mismatch") {
+		t.Fatal(w.Body.String())
+	}
+	w = apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+legacy, candidateReplaceBody(t, "Legacy", unlicensed, files), owner.AccessToken, 400)
+	if !strings.Contains(w.Body.String(), "candidate_skin_license_required") {
+		t.Fatal(w.Body.String())
+	}
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+legacy, candidateReplaceBody(t, "", manifest, files), owner.AccessToken, 400)
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+legacy, `{"id":"`+legacy+`","name":"x","description":"","manifest":"","files":{}}`, owner.AccessToken, 400)
+	before := decode(apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+legacy+"?fields=sync", "", owner.AccessToken, 200))
+	replacedManifest := strings.Replace(manifest, "image = 'assets/deco.jpg'", "image = 'assets/deco.png'", 1)
+	replacedFiles := map[string][]byte{"preview.png": candidatePNG(t, 18, 14), "assets/deco.png": candidatePNG(t, 24, 24)}
+	w = apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+legacy, candidateReplaceBody(t, "Legacy v2", replacedManifest, replacedFiles), owner.AccessToken, 200)
+	replaced := decode(w)
+	if replaced.ID != legacy || replaced.Name != "Legacy v2" || replaced.Visibility != "public" || !replaced.CreatedAt.Equal(before.CreatedAt) || !replaced.UpdatedAt.After(before.UpdatedAt) || replaced.RequestSHA256 != candidateRequestDigest("Legacy v2", "A synced skin", replacedManifest, replacedFiles) || replaced.Downloads != 1 || replaced.RatingCount != 1 || replaced.FileCount != 2 {
+		t.Fatal(w.Body.String())
+	}
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins/"+legacy+"/download", "", other.AccessToken, 200)
+	var pkg struct {
+		Manifest string            `json:"manifest"`
+		Files    map[string][]byte `json:"files"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &pkg); err != nil || pkg.Manifest != replacedManifest || len(pkg.Files) != 2 || pkg.Files["assets/deco.png"] == nil {
+		t.Fatal("download still serves the old package", w.Body.String(), err)
+	}
+
+	// Visibility changes: going public needs a license and a public slot, and is charged to the gallery budget.
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+private, `{"visibility":"hidden"}`, owner.AccessToken, 400)
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+private, `{"visibility":"public"}`, other.AccessToken, 404)
+	w = apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+private, `{"visibility":"public"}`, owner.AccessToken, 400)
+	if !strings.Contains(w.Body.String(), "candidate_skin_license_required") {
+		t.Fatal(w.Body.String())
+	}
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+private, candidateReplaceBody(t, "Private", manifest, files), owner.AccessToken, 200)
+	w = apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+private, `{"visibility":"public"}`, owner.AccessToken, 200)
+	if v := decode(w); v.Visibility != "public" || v.License.Assets != "CC-BY-4.0" {
+		t.Fatal(w.Body.String())
+	}
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+private, "", other.AccessToken, 200)
+	w = apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+legacy, `{"visibility":"private"}`, owner.AccessToken, 200)
+	if v := decode(w); v.Visibility != "private" {
+		t.Fatal(w.Body.String())
+	}
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+legacy, `{"visibility":"private"}`, owner.AccessToken, 200)
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+legacy, "", other.AccessToken, 404)
+	for i := 0; i < maxCandidateSkinsPerUser-1; i++ {
+		insertCandidateSkin(t, db, fmt.Sprintf("bb334455-1234-1234-1234-%012d", i), owner.User.ID, fmt.Sprintf("public %02d", i))
+	}
+	w = apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+legacy, `{"visibility":"public"}`, owner.AccessToken, 409)
+	if !strings.Contains(w.Body.String(), "candidate_skin_publish_limit") {
+		t.Fatal(w.Body.String())
+	}
+	// A private create still fits while the public quota is full, until the whole library is.
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidateSyncBody(t, "aa334455-1234-4234-8234-000000000003", "Third", "private", unlicensed, files), owner.AccessToken, 201)
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidateSyncBody(t, "aa334455-1234-4234-8234-000000000004", "Fourth", "public", manifest, files), owner.AccessToken, 409)
+	if !strings.Contains(w.Body.String(), "candidate_skin_publish_limit") {
+		t.Fatal(w.Body.String())
+	}
+	if _, err := db.pool.Exec(t.Context(), `UPDATE community_candidate_skins SET visibility='private' WHERE id LIKE 'bb%'`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxCandidateLibraryRows-maxCandidateSkinsPerUser-2; i++ {
+		insertCandidateSkin(t, db, fmt.Sprintf("cc334455-1234-1234-1234-%012d", i), owner.User.ID, fmt.Sprintf("library %02d", i))
+	}
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidateSyncBody(t, "aa334455-1234-4234-8234-000000000005", "Fifth", "private", unlicensed, files), owner.AccessToken, 409)
+	if !strings.Contains(w.Body.String(), "candidate_skin_library_limit") {
+		t.Fatal(w.Body.String())
+	}
+	// The library budget is separate from the gallery budget and, once spent, refuses private creates and replacements alike.
+	if _, err := db.pool.Exec(t.Context(), `UPDATE auth_rates SET count=60 WHERE key=$1`, "candidate-library:"+hash(owner.User.ID)); err != nil {
+		t.Fatal(err)
+	}
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+private, candidateReplaceBody(t, "Private v3", manifest, files), owner.AccessToken, 429)
+}
+
+func TestCommunityCandidateSkinSchemaUpgrade(t *testing.T) {
+	db := testStore(t)
+	owner := complete(t, db, Identity{"email", "candidate-upgrade@example.test"})
+	// Rebuild the released table shape under the migration lock, then migrate it forward twice.
+	tx, err := db.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	for _, statement := range []string{
+		`SELECT pg_advisory_xact_lock(8372419)`,
+		`ALTER TABLE community_candidate_skins DROP CONSTRAINT community_candidate_skins_license_check`,
+		`ALTER TABLE community_candidate_skins DROP COLUMN visibility, DROP COLUMN updated_at`,
+		`ALTER TABLE community_candidate_skins ADD CONSTRAINT community_candidate_skins_license_assets_check CHECK(length(btrim(license_assets)) BETWEEN 1 AND 120)`,
+	} {
+		if _, err = tx.Exec(t.Context(), statement); err != nil {
+			t.Fatal(statement, err)
+		}
+	}
+	if err = tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	id := "dd334455-1234-4234-8234-123456789abc"
+	insertCandidateSkin(t, db, id, owner.User.ID, "released")
+	for range 2 {
+		if err = db.Migrate(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var visibility string
+	var constraints int
+	if err = db.pool.QueryRow(t.Context(), `SELECT visibility,(SELECT count(*) FROM pg_constraint WHERE conrelid='community_candidate_skins'::regclass AND conname LIKE 'community_candidate_skins_license%') FROM community_candidate_skins WHERE id=$1`, id).Scan(&visibility, &constraints); err != nil || visibility != "public" || constraints != 1 {
+		t.Fatal("upgrade", visibility, constraints, err)
+	}
+	skin := func(id, assets, visibility string) string {
+		return `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,version,license_assets,manifest,preview_path,request_sha256,visibility) VALUES('` + id + `',$1,'shared','n','1','` + assets + `','m','p.png','` + strings.Repeat("a", 64) + `','` + visibility + `')`
+	}
+	for _, query := range []string{skin("dd334455-1234-4234-8234-000000000001", "", "public"), skin("dd334455-1234-4234-8234-000000000002", strings.Repeat("x", 121), "private"), skin("dd334455-1234-4234-8234-000000000003", "CC0", "unlisted")} {
+		if _, err = db.pool.Exec(t.Context(), query, owner.User.ID); err == nil {
+			t.Fatal("unsafe row accepted:", query)
+		}
+	}
+	if _, err = db.pool.Exec(t.Context(), skin("dd334455-1234-4234-8234-000000000004", "", "private"), owner.User.ID); err != nil {
+		t.Fatal("a private row without asset license refused", err)
 	}
 }
