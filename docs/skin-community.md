@@ -91,20 +91,20 @@ msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID
 ### 限制与校验
 
 - 只接受 `skin.toml` 加 PNG/JPEG 图片（扩展名 png、jpg、jpeg，不区分大小写），最多 3 个图片文件，每个文件都必须被清单引用：只能是 `preview`、`candidate_window.decoration.image` 和 `candidate_window.background.image`。不接受样式表（`toolbar_stylesheet`）、字体、SVG、GIF 或 WebP；Go 标准库不能重新编码 WebP，支持它需要新增依赖。
-- 单个图片不超过 1 MiB、合计不超过 2 MiB，上传时和重新编码后都要满足；skin.toml 另计，最多 65,536 字节。每边 1 到 2048 像素，整包解码像素合计不超过 800 万，尺寸在完整解码前从文件头读取。
+- 单个图片不超过 1 MiB、合计不超过 2 MiB，上传时和重新编码后都要满足；skin.toml 另计，最多 65,536 字节。每边 1 到 2048 像素，整包解码像素合计不超过 800 万，尺寸在完整解码前从文件头读取。每张 JPEG 最多 32 个扫描段（SOS）：Go 的解码器对每个扫描都要遍历整张图，且不限制扫描数，常见渐进式 JPEG 约 10 个扫描；超过的返回 `candidate_skin_image_invalid`。
 - 必须用 `preview` 指定一张包内的 PNG/JPEG 作为预览图，重新编码后不超过 256 KiB。
-- `skin.toml` 必须包含 `[license]` 且 `assets` 非空。客户端发布时还要求用户勾选确认拥有素材权利。
+- `skin.toml` 必须包含 `[license]` 且 `assets` 非空。客户端发布时还要求用户勾选确认拥有素材权利。清单的 `version` 和 `[license]` 的 `code`、`assets`、`source` 不能含控制字符（包括换行和制表符），否则返回 `invalid_candidate_skin_package`：客户端会拒绝含控制字符的列表项，一条这样的记录会让所在的整页列表失败。
 - 路径规则与客户端 `safe_resource` 一致：相对路径，每段只含 `A-Za-z0-9._-`，不允许空段、`.`、`..` 或反斜杠；键不能是 `skin.toml`，转小写后不能重复。
 - 清单用与客户端加载器一致的规则校验（`internal/skins/client.go` 的 `ParseStored`），包括 ID 格式、保留主题 ID 与四个内置 ID、schema_version、base、supports 和窗口参数。
 - 服务器按扩展名选择解码器解码每张图片后重新编码（PNG 最高压缩、JPEG 质量 90），因此会去除 EXIF、XMP、ICC 和文本块，APNG 只保留第一帧；扩展名与内容不符的图片被拒绝。去掉 ICC 可能带来轻微色差，Go 的 PNG 编码器也可能让已优化的 PNG 变大，接近上限的包可能在重新编码后被拒绝。
-- 标题最多 32 个 Unicode 字符，说明最多 280 个，均先去除首尾空白；与清单里的 `name` 无关。发布请求最多 3,200,000 字节。
+- 标题最多 32 个 Unicode 字符，说明最多 280 个，均先去除首尾空白；与清单里的 `name` 无关。标题不能含控制字符，说明只允许换行和制表符两种控制字符。发布请求最多 3,200,000 字节。
 - 每个账号最多 20 款，每小时最多发布 10 次（按账号计，数据库限流）；图片解码每个进程最多同时 2 个，繁忙时返回 503 `candidate_skin_busy`。
 
 错误码：400 `invalid_json`、`invalid_skin_metadata`、`invalid_community_id`、`invalid_candidate_skin_package`、`candidate_skin_file_type`、`candidate_skin_file_path`、`candidate_skin_too_large`、`candidate_skin_image_invalid`、`candidate_skin_license_required`、`candidate_skin_preview_required`；409 `candidate_skin_id_conflict`、`candidate_skin_publish_limit`；429 `rate_limit_exceeded`；503 `candidate_skin_busy`、`auth_unavailable`。
 
 ### ID 与版本
 
-`id` 是客户端生成的发布 UUID，用于网络失败后的安全重试：同一账号用相同内容重试返回原作品，内容不同或属于其他账号返回 409。`package_id` 是清单里的 `id`，也是客户端安装的目录名。服务端不改写 skin.toml。不同作者可以发布相同的 `package_id`，安装时会替换本机同名皮肤，客户端会先请求确认。作品发布后不能原地修改，更新需要用新的 UUID 发布新作品，评分不继承。
+`id` 是客户端生成的发布 UUID，用于网络失败后的安全重试：同一账号用相同内容重试返回原作品，内容不同或属于其他账号返回 409。已提交作品的重试在每小时发布限流之前就会返回，不计入次数，因此丢失响应后的重试不会变成 429。两个账号同时用同一 UUID 发布时，后提交的一方同样得到 409。`package_id` 是清单里的 `id`，也是客户端安装的目录名。服务端不改写 skin.toml。不同作者可以发布相同的 `package_id`，安装时会替换本机同名皮肤，客户端会先请求确认。作品发布后不能原地修改，更新需要用新的 UUID 发布新作品，评分不继承。
 
 ### 部署与审核
 

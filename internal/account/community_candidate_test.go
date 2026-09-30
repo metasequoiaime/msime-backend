@@ -70,6 +70,38 @@ func candidateJPEG(t *testing.T, width, height int) []byte {
 	return out.Bytes()
 }
 
+// candidateNoiseJPEG saved at a low quality grows well past its upload size when the server re-encodes it at quality 90.
+func candidateNoiseJPEG(t *testing.T, side, quality int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, side, side))
+	random := rand.New(rand.NewPCG(1, 2))
+	for i := range img.Pix {
+		img.Pix[i] = byte(random.Uint32())
+		if i%4 == 3 {
+			img.Pix[i] = 255
+		}
+	}
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, img, &jpeg.Options{Quality: quality}); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+// candidateJPEGWithScans repeats the single scan of a baseline JPEG; Go's decoder accepts every copy and decodes the whole image again for each one.
+func candidateJPEGWithScans(t *testing.T, data []byte, scans int) []byte {
+	t.Helper()
+	start, end := bytes.Index(data, []byte{0xFF, 0xDA}), bytes.LastIndex(data, []byte{0xFF, 0xD9})
+	if start < 0 || end < start {
+		t.Fatal("fixture is not a single-scan JPEG")
+	}
+	out := append([]byte{}, data[:start]...)
+	for range scans {
+		out = append(out, data[start:end]...)
+	}
+	return append(out, 0xFF, 0xD9)
+}
+
 // candidateFixture is a valid package: a PNG preview and a JPEG decoration, both referenced by the manifest.
 func candidateFixture(t *testing.T, packageID string) (string, map[string][]byte) {
 	t.Helper()
@@ -187,6 +219,12 @@ func TestCommunityCandidatePackageValidation(t *testing.T) {
 		{"missing id", edit("id = 'shared'\n", ""), files, "invalid_candidate_skin_package"},
 		{"invalid TOML", "schema_version = [", files, "invalid_candidate_skin_package"},
 		{"wrong schema version", edit("schema_version = 1", "schema_version = 2"), files, "invalid_candidate_skin_package"},
+		{"tab in version", edit("version = '1.0'", `version = "1.0\t"`), files, "invalid_candidate_skin_package"},
+		{"control in license code", edit("code = 'MIT'", `code = "MIT\u0007"`), files, "invalid_candidate_skin_package"},
+		{"newline in license assets", edit("assets = 'CC-BY-4.0'", `assets = "CC-BY-4.0\nCC0"`), files, "invalid_candidate_skin_package"},
+		{"multi-line license source", edit("source = 'synthetic'", "source = \"\"\"https://example.com/a\nhttps://example.com/b\"\"\""), files, "invalid_candidate_skin_package"},
+		{"jpeg scan bomb", manifest, with(map[string][]byte{"assets/deco.jpg": candidateJPEGWithScans(t, jpgData, maxCandidateJPEGScans+1)}), "candidate_skin_image_invalid"},
+		{"file over 1 MiB after re-encode", manifest, with(map[string][]byte{"assets/deco.jpg": candidateNoiseJPEG(t, 1250, 30)}), "candidate_skin_too_large"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if code := candidatePipeline(tc.manifest, tc.files); code != tc.code {
@@ -206,6 +244,57 @@ func TestCommunityCandidatePackageValidation(t *testing.T) {
 	if code := candidatePipeline(background, files); code != "invalid_candidate_skin_package" {
 		t.Fatal("missing background accepted", code)
 	}
+
+	t.Run("re-encoded size limits", func(t *testing.T) {
+		// Each file stays under 1 MiB as uploaded and after re-encode, but the re-encoded total passes 2 MiB.
+		large := candidateNoiseJPEG(t, 1250, 30)
+		medium := candidateNoiseJPEG(t, 1200, 30)
+		preview := candidateNoisePNG(t, 250, 250)
+		jpegBackground := edit("[license]", "[candidate_window.background]\nimage = 'assets/bg.jpg'\n[license]")
+		package3 := with(map[string][]byte{"preview.png": preview, "assets/deco.jpg": medium, "assets/bg.jpg": medium})
+		// The table case "file over 1 MiB after re-encode" relies on large passing the upload limit.
+		if len(large) >= maxCandidateFileBytes || len(medium)*2+len(preview) >= maxCandidatePackageBytes || validCandidateFiles(jpegBackground, package3) != "" {
+			t.Fatal("fixtures must pass the upload limits", len(large), len(medium), len(preview))
+		}
+		for path, data := range package3 {
+			single, code := sanitizeCandidateImages(map[string][]byte{path: data}, "preview.png")
+			if code != "" || len(single[path]) > maxCandidateFileBytes {
+				t.Fatal("fixture file must fit alone after re-encode", path, code)
+			}
+		}
+		if code := candidatePipeline(jpegBackground, package3); code != "candidate_skin_too_large" {
+			t.Fatal("re-encoded total over 2 MiB accepted", code)
+		}
+	})
+
+	t.Run("jpeg scan count", func(t *testing.T) {
+		atLimit := candidateJPEGWithScans(t, jpgData, maxCandidateJPEGScans)
+		if candidateJPEGScans(jpgData) != 1 || candidateJPEGScans(atLimit) != maxCandidateJPEGScans {
+			t.Fatal("scan count", candidateJPEGScans(jpgData), candidateJPEGScans(atLimit))
+		}
+		// The repeated scans are real work for the decoder, so the cap is what keeps the bomb case out.
+		if _, err := jpeg.Decode(bytes.NewReader(candidateJPEGWithScans(t, jpgData, maxCandidateJPEGScans+1))); err != nil {
+			t.Fatal("decoder refused repeated scans", err)
+		}
+		if code := candidatePipeline(manifest, with(map[string][]byte{"assets/deco.jpg": atLimit})); code != "" {
+			t.Fatal("scan count at the limit refused", code)
+		}
+		// Marker bytes inside a segment payload, fill bytes and extraneous bytes between segments are not scans.
+		payload := []byte("Exif\x00\x00\xFF\xDA\xFF\xDA")
+		app1 := append([]byte{0xFF, 0xE1, 0, byte(len(payload) + 2)}, payload...)
+		padded := append(append(append([]byte{}, jpgData[:2]...), app1...), append([]byte{0x12, 0xFF, 0xFF}, jpgData[2:]...)...)
+		if candidateJPEGScans(padded) != 1 {
+			t.Fatal("payload bytes counted as scans", candidateJPEGScans(padded))
+		}
+		if _, err := jpeg.Decode(bytes.NewReader(padded)); err != nil {
+			t.Fatal("padded fixture is not a JPEG the decoder accepts", err)
+		}
+		for _, truncated := range [][]byte{jpgData[:2], jpgData[:3], append(append([]byte{}, jpgData[:2]...), 0xFF, 0xDB, 0)} {
+			if candidateJPEGScans(truncated) != 0 {
+				t.Fatal("truncated header counted", truncated)
+			}
+		}
+	})
 
 	t.Run("metadata is stripped", func(t *testing.T) {
 		tagged := pngWithChunk(pngWithChunk(pngData, "tEXt", []byte("Comment\x00secret-png-text")), "iTXt", []byte("XML:com.adobe.xmp\x00\x00\x00\x00\x00secret-xmp"))
@@ -312,7 +401,13 @@ func TestCommunityCandidateSkinLifecycle(t *testing.T) {
 			t.Fatal("list leaked", leak)
 		}
 	}
-	apiRequest(t, mux, "GET", "/v1/community/candidate-skins?q=共享", "", "", 200)
+	for query, count := range map[string]int{"共享": 1, "nomatch": 0} {
+		w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins?q="+query, "", "", 200)
+		page.Skins = nil
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Skins) != count || count == 1 && page.Skins[0].ID != id {
+			t.Fatal(query, w.Body.String(), err)
+		}
+	}
 	w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+id, "", owner.AccessToken, 200)
 	var detail CommunityCandidateSkin
 	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || detail != created {
@@ -457,6 +552,19 @@ func TestCommunityCandidateSkinBoundaries(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || page.More || len(page.Skins) != 10 {
 		t.Fatal(w.Body.String(), err)
 	}
+	// The search matches a case-insensitive substring of the listing name only: "skin 0" is skin 00 through skin 09, never skin 10.
+	for _, query := range []string{"skin+0", "SKIN+0"} {
+		page.Skins = nil
+		w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins?q="+query, "", "", 200)
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || page.More || len(page.Skins) != 10 {
+			t.Fatal(query, w.Body.String(), err)
+		}
+		for _, skin := range page.Skins {
+			if !strings.HasPrefix(skin.Name, "skin 0") {
+				t.Fatal(query, "matched", skin.Name)
+			}
+		}
+	}
 	for query, code := range map[string]string{"offset=-1": "invalid_offset", "offset=100001": "invalid_offset", "offset=bad": "invalid_offset", "q=" + strings.Repeat("x", 129): "invalid_search", "q=%ff": "invalid_search", "scope=saved": "invalid_scope"} {
 		w := apiRequest(t, mux, "GET", "/v1/community/candidate-skins?"+query, "", "", 400)
 		if !strings.Contains(w.Body.String(), code) {
@@ -466,7 +574,19 @@ func TestCommunityCandidateSkinBoundaries(t *testing.T) {
 
 	manifest, files := candidateFixture(t, "shared")
 	valid := "cd334455-1234-4234-8234-999999999999"
+	described := func(id, description, manifest string, files map[string][]byte) string {
+		raw, err := json.Marshal(map[string]any{"id": id, "name": "Name", "description": description, "manifest": manifest, "files": files})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
 	for _, tc := range []struct{ body, code string }{
+		{candidatePublishBody(t, valid, "Na\u0007me", manifest, files), "invalid_skin_metadata"},
+		{candidatePublishBody(t, valid, "Name\tTab", manifest, files), "invalid_skin_metadata"},
+		{described(valid, "line\rreturn", manifest, files), "invalid_skin_metadata"},
+		{described(valid, "nul\x00byte", manifest, files), "invalid_skin_metadata"},
+		{candidatePublishBody(t, valid, "Name", strings.Replace(manifest, "source = 'synthetic'", "source = \"\"\"https://example.com/a\nhttps://example.com/b\"\"\"", 1), files), "invalid_candidate_skin_package"},
 		{candidatePublishBody(t, "cd334455x1234-4234-8234-999999999999", "Name", manifest, files), "invalid_community_id"},
 		{candidatePublishBody(t, "zd334455-1234-4234-8234-999999999999", "Name", manifest, files), "invalid_community_id"},
 		{candidatePublishBody(t, valid, "   ", manifest, files), "invalid_skin_metadata"},
@@ -509,13 +629,81 @@ func TestCommunityCandidateSkinBoundaries(t *testing.T) {
 		t.Fatal(busy.Code, busy.Body.String())
 	}
 
+	// A real package body is far above the 16 KiB read() cap: a 540x540 noise PNG decoration is about 875 KB, so the JSON body is about 1.2 MB. The description may span lines and carry tabs.
+	large := "cd334455-1234-4234-8234-aaaaaaaaaaaa"
+	largeBody := described(large, "line one\n\tline two", strings.Replace(manifest, "image = 'assets/deco.jpg'", "image = 'assets/deco.png'", 1), map[string][]byte{"preview.png": files["preview.png"], "assets/deco.png": candidateNoisePNG(t, 540, 540)})
+	if len(largeBody) < 1_000_000 || len(largeBody) > maxCandidatePublishBytes {
+		t.Fatal("large body is out of range", len(largeBody))
+	}
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", largeBody, limited.AccessToken, 201)
+	var published CommunityCandidateSkin
+	if err := json.Unmarshal(w.Body.Bytes(), &published); err != nil || published.ID != large || published.Description != "line one\n\tline two" || published.Size < 800_000 {
+		t.Fatal(w.Body.String(), err)
+	}
+
 	// The per-user publish rate is counted in auth_rates under the hashed account id.
 	if _, err := db.pool.Exec(t.Context(), `INSERT INTO auth_rates(key,count,expires_at) VALUES($1,10,now()+interval '1 hour') ON CONFLICT(key) DO UPDATE SET count=10,expires_at=excluded.expires_at`, "candidate-publish:"+hash(limited.User.ID)); err != nil {
 		t.Fatal(err)
 	}
+	// A retry of a publication that already committed answers 200 even when the hourly rate is spent, and does not charge it.
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", largeBody, limited.AccessToken, 200)
+	var retried CommunityCandidateSkin
+	if err := json.Unmarshal(w.Body.Bytes(), &retried); err != nil || retried != published {
+		t.Fatal(w.Body.String(), err)
+	}
+	var charged int
+	if err := db.pool.QueryRow(t.Context(), `SELECT count FROM auth_rates WHERE key=$1`, "candidate-publish:"+hash(limited.User.ID)).Scan(&charged); err != nil || charged != 10 {
+		t.Fatal("retry charged the rate", charged, err)
+	}
 	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidatePublishBody(t, valid, "Limited", manifest, files), limited.AccessToken, 429)
 	if w.Header().Get("Retry-After") != "60" || !strings.Contains(w.Body.String(), "rate_limit_exceeded") {
 		t.Fatal(w.Header(), w.Body.String())
+	}
+
+	// Two accounts racing on one id: the other account's insert is still uncommitted when this publish probes, so only the insert itself sees the conflict and it must answer 409 rather than a unique violation's 503.
+	racer := complete(t, db, Identity{"email", "candidate-racer@example.test"})
+	raced := "cd334455-1234-4234-8234-bbbbbbbbbbbb"
+	competing, err := db.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer competing.Rollback(context.Background())
+	if _, err = competing.Exec(t.Context(), `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,version,license_assets,manifest,preview_path,request_sha256) VALUES($1,$2,'shared','first','1.0','CC-BY-4.0','schema_version = 1','preview.png',$3)`, raced, owner.User.ID, hash(raced)); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan *httptest.ResponseRecorder, 1)
+	racedBody := candidatePublishBody(t, raced, "Second", manifest, files)
+	go func() {
+		r := httptest.NewRequest("POST", "/v1/community/candidate-skins", strings.NewReader(racedBody))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+racer.AccessToken)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		result <- w
+	}()
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		var waiting bool
+		if err = db.pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'INSERT INTO community_candidate_skins(%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case w := <-result:
+			t.Fatal("publish finished before the competing insert committed", w.Code, w.Body.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("publish never waited on the competing insert")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err = competing.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if w := <-result; w.Code != 409 || !strings.Contains(w.Body.String(), "candidate_skin_id_conflict") {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }
 
