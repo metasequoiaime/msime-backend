@@ -108,6 +108,11 @@ func (a *Service) Authenticate(ctx context.Context, token string) (Principal, er
 	}
 	return a.store.Authenticate(ctx, token)
 }
+
+// RateLimit counts one attempt for subject in a fixed PostgreSQL window shared by every replica and returns ErrLimited once more than limit attempts fall inside it. The subject (for example a client address) is stored only as a SHA-256 digest, the same way the per-address limits above store it.
+func (a *Service) RateLimit(ctx context.Context, scope, subject string, limit int, window time.Duration) error {
+	return a.store.Rate(ctx, scope+":"+hash(subject), limit, window)
+}
 func IsPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/community/") || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
 }

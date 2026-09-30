@@ -1,0 +1,261 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
+)
+
+// Outcomes of the GitHub part of a submission. Anything that fails before the first write that could carry entries is errWordsUnavailable (nothing was submitted, the visitor may simply try again). A write that GitHub may or may not have applied is errWordsUncertain and is never retried, because a retry could duplicate the entries.
+var (
+	errWordsConflict      = errors.New("words.txt changed concurrently")
+	errWordsUncertain     = errors.New("GitHub write outcome unknown")
+	errWordsUnavailable   = errors.New("GitHub unavailable")
+	errWordsMisconfigured = errors.New("GitHub App credentials rejected")
+)
+
+const wordsPullRequestTitle = "Community word submissions"
+
+const wordsPullRequestBody = `This is the rolling pull request for words submitted anonymously through the word form on the MSIME website (msime.app). Each commit on this branch is one submission: it appends ` + "`word<TAB>pinyin<TAB>5000`" + ` lines to ` + "`words.txt`" + `, and its commit message lists the entries together with the submitter's note, if any.
+
+- Submissions are opened by the MSIME word-submission GitHub App after a Cloudflare Turnstile check and a per-address rate limit. No account or personal data is collected.
+- Every entry is reviewed by maintainers before merge. Remove or fix entries on this branch as needed; new submissions keep appending here while this pull request is open.
+- The msime-customdict CI validates the format, readings and duplicates.
+- After merge, the entries reach msime and MSIME-Windows through the next ` + "`dict-v*`" + ` dictionary release.
+`
+
+type githubResponse struct {
+	status int
+	body   []byte
+}
+
+// githubRequest performs one GitHub REST call. A transport failure is returned as an error with a zero status; HTTP errors are returned as a status for the caller to classify.
+func (ws *wordSubmitter) githubRequest(ctx context.Context, token, method, path string, body any) (githubResponse, error) {
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return githubResponse{}, err
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, ws.config.GitHub.APIURL+path, reader)
+	if err != nil {
+		return githubResponse{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "MSIME-Backend-word-submissions")
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := ws.client.Do(req)
+	if err != nil {
+		return githubResponse{}, err
+	}
+	defer resp.Body.Close()
+	// words.txt comes back base64-encoded inside JSON; 8 MiB leaves room for a file several times the size of today's.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20+1))
+	if err != nil {
+		return githubResponse{status: resp.StatusCode}, err
+	}
+	if len(raw) > 8<<20 {
+		return githubResponse{status: resp.StatusCode}, errors.New("GitHub response too large")
+	}
+	return githubResponse{resp.StatusCode, raw}, nil
+}
+
+func (r githubResponse) ok() bool { return r.status >= 200 && r.status < 300 }
+
+func phaseError(kind error, phase string, r githubResponse, cause error) error {
+	detail := phase + ": status " + strconv.Itoa(r.status)
+	if cause != nil {
+		detail = phase + ": " + cause.Error()
+	}
+	return errors.Join(kind, errors.New(detail))
+}
+
+// installationToken mints (and caches until shortly before expiry) an installation token restricted to the target repository with only contents:write and pull_requests:write, whatever else the installation may have been granted.
+func (ws *wordSubmitter) installationToken(ctx context.Context) (string, error) {
+	ws.tokenMu.Lock()
+	defer ws.tokenMu.Unlock()
+	now := ws.now()
+	if ws.token != "" && now.Before(ws.tokenExpiry.Add(-5*time.Minute)) {
+		return ws.token, nil
+	}
+	g := ws.config.GitHub
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: g.key}, (&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		return "", err
+	}
+	// GitHub rejects app JWTs that live longer than ten minutes; issuing a minute in the past absorbs clock drift.
+	assertion, err := jwt.Signed(signer).Claims(jwt.Claims{Issuer: strconv.FormatInt(g.AppID, 10), IssuedAt: jwt.NewNumericDate(now.Add(-time.Minute)), Expiry: jwt.NewNumericDate(now.Add(9 * time.Minute))}).Serialize()
+	if err != nil {
+		return "", err
+	}
+	_, name, _ := strings.Cut(g.Repository, "/")
+	r, err := ws.githubRequest(ctx, assertion, "POST", "/app/installations/"+strconv.FormatInt(g.InstallationID, 10)+"/access_tokens", map[string]any{
+		"repositories": []string{name},
+		"permissions":  map[string]string{"contents": "write", "pull_requests": "write"},
+	})
+	if err != nil || r.status >= 500 {
+		return "", phaseError(errWordsUnavailable, "installation token", r, err)
+	}
+	if !r.ok() {
+		return "", phaseError(errWordsMisconfigured, "installation token", r, nil)
+	}
+	var result struct {
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if json.Unmarshal(r.body, &result) != nil || result.Token == "" {
+		return "", phaseError(errWordsUnavailable, "installation token", r, errors.New("invalid response"))
+	}
+	ws.token, ws.tokenExpiry = result.Token, result.ExpiresAt
+	return ws.token, nil
+}
+
+type githubPull struct {
+	Number int `json:"number"`
+	Head   struct {
+		Ref  string `json:"ref"`
+		Repo *struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+}
+
+type githubFile struct {
+	Type     string `json:"type"`
+	SHA      string `json:"sha"`
+	Encoding string `json:"encoding"`
+	Content  string `json:"content"`
+}
+
+func (f githubFile) text() (string, bool) {
+	if f.Type != "file" || f.Encoding != "base64" || f.SHA == "" {
+		return "", false
+	}
+	// The Contents API wraps its base64 every 60 characters.
+	raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(f.Content), ""))
+	return string(raw), err == nil && utf8.Valid(raw)
+}
+
+// submit appends the entries to words.txt on the open rolling pull request, or on a new community-words/<UTC timestamp> branch with a new pull request when none is open, and returns the pull request number. Branch names carry a timestamp, so a merged or closed pull request is never reused. It never deletes, force-pushes or retries a write.
+func (ws *wordSubmitter) submit(ctx context.Context, entries []wordSubmissionEntry, note string) (int, error) {
+	ws.writes.Lock()
+	defer ws.writes.Unlock()
+	token, err := ws.installationToken(ctx)
+	if err != nil {
+		return 0, err
+	}
+	g := ws.config.GitHub
+	repo := "/repos/" + g.Repository
+	read := func(phase, path string, out any) error {
+		r, err := ws.githubRequest(ctx, token, "GET", repo+path, nil)
+		if err != nil || !r.ok() {
+			return phaseError(errWordsUnavailable, phase, r, err)
+		}
+		if err = json.Unmarshal(r.body, out); err != nil {
+			return phaseError(errWordsUnavailable, phase, r, errors.New("invalid response"))
+		}
+		return nil
+	}
+	var pulls []githubPull
+	if err = read("list pull requests", "/pulls?"+url.Values{"state": {"open"}, "base": {g.Branch}, "per_page": {"100"}, "sort": {"created"}, "direction": {"asc"}}.Encode(), &pulls); err != nil {
+		return 0, err
+	}
+	var open *githubPull
+	for i := range pulls {
+		p := &pulls[i]
+		// Only branches in the target repository itself: a fork can name its branch community-words/... too.
+		if strings.HasPrefix(p.Head.Ref, wordSubmissionBranches) && p.Head.Repo != nil && strings.EqualFold(p.Head.Repo.FullName, g.Repository) && p.Base.Ref == g.Branch {
+			open = p
+			break
+		}
+	}
+	branch, readRef := "", ""
+	if open != nil {
+		branch, readRef = open.Head.Ref, open.Head.Ref
+	} else {
+		var base struct {
+			Object struct {
+				SHA string `json:"sha"`
+			} `json:"object"`
+		}
+		if err = read("read base branch", "/git/ref/heads/"+g.Branch, &base); err != nil {
+			return 0, err
+		}
+		if base.Object.SHA == "" {
+			return 0, phaseError(errWordsUnavailable, "read base branch", githubResponse{status: 200}, errors.New("missing commit SHA"))
+		}
+		branch, readRef = wordSubmissionBranches+ws.now().UTC().Format("20060102-150405"), base.Object.SHA
+	}
+	var file githubFile
+	if err = read("read "+wordSubmissionsFile, "/contents/"+wordSubmissionsFile+"?"+url.Values{"ref": {readRef}}.Encode(), &file); err != nil {
+		return 0, err
+	}
+	content, ok := file.text()
+	if !ok {
+		return 0, phaseError(errWordsUnavailable, "read "+wordSubmissionsFile, githubResponse{status: 200}, errors.New("unexpected content encoding"))
+	}
+	// Checked before creating a branch so a rejected submission leaves nothing behind.
+	if listed := listedWords(content, entries); len(listed) > 0 {
+		return 0, listed
+	}
+	if open == nil {
+		// The branch starts at the commit the file was just read from, so the blob SHA below still matches.
+		r, err := ws.githubRequest(ctx, token, "POST", repo+"/git/refs", map[string]string{"ref": "refs/heads/" + branch, "sha": readRef})
+		switch {
+		case err == nil && r.status == 422:
+			// Another submission created the same branch name in the same second.
+			return 0, phaseError(errWordsConflict, "create branch", r, nil)
+		case err != nil || !r.ok():
+			// At worst an empty branch exists; no entries were written, so trying again is safe.
+			return 0, phaseError(errWordsUnavailable, "create branch", r, err)
+		}
+	}
+	// The blob SHA makes this a compare-and-swap: if words.txt changed on the branch since it was read, GitHub rejects the write and the visitor is asked to submit again.
+	r, err := ws.githubRequest(ctx, token, "PUT", repo+"/contents/"+wordSubmissionsFile, map[string]string{
+		"message": wordsCommitMessage(entries, note),
+		"content": base64.StdEncoding.EncodeToString([]byte(appendWordLines(content, entries))),
+		"sha":     file.SHA,
+		"branch":  branch,
+	})
+	switch {
+	case err != nil || r.status >= 500:
+		return 0, phaseError(errWordsUncertain, "commit "+wordSubmissionsFile, r, err)
+	case r.status == 409 || r.status == 422:
+		return 0, phaseError(errWordsConflict, "commit "+wordSubmissionsFile, r, nil)
+	case !r.ok():
+		return 0, phaseError(errWordsUnavailable, "commit "+wordSubmissionsFile, r, nil)
+	}
+	if open != nil {
+		return open.Number, nil
+	}
+	// From here on the entries are committed, so failing to open the pull request is reported as uncertain rather than as not submitted.
+	r, err = ws.githubRequest(ctx, token, "POST", repo+"/pulls", map[string]any{"title": wordsPullRequestTitle, "head": branch, "base": g.Branch, "body": wordsPullRequestBody})
+	var created struct {
+		Number int `json:"number"`
+	}
+	if err != nil || !r.ok() || json.Unmarshal(r.body, &created) != nil || created.Number <= 0 {
+		return 0, phaseError(errWordsUncertain, "open pull request", r, err)
+	}
+	return created.Number, nil
+}
