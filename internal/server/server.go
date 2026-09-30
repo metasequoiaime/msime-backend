@@ -33,6 +33,8 @@ type Server struct {
 	skinJobs    map[string]*skinArtworkJob
 	skinWorkers sync.WaitGroup
 
+	words *wordSubmitter
+
 	adminStore  adminAuthStore
 	adminGoogle *adminGoogleAuth
 	accounts    *account.Service
@@ -73,7 +75,13 @@ func New(c Config) (*Server, error) {
 	}
 	s.initAdminGoogle()
 	s.accounts.ConfigureEngine(c.Engine)
+	if c.WordSubmissions.enabled() && s.accounts != nil {
+		s.words = newWordSubmitter(c.WordSubmissions, c.AllowedOrigins, s.accounts)
+	}
 	mux := http.NewServeMux()
+	// Anonymous website endpoints: the /v1/community/ prefix skips Bearer authentication in the middleware, and the handlers apply their own origin, Turnstile and rate checks.
+	mux.HandleFunc("GET "+wordSubmissionsPath, s.wordSubmissionSettings)
+	mux.HandleFunc("POST "+wordSubmissionsPath, s.submitWords)
 	mux.HandleFunc("POST /v1/skins/generate", s.generateSkinArtwork)
 	mux.HandleFunc("POST /v1/skins/jobs", s.createSkinArtworkJob)
 	mux.HandleFunc("GET /v1/skins/jobs/{job}", s.getSkinArtworkJob)

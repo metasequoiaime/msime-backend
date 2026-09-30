@@ -250,6 +250,34 @@ for path,method,title,body,response in [
     if method=='post': operation['responses']['201']=operation['responses']['200']
     paths.setdefault(path,{})[method]=operation
 
+# Anonymous website word form (msime-web#213). Errors here use a plain-string error plus code, which the website form reads.
+word_error=obj({'error':string(description='可直接展示给用户的中文说明。'),'code':string()},['error','code'])
+word_rejected=obj({'error':string(),'code':string(enum=['invalid_entries']),'rejected':{'type':'array','items':obj({'index':{'type':'integer','minimum':0,'description':'entries 中的下标。'},'code':string(enum=['word_required','invalid_word','word_too_long','pinyin_required','invalid_pinyin','invalid_syllable','syllable_count_mismatch','duplicate_entry','already_listed']),'reason':string(description='可直接展示在该行旁的中文说明。')},['index','code','reason'])}},['error','code'])
+def word_response(description, schema=word_error, retry=False):
+    r={'description':description,'content':{'application/json':{'schema':schema}}}
+    if retry: r['headers']={'Retry-After':{'description':'重试等待秒数','schema':{'type':'integer'}}}
+    return r
+paths['/v1/community/word-submissions']={
+ 'get':{'summary':'查询官网词条提交是否开放','tags':['词条提交'],'security':[],
+  'description':'匿名接口，无需令牌。未配置时 enabled=false、site_key 为空字符串。site_key 是 Cloudflare Turnstile 站点密钥（公开值）。',
+  'responses':{'200':{'description':'成功','content':{'application/json':{'schema':obj({'enabled':{'type':'boolean'},'site_key':string()},['enabled','site_key'])}}}}},
+ 'post':{'summary':'匿名提交词条到 msime-customdict 滚动 Pull Request','tags':['词条提交'],'security':[],
+  'description':'仅接受 allowed_origins 中网站发出的浏览器请求（必须携带 Origin）。请求体最多 16 KiB。服务端依次校验词条、Cloudflare Turnstile（action 为 words，hostname 属于 allowed_origins）以及按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，只计通过人机验证的请求），然后用仅限 msime-customdict、仅有 contents:write 与 pull_requests:write 的 GitHub App 安装令牌把 `词语<TAB>拼音<TAB>5000` 追加到 words.txt：已有开启的 community-words/* Pull Request 时追加提交，否则从主分支新建 community-words/<UTC yyyymmdd-hhmmss> 分支并开 Pull Request。写入使用文件 blob SHA 做乐观并发，冲突返回 409，服务端从不自动重试 GitHub 写入。备注会公开写入提交说明，@、#、GH- 与 :// 会插入零宽空格。服务不保存访客信息，不记录词条、备注或令牌。',
+  'requestBody':{'required':True,'content':{'application/json':{'schema':obj({
+    'entries':{'type':'array','minItems':1,'maxItems':20,'items':obj({'word':string(minLength=1,description='1–16 个 CJK 统一表意文字（含各扩展区）或〇，不含字母、数字、标点、空白和控制字符。',example='未来可期'),'pinyin':string(maxLength=200,pattern="^[a-z]+('[a-z]+)*$",description="小写全拼，音节用 ' 连接，音节数等于字数；ü 写作 v，lüe/nüe 写作 lve/nve。音节表与官网表单一致（402 个）。",example="wei'lai'ke'qi")},['word','pinyin'],True)},
+    'note':string(maxLength=500,description='可选备注，最多 500 个字符；换行和控制字符会被压成空格。'),
+    'token':string(minLength=1,maxLength=2048,description='Turnstile 令牌，一次有效。')},['entries','token'],True)}}},
+  'responses':{
+    '201':{'description':'已写入 Pull Request','content':{'application/json':{'schema':obj({'pull_request_url':string(format='uri',example='https://github.com/metasequoiaime/msime-customdict/pull/12')},['pull_request_url'])}}},
+    '400':word_response('请求无效；词条问题在 rejected 中逐条给出（包括词库中已有的 already_listed）',{'oneOf':[word_rejected,word_error]}),
+    '403':word_response('来源不是配置的网站，或 Turnstile 验证失败'),
+    '409':word_response('words.txt 被同时修改（或同一秒内新建了同名分支），词条未写入；由用户重新验证后手动重试'),
+    '413':word_response('请求体超过 16 KiB'),
+    '415':word_response('需要 application/json'),
+    '429':word_response('提交过于频繁',retry=True),
+    '502':word_response('GitHub 写入结果未知，词条可能已写入；先查看 pulls_url 再决定是否重试',obj({'error':string(),'code':string(enum=['outcome_unknown']),'uncertain':{'type':'boolean','enum':[True]},'pulls_url':string(format='uri')},['error','code','uncertain'])),
+    '503':word_response('功能未开启或配置无效、Turnstile/数据库/GitHub 暂不可用（此时尚未写入任何词条）',retry=True)}}}
+
 paths['/v1/telemetry/events']={'post':{
     'summary':'上报安装包下载或崩溃事件','tags':['统计'],
     'security':[{'deviceToken':[]},{'userSession':[]}],

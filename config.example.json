@@ -68,6 +68,20 @@
     "max_seconds": 120
   },
   "allowed_origins": [],
+  "word_submissions": {
+    "client_ip_header": "",
+    "turnstile": {
+      "site_key": "",
+      "secret_env": "MSIME_TURNSTILE_SECRET"
+    },
+    "github": {
+      "app_id": 0,
+      "installation_id": 0,
+      "private_key_env": "MSIME_WORDS_GITHUB_APP_KEY",
+      "repository": "metasequoiaime/msime-customdict",
+      "branch": "main"
+    }
+  },
   "auth": {
     "enabled": false,
     "database_env": "MSIME_DATABASE_URL",

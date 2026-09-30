@@ -85,6 +85,7 @@ type Config struct {
 	MaxConcurrent        int                   `json:"max_concurrent"`
 	TimeoutSeconds       int                   `json:"timeout_seconds"`
 	AllowedOrigins       []string              `json:"allowed_origins"`
+	WordSubmissions      WordSubmissionsConfig `json:"word_submissions"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -238,7 +239,7 @@ func (c *Config) Validate() error {
 			return errors.New("allowed_origins must contain HTTPS origins")
 		}
 	}
-	return nil
+	return c.WordSubmissions.validate(c.Auth.Enabled, c.AllowedOrigins)
 }
 
 func validateTranslationEndpoint(e *TranslationEndpoint, requireProvider bool) error {

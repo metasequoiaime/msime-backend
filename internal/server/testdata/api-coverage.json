@@ -288,6 +288,20 @@
     "DELETE /v1/skins/jobs/{job}": [
       "internal/server/skin_jobs_test.go::TestSkinJobReturnsBeforeUpstreamAndBindsOwner",
       "internal/server/skin_jobs_test.go::TestSkinJobCapacityCancelExpiryAndShutdown"
+    ],
+    "GET /v1/community/word-submissions": [
+      "internal/server/word_submissions_test.go::TestWordSubmissionSettings"
+    ],
+    "POST /v1/community/word-submissions": [
+      "internal/server/word_submissions_test.go::TestWordSubmissionValidation",
+      "internal/server/word_submissions_test.go::TestWordSubmissionTurnstile",
+      "internal/server/word_submissions_test.go::TestWordSubmissionRateLimit",
+      "internal/server/word_submissions_test.go::TestWordSubmissionRateLimitInPostgreSQL",
+      "internal/server/word_submissions_test.go::TestWordSubmissionCreatesBranchAndPullRequest",
+      "internal/server/word_submissions_test.go::TestWordSubmissionAppendsToOpenPullRequest",
+      "internal/server/word_submissions_test.go::TestWordSubmissionConflictIsNotRetried",
+      "internal/server/word_submissions_test.go::TestWordSubmissionUncertainOutcome",
+      "internal/server/word_submissions_test.go::TestWordSubmissionGitHubFailuresBeforeWriting"
     ]
   },
   "admin_and_docs": {
