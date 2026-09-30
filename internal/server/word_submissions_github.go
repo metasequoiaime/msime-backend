@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -26,13 +27,12 @@ var (
 	errWordsMisconfigured = errors.New("GitHub App credentials rejected")
 )
 
-const wordsPullRequestTitle = "Community word submissions"
-
 const wordsPullRequestBody = `This is the rolling pull request for words submitted anonymously through the word form on the MSIME website (msime.app). Each commit on this branch is one submission: it appends ` + "`word<TAB>pinyin<TAB>5000`" + ` lines to ` + "`custom/words.txt`" + `, and its commit message lists the entries together with the submitter's note, if any.
 
 - Submissions are opened by the MSIME word-submission GitHub App after a Cloudflare Turnstile check and a per-address rate limit. No account or personal data is collected.
 - Every entry is reviewed by maintainers before merge. Remove or fix entries on this branch as needed; new submissions keep appending here while this pull request is open.
 - The msime-dictionary CI validates the format, readings and duplicates.
+- Squash-merge this pull request. Its title is kept at the number of entries this branch adds and becomes the `+"`feat(words)`"+` commit that release-please turns into the next `+"`sources-v*`"+` release.
 - Merging here does not ship the entries by itself. They reach users once msime moves its custom-dictionary pin in ` + "`resources/dictionary-sources.lock.json`" + ` to a msime-dictionary commit that contains them and cuts the next ` + "`dict-v*`" + ` release on metasequoiaime/msime with ` + "`release-dictionary.yml`" + `; msime's desktop builds take that release.
 `
 
@@ -129,7 +129,8 @@ func (ws *wordSubmitter) installationToken(ctx context.Context) (string, error) 
 }
 
 type githubPull struct {
-	Number int `json:"number"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
 	Head   struct {
 		Ref  string `json:"ref"`
 		Repo *struct {
@@ -207,6 +208,18 @@ func (ws *wordSubmitter) submit(ctx context.Context, entries []wordSubmissionEnt
 		}
 		branch, readRef = wordSubmissionBranches+ws.now().UTC().Format("20060102-150405"), base.Object.SHA
 	}
+	// The rolling pull request's title counts the entries its branch adds over the base branch; it is also the squash commit subject that release-please reads.
+	var baseFile githubFile
+	baseContent := ""
+	if open != nil {
+		if err = read("read base "+wordSubmissionsFile, "/contents/"+wordSubmissionsFile+"?"+url.Values{"ref": {g.Branch}}.Encode(), &baseFile); err != nil {
+			return 0, err
+		}
+		var ok bool
+		if baseContent, ok = baseFile.text(); !ok {
+			return 0, phaseError(errWordsUnavailable, "read base "+wordSubmissionsFile, githubResponse{status: 200}, errors.New("unexpected content encoding"))
+		}
+	}
 	var file githubFile
 	if err = read("read "+wordSubmissionsFile, "/contents/"+wordSubmissionsFile+"?"+url.Values{"ref": {readRef}}.Encode(), &file); err != nil {
 		return 0, err
@@ -247,10 +260,17 @@ func (ws *wordSubmitter) submit(ctx context.Context, entries []wordSubmissionEnt
 		return 0, phaseError(errWordsUnavailable, "commit "+wordSubmissionsFile, r, nil)
 	}
 	if open != nil {
+		// The entries are committed either way, so a failed retitle is only logged; the next submission corrects it, and maintainers can still edit it before merging.
+		if title := wordsTitle(wordsAdded(baseContent, appendWordLines(content, entries))); title != open.Title {
+			r, err = ws.githubRequest(ctx, token, "PATCH", repo+"/pulls/"+strconv.Itoa(open.Number), map[string]string{"title": title})
+			if err != nil || !r.ok() {
+				slog.Warn("word submissions: pull request title not updated", "pull", open.Number, "status", r.status)
+			}
+		}
 		return open.Number, nil
 	}
 	// From here on the entries are committed, so failing to open the pull request is reported as uncertain rather than as not submitted.
-	r, err = ws.githubRequest(ctx, token, "POST", repo+"/pulls", map[string]any{"title": wordsPullRequestTitle, "head": branch, "base": g.Branch, "body": wordsPullRequestBody})
+	r, err = ws.githubRequest(ctx, token, "POST", repo+"/pulls", map[string]any{"title": wordsTitle(len(entries)), "head": branch, "base": g.Branch, "body": wordsPullRequestBody})
 	var created struct {
 		Number int `json:"number"`
 	}

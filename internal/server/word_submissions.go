@@ -484,13 +484,39 @@ func (ws *wordSubmitter) verifyTurnstile(ctx context.Context, token string) erro
 }
 
 // wordsCommitMessage lists the entries; the note follows on its own line after sanitising.
-func wordsCommitMessage(entries []wordSubmissionEntry, note string) string {
-	var b strings.Builder
+func wordsTitle(count int) string {
 	noun := "words"
-	if len(entries) == 1 {
+	if count == 1 {
 		noun = "word"
 	}
-	b.WriteString("feat(words): add " + strconv.Itoa(len(entries)) + " community-submitted " + noun + "\n\n")
+	return "feat(words): add " + strconv.Itoa(count) + " community-submitted " + noun
+}
+
+// wordsAdded counts the entry lines in head that base does not have, so maintainer edits on the rolling branch are reflected. Blank and # comment lines are not entries.
+func wordsAdded(base, head string) int {
+	remaining := map[string]int{}
+	entries := func(content string, visit func(string)) {
+		for _, line := range strings.Split(content, "\n") {
+			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+				visit(line)
+			}
+		}
+	}
+	entries(base, func(line string) { remaining[line]++ })
+	added := 0
+	entries(head, func(line string) {
+		if remaining[line] > 0 {
+			remaining[line]--
+		} else {
+			added++
+		}
+	})
+	return added
+}
+
+func wordsCommitMessage(entries []wordSubmissionEntry, note string) string {
+	var b strings.Builder
+	b.WriteString(wordsTitle(len(entries)) + "\n\n")
 	for _, e := range entries {
 		b.WriteString("- " + e.Word + " " + e.Pinyin + "\n")
 	}
