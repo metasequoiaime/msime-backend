@@ -41,7 +41,8 @@ func TestEveryPublishedRouteSecurityContract(t *testing.T) {
 					w := httptest.NewRecorder()
 					s.ServeHTTP(w, r)
 					expected := 401
-					if path == "/healthz" {
+					if path == "/healthz" || method == "get" && path == wordSubmissionsPath {
+						// The word form settings are anonymous and answer enabled:false when unconfigured.
 						expected = 200
 					} else if account.IsPath(path) {
 						expected = 503

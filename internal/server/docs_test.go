@@ -23,7 +23,7 @@ func TestDocumentationAndBrowserAuthentication(t *testing.T) {
 		OpenAPI string         `json:"openapi"`
 		Paths   map[string]any `json:"paths"`
 	}
-	if json.Unmarshal(w.Body.Bytes(), &spec) != nil || spec.OpenAPI != "3.0.3" || len(spec.Paths) != 68 || spec.Paths["/v1/skins/jobs"] == nil || spec.Paths["/v1/skins/jobs/{job}"] == nil || spec.Paths["/v1/models"] == nil || spec.Paths["/v1/telemetry/events"] == nil || spec.Paths["/v1/community/resources/{id}/save"] == nil || spec.Paths["/v1/community/resources/{id}/apply"] == nil {
+	if json.Unmarshal(w.Body.Bytes(), &spec) != nil || spec.OpenAPI != "3.0.3" || len(spec.Paths) != 69 || spec.Paths["/v1/community/word-submissions"] == nil || spec.Paths["/v1/skins/jobs"] == nil || spec.Paths["/v1/skins/jobs/{job}"] == nil || spec.Paths["/v1/models"] == nil || spec.Paths["/v1/telemetry/events"] == nil || spec.Paths["/v1/community/resources/{id}/save"] == nil || spec.Paths["/v1/community/resources/{id}/apply"] == nil {
 		t.Fatal("incomplete OpenAPI")
 	}
 	for _, tc := range []struct {

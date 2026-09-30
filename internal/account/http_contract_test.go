@@ -89,7 +89,8 @@ func TestEveryAccountRouteAuthenticationAndDisabledService(t *testing.T) {
 	Mount(disabled, nil)
 	n := 0
 	for path, methods := range spec.Paths {
-		if !IsPath(path) {
+		// The website word form is mounted by the server package and covered by its word submission tests.
+		if !IsPath(path) || path == "/v1/community/word-submissions" {
 			continue
 		}
 		concrete := strings.NewReplacer("{id}", "missing", "{kind}", "pinyin").Replace(path)
@@ -222,7 +223,8 @@ func TestEveryAccountJSONBodyRejectsMalformedInput(t *testing.T) {
 	Mount(mux, &Service{store: db})
 	count := 0
 	for path, methods := range spec.Paths {
-		if !IsPath(path) {
+		// The website word form is mounted by the server package; its malformed-body cases are in TestWordSubmissionValidation there.
+		if !IsPath(path) || path == "/v1/community/word-submissions" {
 			continue
 		}
 		path = strings.NewReplacer("{id}", "missing", "{kind}", "pinyin").Replace(path)
