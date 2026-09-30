@@ -39,7 +39,7 @@ const (
 	wordSubmissionTokenBytes = 2048
 	// Every community entry gets the same weight; submitters do not choose it.
 	wordSubmissionWeight   = 5000
-	wordSubmissionsFile    = "words.txt"
+	wordSubmissionsFile    = "data/words.txt"
 	wordSubmissionBranches = "community-words/"
 	wordSubmissionTimeout  = 45 * time.Second
 	defaultTurnstileURL    = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
