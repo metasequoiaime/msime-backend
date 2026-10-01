@@ -127,8 +127,9 @@ func (c Config) Validate() error {
 	}
 	if a := c.Avatars; a.Bucket != "" {
 		u, e := url.Parse(a.PublicBaseURL)
-		if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" || os.Getenv(a.AccountIDEnv) == "" || os.Getenv(a.AccessKeyIDEnv) == "" || os.Getenv(a.SecretAccessKeyEnv) == "" {
-			return errors.New("头像存储配置无效：public_base_url 须为 https 域名根地址，账号 ID 与访问密钥环境变量不能为空")
+		// Only the configuration itself is checked here. Secrets that are missing from the environment turn uploads off at startup instead (see avatarStorageFor), so an optional feature whose secret has not been provisioned yet cannot keep the whole service down.
+		if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" || a.AccountIDEnv == "" || a.AccessKeyIDEnv == "" || a.SecretAccessKeyEnv == "" {
+			return errors.New("头像存储配置无效：public_base_url 须为 https 域名根地址，账号 ID 与访问密钥环境变量名不能为空")
 		}
 	}
 	if c.SMS.TemplateCode != "" && (c.SMS.Region == "" || c.SMS.SignName == "" || os.Getenv(c.SMS.AccessKeyIDEnv) == "" || os.Getenv(c.SMS.AccessKeySecretEnv) == "") {

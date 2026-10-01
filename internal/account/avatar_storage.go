@@ -3,6 +3,7 @@ package account
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -20,6 +21,24 @@ type avatarStorage interface {
 type r2Storage struct {
 	client *s3.Client
 	bucket string
+}
+
+// avatarStorageFor is the avatar storage of a validated configuration: nil when no bucket is configured, and also nil, with an error in the log, when the bucket is configured but any of its secrets is missing from the environment, so uploads answer 503 avatar_upload_disabled while the rest of the service runs.
+func avatarStorageFor(c AvatarConfig) avatarStorage {
+	if c.Bucket == "" {
+		return nil
+	}
+	var missing []string
+	for _, name := range []string{c.AccountIDEnv, c.AccessKeyIDEnv, c.SecretAccessKeyEnv} {
+		if os.Getenv(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		slog.Error("avatar uploads disabled: storage secrets are not set", "bucket", c.Bucket, "missing_env", missing)
+		return nil
+	}
+	return newR2Storage(c)
 }
 
 func newR2Storage(c AvatarConfig) *r2Storage {

@@ -91,9 +91,7 @@ func New(ctx context.Context, c Config) (*Service, error) {
 		a.tokenKey, _ = c.providerTokenKey()
 	}
 	a.sender = delivery{config: c}
-	if c.Avatars.Bucket != "" {
-		a.avatars = newR2Storage(c.Avatars)
-	}
+	a.avatars = avatarStorageFor(c.Avatars)
 	go func() {
 		defer close(a.done)
 		a.maintain(lifetime)

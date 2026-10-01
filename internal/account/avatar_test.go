@@ -282,15 +282,33 @@ func TestAvatarConfigurationValidation(t *testing.T) {
 		"base with a path":    func(c *AvatarConfig) { c.PublicBaseURL = "https://media.example.test/avatars" },
 		"base with a query":   func(c *AvatarConfig) { c.PublicBaseURL = "https://media.example.test/?x=1" },
 		"base unset":          func(c *AvatarConfig) { c.PublicBaseURL = "" },
-		"account env missing": func(c *AvatarConfig) { c.AccountIDEnv = "MISSING_R2_ACCOUNT" },
-		"key env missing":     func(c *AvatarConfig) { c.AccessKeyIDEnv = "" },
-		"secret env missing":  func(c *AvatarConfig) { c.SecretAccessKeyEnv = "MISSING_R2_SECRET" },
+		"account env unnamed": func(c *AvatarConfig) { c.AccountIDEnv = "" },
+		"key env unnamed":     func(c *AvatarConfig) { c.AccessKeyIDEnv = "" },
+		"secret env unnamed":  func(c *AvatarConfig) { c.SecretAccessKeyEnv = "" },
 	} {
 		c := base
 		change(&c.Avatars)
 		if c.Validate() == nil {
 			t.Error("invalid avatar configuration accepted:", name)
 		}
+	}
+	// A secret missing from the environment is not a configuration error: the service starts and only uploads are off.
+	for name, change := range map[string]func(*AvatarConfig){
+		"account":    func(c *AvatarConfig) { c.AccountIDEnv = "MISSING_R2_ACCOUNT" },
+		"access key": func(c *AvatarConfig) { c.AccessKeyIDEnv = "MISSING_R2_KEY" },
+		"secret":     func(c *AvatarConfig) { c.SecretAccessKeyEnv = "MISSING_R2_SECRET" },
+	} {
+		c := base
+		change(&c.Avatars)
+		if err := c.Validate(); err != nil {
+			t.Error("a missing secret must not stop the service:", name, err)
+		}
+		if avatarStorageFor(c.Avatars) != nil {
+			t.Error("uploads must be off while a secret is missing:", name)
+		}
+	}
+	if avatarStorageFor(base.Avatars) == nil || avatarStorageFor(AvatarConfig{}) != nil {
+		t.Fatal("storage must exist exactly when a bucket and all its secrets are configured")
 	}
 	// No bucket means uploads are off, and nothing else about avatars is required.
 	c := base
