@@ -306,6 +306,11 @@ INSERT INTO admin_events(id,kind,platform,version,message,stack,created_at) VALU
 	if platform != "macos" || version != "1.1100" || status != "known" || !firstOld || !lastRecent {
 		t.Fatal(platform, version, status, firstOld, lastRecent)
 	}
+	// The backfill's lookup of unsigned crashes is served by a partial index, so a startup with nothing left to fill does not scan every crash.
+	var indexDef string
+	if err := db.pool.QueryRow(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() AND indexname='admin_events_unsigned_crash'`).Scan(&indexDef); err != nil || !strings.Contains(indexDef, "signature IS NULL") || !strings.Contains(indexDef, "(created_at, id)") {
+		t.Fatal("unsigned crash index", indexDef, err)
+	}
 	// A second run finds nothing and changes nothing.
 	if err := a.backfillCrashSignatures(ctx); err != nil {
 		t.Fatal(err)

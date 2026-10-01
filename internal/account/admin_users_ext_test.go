@@ -231,6 +231,27 @@ func TestAuthenticateRejectsBannedAccount(t *testing.T) {
 	}
 }
 
+// An authenticated route answers a session whose account was banned outside the console with 403 account_banned, not 401.
+func TestPrincipalAnswersBannedAccountWith403(t *testing.T) {
+	db, a := usersTestStore(t)
+	user := complete(t, db, Identity{"email", "direct-http@example.test"})
+	if _, err := db.pool.Exec(t.Context(), `UPDATE auth_users SET banned_at=now(),ban_reason='manual' WHERE id=$1`, user.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "/v1/users/me", nil)
+	r.Header.Set("Authorization", "Bearer "+user.AccessToken)
+	w := httptest.NewRecorder()
+	Route(a, "GET /v1/users/me", (*Service).me)(w, r)
+	if w.Code != 403 || !strings.Contains(w.Body.String(), `"account_banned"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	a.error(w, ErrInvalid)
+	if w.Code != 401 || !strings.Contains(w.Body.String(), "invalid_credentials") {
+		t.Fatal("plain invalid credentials must stay 401", w.Code, w.Body.String())
+	}
+}
+
 // Login over HTTP answers a banned account with 403 account_banned and records the User-Agent on new sessions.
 func TestLoginRecordsUserAgentAndRejectsBanned(t *testing.T) {
 	db, _ := usersTestStore(t)

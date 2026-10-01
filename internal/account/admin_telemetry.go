@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 )
 
 // telemetryKinds are the accepted event kinds: download and crash from the first protocol, and the anonymous device activity kinds that feed active devices and crash-free session rates.
@@ -54,16 +53,6 @@ func (v telemetryEvent) valid() bool {
 	return v.Kind != "active" || v.InstallID != ""
 }
 
-// telemetryCrashTitle is the first line of a crash message, trimmed, at most 200 runes.
-func telemetryCrashTitle(message string) string {
-	line, _, _ := strings.Cut(strings.TrimSpace(message), "\n")
-	line = strings.TrimSpace(line)
-	if utf8.RuneCountInString(line) > 200 {
-		line = strings.TrimSpace(string([]rune(line)[:200]))
-	}
-	return line
-}
-
 // telemetryNull stores an omitted optional field as NULL, which the column checks require instead of an empty string.
 func telemetryNull(s string) any {
 	if s == "" {
@@ -105,7 +94,7 @@ func (a *Service) Telemetry(w http.ResponseWriter, r *http.Request) {
 	}
 	// A retried event is already counted in its group, so only a fresh insert touches the crash group.
 	if signature != "" && tag.RowsAffected() == 1 {
-		if err = a.upsertCrashGroup(ctx, tx, signature, v.Platform, v.Version, telemetryCrashTitle(v.Message)); err != nil {
+		if err = a.upsertCrashGroup(ctx, tx, signature, v.Platform, v.Version, crashGroupTitle(v.Message)); err != nil {
 			a.error(w, err)
 			return
 		}

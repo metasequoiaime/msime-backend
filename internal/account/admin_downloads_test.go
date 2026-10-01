@@ -92,7 +92,7 @@ func TestTelemetryDeviceActivityAndDownloadDimensions(t *testing.T) {
 	}
 }
 
-func TestTelemetryCrashTitle(t *testing.T) {
+func TestCrashGroupTitle(t *testing.T) {
 	for in, want := range map[string]string{
 		"boom":                              "boom",
 		"  first line  \r\n second":         "first line",
@@ -100,8 +100,8 @@ func TestTelemetryCrashTitle(t *testing.T) {
 		strings.Repeat("崩", 250):            strings.Repeat("崩", 200),
 		strings.Repeat("a", 199) + "  tail": strings.Repeat("a", 199),
 	} {
-		if got := telemetryCrashTitle(in); got != want {
-			t.Errorf("telemetryCrashTitle(%q) = %q, want %q", in, got, want)
+		if got := crashGroupTitle(in); got != want {
+			t.Errorf("crashGroupTitle(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

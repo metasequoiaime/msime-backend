@@ -252,6 +252,9 @@ func writeError(w http.ResponseWriter, status int, code string) {
 }
 func (a *Service) error(w http.ResponseWriter, e error) {
 	switch {
+	// ErrBanned wraps ErrInvalid, so it must be matched first: a banned account learns why instead of being sent back to a login that fails the same way.
+	case errors.Is(e, ErrBanned):
+		writeError(w, 403, "account_banned")
 	case errors.Is(e, ErrInvalid):
 		writeError(w, 401, "invalid_credentials")
 	case errors.Is(e, ErrLimited):
@@ -514,10 +517,6 @@ func (a *Service) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	t, e := a.store.completeWith(withSessionUserAgent(r.Context(), r.UserAgent()), c, identity, grant)
-	if errors.Is(e, ErrBanned) {
-		writeError(w, 403, "account_banned")
-		return
-	}
 	if e != nil {
 		a.error(w, e)
 		return
@@ -532,10 +531,6 @@ func (a *Service) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, e := a.store.Refresh(r.Context(), v.RefreshToken)
-	if errors.Is(e, ErrBanned) {
-		writeError(w, 403, "account_banned")
-		return
-	}
 	if e != nil {
 		a.error(w, e)
 		return

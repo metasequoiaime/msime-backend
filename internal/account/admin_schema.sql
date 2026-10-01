@@ -107,6 +107,8 @@ DO $$ BEGIN
  END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS admin_events_signature ON admin_events(signature,created_at DESC) WHERE signature IS NOT NULL;
+-- The startup backfill walks unsigned crashes by (created_at,id); this keeps it an index scan of the few rows left instead of a scan of every crash.
+CREATE INDEX IF NOT EXISTS admin_events_unsigned_crash ON admin_events(created_at,id) WHERE kind='crash' AND signature IS NULL;
 
 CREATE TABLE IF NOT EXISTS admin_crash_groups (
  signature text PRIMARY KEY CHECK(signature ~ '^[0-9a-f]{16}$'),

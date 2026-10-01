@@ -205,6 +205,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			authCancel()
 			if err == nil {
 				principal = &Client{ID: "user:" + p.UserID, RequestsPerMinute: 120}
+			} else if errors.Is(err, account.ErrBanned) {
+				// A ban written outside the console leaves live sessions behind; the client is told why instead of being asked to sign in again.
+				fail(w, 403, "account_banned")
+				return
 			} else if !errors.Is(err, account.ErrInvalid) {
 				fail(w, 503, "auth_unavailable")
 				return
