@@ -17,6 +17,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -91,6 +92,27 @@ FIXTURES = {
         {"id": 7, "service": "chat", "service_name": "AI 联想", "title": "AI 联想响应变慢", "description": "最近 5 分钟 40 次调用，失败 0 次（0.0%），P95 4.2s，阈值 3.0s。", "state": "open", "started_at": "2026-10-01T00:00:00Z", "resolved_at": None, "auto": True},
         {"id": 6, "service": "cloud", "service_name": "云候选", "title": "云候选间歇超时", "description": "", "state": "resolved", "started_at": "2026-09-03T01:00:00Z", "resolved_at": "2026-09-03T01:38:00Z", "auto": False},
     ]},
+    # GET /api/overview (unit U11): real response shape with client telemetry present for some platforms.
+    "/api/overview": {
+        "users": 12, "new_users_30d": 3, "session_users": 4, "downloads": 4821, "crashes": 9, "open_crashes": 2, "skins": 5, "skin_downloads": 40, "plugins": 1, "plugin_downloads": 3,
+        "dictionaries": 2, "replies": 1, "resource_saves": 6, "range_days": 30,
+        "daily": [{"day": f"2026-09-{d:02d}", "users": 0, "downloads": d, "crashes": 0} for d in range(1, 31)],
+        "downloads_30d": 410, "downloads_prev_30d": 380,
+        "telemetry": {"active": True, "sessions": True},
+        "active_devices_daily": [{"day": f"2026-09-{d:02d}", "windows": 50 + d, "mac_linux": 20 + d % 5, "mobile": 10 + d % 7} for d in range(1, 31)],
+        "active_devices_7d": 131, "active_devices_prev_7d": 120,
+        "platform_active_7d": {"windows": 80, "macos": 21, "ios": 18, "harmonyos": 12},
+        "crash_free_rate": 0.9962, "crash_free_rate_prev": 0.997,
+        "crash_top": {"platform": "ios", "version": "1.0.0", "crashes": 3},
+        "crash_group_latest": {"signature": "0123456789abcdef", "platform": "ios", "title": "内存超限"},
+        "pending": {"community": 0, "reports_7d": 2, "crash_groups": 1},
+        "services_configured": True,
+        "services": [
+            {"key": "cloud", "name": "云候选代理", "provider": "腾讯云", "state": "ok", "uptime_60d": 99.95, "p95_ms": 120},
+            {"key": "chat", "name": "AI 联想", "provider": "OpenAI", "state": "degraded", "uptime_60d": 98.7, "p95_ms": 1800},
+            {"key": "translation", "name": "翻译（账号通道）", "provider": "", "state": "unknown", "uptime_60d": None, "p95_ms": None},
+        ],
+    },
 }
 
 # Issue triage (U3): one open issue on the list and its detail, shaped like internal/server/admin_issues.go.
@@ -332,6 +354,28 @@ def main() -> int:
 
                 page.goto(base + "/")
                 expect(page.locator("header")).to_contain_text("测试环境")
+                # Overview (unit U11) renders every card from /api/overview and the shell's pending counts, chart included, at desktop and phone width.
+                main = page.get_by_role("main")
+                expect(main.get_by_text("4,821", exact=True)).to_be_visible()
+                expect(main.get_by_text("99.62%", exact=True)).to_be_visible()
+                expect(main.get_by_text("iOS 1.0.0 拖累", exact=True)).to_be_visible()
+                expect(main.get_by_text("iOS · 内存超限", exact=True)).to_be_visible()
+                expect(main.get_by_text("词库 PR 2 · 社区 0 · Issue 5", exact=True)).to_be_visible()
+                expect(main.get_by_text("近 7 天收到 2 次举报", exact=True)).to_be_visible()
+                expect(main.get_by_text("98.70% · 1.8s", exact=True)).to_be_visible()
+                expect(main.locator(".recharts-surface").first).to_be_visible()
+                page.set_viewport_size({"width": 390, "height": 800})
+                expect(main.get_by_text("各平台活跃", exact=True)).to_be_visible()
+                # The chart resizes on its ResizeObserver tick, so give the layout a moment to settle before judging overflow.
+                try:
+                    page.wait_for_function("document.documentElement.scrollWidth <= window.innerWidth", timeout=3000)
+                except PlaywrightTimeout:
+                    problems.append("overview scrolls horizontally at 390px")
+                page.set_viewport_size({"width": 1280, "height": 860})
+                main.get_by_role("link", name=re.compile("新增崩溃分组")).click()
+                page.wait_for_url(base + "/crash")
+                page.goto(base + "/")
+                violations("overview")
                 expect(page.get_by_role("link", name=re.compile("词库审核"))).to_contain_text("2")
                 expect(page.get_by_text("部分服务降级")).to_be_visible()
                 # The fixture role lacks view_cloud_usage, so 云端监控 is hidden from the sidebar.
