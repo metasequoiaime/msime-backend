@@ -860,6 +860,12 @@ type issueActionFailure struct {
 	Code string `json:"code"`
 }
 
+// GitHub accepts comments of up to 65536 characters. The request may carry that many characters even as JSON \u escapes (12 bytes for a character outside the BMP), plus the items, so a longer comment is answered with invalid_body rather than invalid_json.
+const (
+	issueCommentMax    = 65536
+	issueActionBodyMax = issueCommentMax*12 + 64<<10
+)
+
 // issueActionsHTTP serves POST /api/issues/actions {action, items:[{repo,n}], body?}. GitHub has no transactions, so each item is changed on its own and audited right after GitHub accepted it; the answer reports how many items changed and which failed. When no item changed, the first failure is the answer.
 func (s *Server) issueActionsHTTP(w http.ResponseWriter, r *http.Request) {
 	gh, ok := s.adminGitHubApp(w)
@@ -870,7 +876,7 @@ func (s *Server) issueActionsHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v issueActionRequest
-	if !decode(w, r, &v) {
+	if !decodeSized(w, r, &v, issueActionBodyMax) {
 		return
 	}
 	if !slices.Contains(issueActions, v.Action) {
@@ -892,9 +898,8 @@ func (s *Server) issueActionsHTTP(w http.ResponseWriter, r *http.Request) {
 		seen[ref.key()] = true
 		v.Items[i] = ref
 	}
-	// The 64 KiB request body limit of decode keeps a comment under GitHub's 65536 character limit.
 	if v.Action == "comment" {
-		if strings.TrimSpace(v.Body) == "" || strings.ContainsRune(v.Body, 0) {
+		if strings.TrimSpace(v.Body) == "" || strings.ContainsRune(v.Body, 0) || utf8.RuneCountInString(v.Body) > issueCommentMax {
 			fail(w, 400, "invalid_body")
 			return
 		}

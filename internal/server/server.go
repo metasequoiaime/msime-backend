@@ -273,11 +273,16 @@ func (s *Server) allow(c Client, now time.Time) bool {
 	return allowed
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeSized(w, r, v, contract.JsonBodyBytes)
+}
+
+// decodeSized is decode with a request body limit of maxBytes instead of the API-wide 64 KiB.
+func decodeSized(w http.ResponseWriter, r *http.Request, v any, maxBytes int64) bool {
 	if ct := strings.Split(r.Header.Get("Content-Type"), ";")[0]; ct != "application/json" {
 		fail(w, 415, "json_required")
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, contract.JsonBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(v); err != nil {

@@ -694,11 +694,19 @@ func TestAdminIssueActions(t *testing.T) {
 	if status, v := act("close", strings.Join(many, ","), ""); status != 400 || issueErrorCode(v) != "invalid_items" {
 		t.Fatal(status, v)
 	}
-	if status, v := act("comment", item(issuesWinRepo, 10), strings.Repeat("x", 70000)); status != 400 || issueErrorCode(v) != "invalid_json" {
+	// A comment longer than GitHub's 65536 characters is invalid_body, and a long CJK comment within that limit is accepted although it is larger than 64 KiB.
+	if status, v := act("comment", item(issuesWinRepo, 10), strings.Repeat("x", issueCommentMax+1)); status != 400 || issueErrorCode(v) != "invalid_body" {
+		t.Fatal(status, v)
+	}
+	if status, v := act("comment", item(issuesWinRepo, 10), strings.Repeat("长", issueCommentMax+1)); status != 400 || issueErrorCode(v) != "invalid_body" {
 		t.Fatal(status, v)
 	}
 	if len(f.writeLog()) != writes {
 		t.Fatal("an invalid request reached GitHub", f.writeLog()[writes:])
+	}
+	long := strings.Repeat("长", 30000)
+	if status, v := act("comment", item(issuesWinRepo, 10), long); status != 200 || f.bodies["POST /repos/"+issuesWinRepo+"/issues/10/comments"]["body"] != long {
+		t.Fatal("a 90 KB comment within GitHub's character limit", status, v)
 	}
 }
 
