@@ -486,3 +486,149 @@ func TestRemovedCandidateSkinsAndPluginsAreHidden(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 }
+
+func TestModerationUndoEdgesAndBannedOwners(t *testing.T) {
+	db, _, owner, _, call := moderationFixture(t)
+	ctx := context.Background()
+	if _, err := db.pool.Exec(ctx, `UPDATE community_skins SET moderation_reason='命中敏感词：「加V」' WHERE id='skin-a'`); err != nil {
+		t.Fatal(err)
+	}
+	// Approving a pending row keeps its automatic flag, so undoing the approval brings the warning back; the audit names the single item for the activity text.
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-a"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var detail map[string]any
+	if err := db.pool.QueryRow(ctx, `SELECT detail FROM admin_audit WHERE action='approve_content' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail["name"] != "春日樱" || detail["count"] != float64(1) || len(detail["ids"].([]any)) != 1 || detail["ids"].([]any)[0] != "skin-a" {
+		t.Fatal(detail)
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"skins","id":"skin-a","value":{"to":"pending"}}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, reason, _ := moderationState(t, db, "community_skins", "skin-a"); state != "pending" || reason == nil || *reason != "命中敏感词：「加V」" {
+		t.Fatal(state, reason)
+	}
+	// Undoing an approval never brings back a row someone removed in the meantime.
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","id":"skin-a","reason":"内容低俗"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"skins","id":"skin-a","value":{"to":"approved"}}`); w.Code != 409 || !strings.Contains(w.Body.String(), `"conflict"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, _, _ := moderationState(t, db, "community_skins", "skin-a"); state != "removed" {
+		t.Fatal(state)
+	}
+	// A removed row of a banned author comes back only through the unban, not through restore or approve.
+	if _, err := db.pool.Exec(ctx, `UPDATE auth_users SET banned_at=now() WHERE id=$1`, owner.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`{"action":"restore_content","section":"skins","id":"skin-a"}`,
+		`{"action":"approve_content","section":"skins","ids":["skin-a","skin-b"]}`,
+	} {
+		if w := call("POST", "/api/actions", body); w.Code != 409 || !strings.Contains(w.Body.String(), "owner_banned") {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+	if state, _, _, _ := moderationState(t, db, "community_skins", "skin-a"); state != "removed" {
+		t.Fatal(state)
+	}
+	if _, err := db.pool.Exec(ctx, `UPDATE auth_users SET banned_at=NULL WHERE id=$1`, owner.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"skins","id":"skin-a"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+func TestEditOfRemovedContentRestoresToPending(t *testing.T) {
+	db, _, owner, _, call := moderationFixture(t)
+	a := &Service{store: db}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	resource := "b5334455-1234-4234-8234-123456789abc"
+	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"模板","description":"","content":{"prompt":"礼貌回复"}}`, owner.AccessToken, 201)
+	for _, body := range []string{
+		`{"action":"approve_content","section":"replies","id":"` + resource + `"}`,
+		`{"action":"remove_content","section":"replies","id":"` + resource + `","reason":"质量不达标"}`,
+	} {
+		if w := call("POST", "/api/actions", body); w.Code != 200 {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+	// The edit happens after the removal, so a later restore must not publish it as approved without a review.
+	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"模板","description":"","content":{"prompt":"改过的内容"},"revision":1}`, owner.AccessToken, 200)
+	if state, previous, reason, _ := moderationState(t, db, "community_resources", resource); state != "removed" || previous == nil || *previous != "pending" || *reason != "质量不达标" {
+		t.Fatal(state, previous, reason)
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"replies","id":"`+resource+`"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, _, _ := moderationState(t, db, "community_resources", resource); state != "pending" {
+		t.Fatal(state)
+	}
+}
+
+func TestModerationUndoKeepsFlagsAndNeverRevivesRemovals(t *testing.T) {
+	db, _, _, _, call := moderationFixture(t)
+	ctx := context.Background()
+	if _, err := db.pool.Exec(ctx, `UPDATE community_skins SET moderation_reason='命中敏感词：「加V」' WHERE id='skin-a'`); err != nil {
+		t.Fatal(err)
+	}
+	// Approving a flagged pending row keeps the automatic flag, so undoing the approval shows the warning again.
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-a"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, reason, _ := moderationState(t, db, "community_skins", "skin-a"); state != "approved" || reason == nil || *reason != "命中敏感词：「加V」" {
+		t.Fatal(state, reason)
+	}
+	var list struct{ Items []struct{ Flag *string } }
+	if w := call("GET", "/api/skins?status=approved&q=skin-a", ""); json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list.Items) != 1 || list.Items[0].Flag != nil {
+		t.Fatal("an approved row still shows the flag", w.Body.String())
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"skins","id":"skin-a","value":{"to":"pending"}}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, reason, _ := moderationState(t, db, "community_skins", "skin-a"); state != "pending" || reason == nil || *reason != "命中敏感词：「加V」" {
+		t.Fatal(state, reason)
+	}
+	// Approving a removed row clears the removal reason.
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","id":"skin-b","reason":"内容低俗"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-b"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, previous, reason, _ := moderationState(t, db, "community_skins", "skin-b"); state != "approved" || previous != nil || reason != nil {
+		t.Fatal(state, previous, reason)
+	}
+	// An approval undo that arrives after another moderator removed the item does not bring it back.
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","id":"skin-b","reason":"含导流或广告"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"skins","id":"skin-b","value":{"to":"approved"}}`); w.Code != 409 || !strings.Contains(w.Body.String(), `"conflict"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, reason, _ := moderationState(t, db, "community_skins", "skin-b"); state != "removed" || *reason != "含导流或广告" {
+		t.Fatal(state, reason)
+	}
+	// The audit names the changed ids, and the item name when there is one, for the console's activity text.
+	var detail map[string]any
+	if err := db.pool.QueryRow(ctx, `SELECT detail FROM admin_audit WHERE action='approve_content' ORDER BY id LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if ids, _ := detail["ids"].([]any); len(ids) != 1 || ids[0] != "skin-a" || detail["name"] != "春日樱" || detail["count"] != float64(1) {
+		t.Fatal(detail)
+	}
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","ids":["skin-a","skin-b","skin-a"]}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"affected":2`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if err := db.pool.QueryRow(ctx, `SELECT detail FROM admin_audit WHERE action='approve_content' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if ids, _ := detail["ids"].([]any); len(ids) != 2 || ids[0] != "skin-a" || ids[1] != "skin-b" || detail["name"] != nil {
+		t.Fatal(detail)
+	}
+}

@@ -125,29 +125,73 @@ func moderationRequest(v actionRequest) (moderationTable, []string, error) {
 	return section, slices.Compact(ids), nil
 }
 
-// moderationResult audits a moderation change with its section, count and reason, targeting the section.
-func moderationResult(v actionRequest, affected int64, extra map[string]any) actionResult {
-	detail := map[string]any{"section": v.Section, "count": affected, "reason": strings.TrimSpace(v.Reason)}
+// moderationUpdate runs one moderation UPDATE that ends in RETURNING id,name and collects the rows it changed.
+func moderationUpdate(ctx context.Context, tx pgx.Tx, query string, args ...any) (changed []moderatedItem, err error) {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item moderatedItem
+		if err = rows.Scan(&item.ID, &item.Name); err != nil {
+			return nil, err
+		}
+		changed = append(changed, item)
+	}
+	return changed, rows.Err()
+}
+
+// moderatedItem is one row a moderation action changed.
+type moderatedItem struct{ ID, Name string }
+
+// moderationResult audits a moderation change with its section, count, reason and the changed ids (plus the name when there is one item, for the console's activity text), targeting the section.
+func moderationResult(v actionRequest, changed []moderatedItem, extra map[string]any) actionResult {
+	ids := make([]string, len(changed))
+	for i, item := range changed {
+		ids[i] = item.ID
+	}
+	slices.Sort(ids)
+	affected := int64(len(changed))
+	detail := map[string]any{"section": v.Section, "count": affected, "reason": strings.TrimSpace(v.Reason), "ids": ids}
+	if len(changed) == 1 {
+		detail["name"] = changed[0].Name
+	}
 	for k, value := range extra {
 		detail[k] = value
 	}
 	return actionResult{Affected: affected, Target: v.Section, Detail: detail}
 }
 
-// actionApproveContent approves the items ids (or id) of section.
+// bannedOwnerGuard fails with 409 owner_banned when a removed row among ids belongs to a banned account: the ban removed it, and only unbanning the account brings it back, so a moderator cannot republish a banned author's work.
+func bannedOwnerGuard(ctx context.Context, tx pgx.Tx, section moderationTable, ids []string) error {
+	var banned bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM `+section.table+section.match()+` AND moderation='removed' AND EXISTS(SELECT 1 FROM auth_users u WHERE u.id=owner_id AND u.banned_at IS NOT NULL))`, ids).Scan(&banned); err != nil {
+		return err
+	}
+	if banned {
+		return actionFail(409, "owner_banned")
+	}
+	return nil
+}
+
+// actionApproveContent approves the items ids (or id) of section. A pending row keeps its automatic flag in moderation_reason, so undoing the approval brings the warning back; a removed row's removal reason is cleared.
 func actionApproveContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
 	section, ids, err := moderationRequest(v)
 	if err != nil {
 		return actionResult{}, err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE `+section.table+` SET moderation='approved',previous_moderation=NULL,moderation_reason=NULL,moderated_by=$2,moderated_at=now()`+section.match(), ids, adminActor(ctx))
+	if err = bannedOwnerGuard(ctx, tx, section, ids); err != nil {
+		return actionResult{}, err
+	}
+	changed, err := moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET moderation='approved',previous_moderation=NULL,moderation_reason=CASE WHEN moderation='pending' THEN moderation_reason END,moderated_by=$2,moderated_at=now()`+section.match()+` RETURNING id,name`, ids, adminActor(ctx))
 	if err != nil {
 		return actionResult{}, err
 	}
-	if tag.RowsAffected() == 0 {
+	if len(changed) == 0 {
 		return actionResult{}, actionFail(404, "not_found")
 	}
-	return moderationResult(v, tag.RowsAffected(), nil), nil
+	return moderationResult(v, changed, nil), nil
 }
 
 // actionRemoveContent hides the items ids (or id) of section from the public endpoints, recording reason and the state it replaced.
@@ -161,17 +205,17 @@ func actionRemoveContent(a *Service, ctx context.Context, tx pgx.Tx, v actionReq
 		return actionResult{}, actionFail(400, "invalid_reason")
 	}
 	// Removing a removed row again only updates the reason, so previous_moderation keeps the state the first removal replaced.
-	tag, err := tx.Exec(ctx, `UPDATE `+section.table+` SET previous_moderation=CASE WHEN moderation='removed' THEN previous_moderation ELSE moderation END,moderation='removed',moderation_reason=$3,moderated_by=$2,moderated_at=now()`+section.match(), ids, adminActor(ctx), reason)
+	changed, err := moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET previous_moderation=CASE WHEN moderation='removed' THEN previous_moderation ELSE moderation END,moderation='removed',moderation_reason=$3,moderated_by=$2,moderated_at=now()`+section.match()+` RETURNING id,name`, ids, adminActor(ctx), reason)
 	if err != nil {
 		return actionResult{}, err
 	}
-	if tag.RowsAffected() == 0 {
+	if len(changed) == 0 {
 		return actionResult{}, actionFail(404, "not_found")
 	}
-	return moderationResult(v, tag.RowsAffected(), nil), nil
+	return moderationResult(v, changed, nil), nil
 }
 
-// actionRestoreContent undoes remove_content, putting each item back to its previous_moderation. With value {"to":"pending"|"approved"} it instead sets that state on the items whatever their current one, which is how the console undoes an approval.
+// actionRestoreContent undoes remove_content, putting each item back to its previous_moderation. With value {"to":"pending"|"approved"} it instead sets that state on items that are not removed, which is how the console undoes an approval; it never brings back an item someone removed in the meantime (409 conflict).
 func actionRestoreContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
 	section, ids, err := moderationRequest(v)
 	if err != nil {
@@ -189,30 +233,38 @@ func actionRestoreContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRe
 		}
 		to = value.To
 	}
-	var tag interface{ RowsAffected() int64 }
+	var changed []moderatedItem
 	if to == "" {
-		tag, err = tx.Exec(ctx, `UPDATE `+section.table+` SET moderation=COALESCE(previous_moderation,'approved'),previous_moderation=NULL,moderation_reason=NULL,moderated_by=$2,moderated_at=now()`+section.match()+` AND moderation='removed'`, ids, adminActor(ctx))
+		if err = bannedOwnerGuard(ctx, tx, section, ids); err != nil {
+			return actionResult{}, err
+		}
+		changed, err = moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET moderation=COALESCE(previous_moderation,'approved'),previous_moderation=NULL,moderation_reason=NULL,moderated_by=$2,moderated_at=now()`+section.match()+` AND moderation='removed' RETURNING id,name`, ids, adminActor(ctx))
 	} else {
-		tag, err = tx.Exec(ctx, `UPDATE `+section.table+` SET moderation=$3,previous_moderation=NULL,moderation_reason=NULL,moderated_by=$2,moderated_at=now()`+section.match(), ids, adminActor(ctx), to)
+		// moderation_reason of a row that is not removed is the automatic flag, which stays.
+		changed, err = moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET moderation=$3,previous_moderation=NULL,moderated_by=$2,moderated_at=now()`+section.match()+` AND moderation<>'removed' RETURNING id,name`, ids, adminActor(ctx), to)
 	}
 	if err != nil {
 		return actionResult{}, err
 	}
-	if tag.RowsAffected() == 0 {
+	if len(changed) == 0 {
 		var exists bool
 		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM `+section.table+section.match()+`)`, ids).Scan(&exists); err != nil {
 			return actionResult{}, err
 		}
-		if exists {
+		switch {
+		case !exists:
+			return actionResult{}, actionFail(404, "not_found")
+		case to == "":
 			return actionResult{}, actionFail(409, "not_removed")
+		default:
+			return actionResult{}, actionFail(409, "conflict")
 		}
-		return actionResult{}, actionFail(404, "not_found")
 	}
 	var extra map[string]any
 	if to != "" {
 		extra = map[string]any{"to": to}
 	}
-	return moderationResult(v, tag.RowsAffected(), extra), nil
+	return moderationResult(v, changed, extra), nil
 }
 
 // moderationCounts is the number of items per section and moderation state. Private candidate skins are left out: they are visible only to their owner, so they never wait for review.
@@ -338,9 +390,9 @@ func (a *Service) screenUpload(w http.ResponseWriter, r *http.Request, texts ...
 	return flag, true
 }
 
-// reviewAgain is the SET fragment an author's edit applies: the item goes back to pending with the new automatic flag in the placeholder flag, unless a moderator removed it, which the edit does not undo.
+// reviewAgain is the SET fragment an author's edit applies: the item goes back to pending with the new automatic flag in the placeholder flag, unless a moderator removed it, which the edit does not undo; a removed item's restore state becomes pending, so restoring it later never publishes the unreviewed edit as approved.
 func reviewAgain(flag string) string {
-	return `moderation=CASE WHEN moderation='removed' THEN 'removed' ELSE 'pending' END,moderation_reason=CASE WHEN moderation='removed' THEN moderation_reason ELSE ` + flag + ` END`
+	return `moderation=CASE WHEN moderation='removed' THEN 'removed' ELSE 'pending' END,previous_moderation=CASE WHEN moderation='removed' THEN 'pending' END,moderation_reason=CASE WHEN moderation='removed' THEN moderation_reason ELSE ` + flag + ` END`
 }
 
 // resourceScreenText is the user-visible text of a word pack or reply template: the words and the prompt.

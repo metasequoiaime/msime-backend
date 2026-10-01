@@ -264,10 +264,6 @@ func (a *Service) communityPluginPublish(w http.ResponseWriter, r *http.Request)
 		a.error(w, e)
 		return
 	}
-	flag, ok := a.screenUpload(w, r, input.Name, input.Description)
-	if !ok {
-		return
-	}
 	// Charged before the archive is inflated, as the candidate-skin publish charges before decoding, so rejected uploads cannot loop on server CPU.
 	if e := a.RateLimit(r.Context(), "plugin-publish", p.UserID, pluginPublishesPerHour, time.Hour); e != nil {
 		a.error(w, e)
@@ -284,6 +280,11 @@ func (a *Service) communityPluginPublish(w http.ResponseWriter, r *http.Request)
 	}
 	if pack.ID != input.PluginID || pack.Version != input.Version {
 		writeError(w, 400, "plugin_manifest_mismatch")
+		return
+	}
+	// Screened after the hourly charge, so probing the word list costs publishes, and on the manifest too, whose command texts are user-visible.
+	flag, ok := a.screenUpload(w, r, input.Name, input.Description, string(pack.Manifest))
+	if !ok {
 		return
 	}
 	// The account row lock serialises this account's publishes, so the count and byte quotas cannot both pass for two concurrent uploads.

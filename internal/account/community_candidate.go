@@ -518,12 +518,12 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		a.error(w, e)
 		return
 	}
-	flag, ok := a.screenUpload(w, r, input.Name, input.Description, input.Manifest)
-	if !ok {
-		return
-	}
 	if e := a.candidateWriteRate(r.Context(), p.UserID, visibility); e != nil {
 		a.error(w, e)
+		return
+	}
+	flag, ok := a.screenUpload(w, r, input.Name, input.Description, input.Manifest)
+	if !ok {
 		return
 	}
 	var clean map[string][]byte
@@ -830,12 +830,12 @@ func (a *Service) communityCandidateReplace(w http.ResponseWriter, r *http.Reque
 	if check(a.store.pool, "") {
 		return
 	}
-	flag, ok := a.screenUpload(w, r, input.Name, input.Description, input.Manifest)
-	if !ok {
-		return
-	}
 	if e := a.candidateWriteRate(r.Context(), p.UserID, "private"); e != nil {
 		a.error(w, e)
+		return
+	}
+	flag, ok := a.screenUpload(w, r, input.Name, input.Description, input.Manifest)
+	if !ok {
 		return
 	}
 	var clean map[string][]byte

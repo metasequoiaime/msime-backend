@@ -151,12 +151,15 @@ export function ContentDrawer({ target, onClose, onApprove, onRemove, onRestore 
       { title: "自动检查", empty: "未发现问题", items: detail.flags.map(flag => ({ text: `命中敏感词「${flag.pattern}」`, meta: `${sensitiveCategoryLabels[flag.category] ?? flag.category} · ${sensitiveLevelLabels[flag.level] ?? flag.level}` })) },
       { title: "作者其他作品", empty: "暂无", items: detail.owner_items.map(other => ({ text: `${sectionLabels[other.section]}「${other.name}」`, meta: moderationLabels[other.moderation] })) },
     );
+    // A banned author's removed work comes back only when the account is unbanned on the users page.
+    const bannedRemoval = detail.moderation === "removed" && detail.owner_banned;
+    const republish = !canReview || bannedRemoval;
     if (detail.moderation === "removed") {
-      actions.push({ label: "恢复", disabled: !canReview, onClick: () => onRestore(item) });
+      actions.push({ label: "恢复", disabled: republish, onClick: () => onRestore(item) });
     } else {
       actions.push({ label: detail.moderation === "approved" ? "下架" : "驳回", variant: "danger", disabled: !canReview, onClick: () => onRemove(item) });
     }
-    if (detail.moderation !== "approved") actions.push({ label: "通过并上架", variant: "primary", disabled: !canReview, onClick: () => onApprove(item) });
+    if (detail.moderation !== "approved") actions.push({ label: "通过并上架", variant: "primary", disabled: republish, onClick: () => onApprove(item) });
   }
   return <DetailDrawer open={Boolean(target)} onClose={onClose}
     title={detail?.name ?? "加载中…"} sub={detail ? `${sectionLabels[section]} · ${detail.author || "—"}` : sectionLabels[section]}

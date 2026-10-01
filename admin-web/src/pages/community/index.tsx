@@ -100,6 +100,11 @@ export default function CommunityPage() {
   const items = list.data?.items ?? [];
   const total = list.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // A page that emptied after a review action (or a stale ?page= link) falls back to the last page that still has items.
+  const lastPage = list.data && !list.isPlaceholderData && list.data.items.length === 0 && page > 1 ? pages : null;
+  useEffect(() => {
+    if (lastPage !== null) setSearch({ page: lastPage > 1 ? String(lastPage) : undefined });
+  }, [lastPage, setSearch]);
   const target = (item: Item): Target => ({ section: tab, id: item.id, name: item.name, moderation: item.moderation, moderation_reason: item.moderation_reason });
 
   let body: ReactNode;
