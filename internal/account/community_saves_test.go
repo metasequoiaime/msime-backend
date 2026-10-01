@@ -97,7 +97,8 @@ func testCommunitySaves(t *testing.T, k savedKind) {
 	if w := apiRequest(t, mux, "PUT", k.base+"/"+savedID(99)+"/save", `{"saved":true}`, reader.AccessToken, 404); !strings.Contains(w.Body.String(), k.notFound) {
 		t.Fatal(w.Body.String())
 	}
-	apiRequest(t, mux, "PUT", k.base+"/"+savedID(99)+"/save", `{"saved":false}`, reader.AccessToken, 404)
+	// 取消收藏和 resourceSave 一样不看条目是否存在，总是成功。
+	save(99, false, reader.AccessToken, 200, `{"saved":false,"saves":0}`)
 
 	// 不带 fields 时，收藏前后、匿名与登录的响应都和以前逐字节相同。
 	if got := apiRequest(t, mux, "GET", k.base, "", "", 200).Body.String(); got != anonymousDefault {
@@ -223,13 +224,13 @@ func testCommunitySaves(t *testing.T, k savedKind) {
 		t.Fatalf("rating without download %+v %v", rated, err)
 	}
 
-	// 已下架：别人不能收藏、不能评分，已有的收藏不再列出；作者本人仍可收藏，评分仍是自己作品的 403。
+	// 已下架：别人不能收藏、不能评分，已有的收藏不再列出但仍能取消；作者本人仍可收藏，给它评分和别人一样是 404。
 	if _, err := db.pool.Exec(t.Context(), `UPDATE `+k.table+` SET moderation='removed' WHERE id=$1`, savedID(5)); err != nil {
 		t.Fatal(err)
 	}
 	apiRequest(t, mux, "PUT", k.base+"/"+savedID(5)+"/save", `{"saved":true}`, reader.AccessToken, 404)
-	apiRequest(t, mux, "PUT", k.base+"/"+savedID(5)+"/save", `{"saved":false}`, reader.AccessToken, 404)
 	apiRequest(t, mux, "PUT", k.base+"/"+savedID(5)+"/rating", `{"stars":3}`, reader.AccessToken, 404)
+	apiRequest(t, mux, "PUT", k.base+"/"+savedID(5)+"/rating", `{"stars":3}`, owner.AccessToken, 404)
 	save(5, true, owner.AccessToken, 200, "")
 	page1, _, _ := list("?scope=saved", reader.AccessToken, 200)
 	page2, _, _ := list("?scope=saved&offset=20", reader.AccessToken, 200)
@@ -238,6 +239,12 @@ func testCommunitySaves(t *testing.T, k savedKind) {
 	}
 	if ids, _, _ := list("?scope=saved", owner.AccessToken, 200); !slices.Contains(ids, savedID(5)) {
 		t.Fatal("owner's own removed save missing", ids)
+	}
+	// 取消收藏不看作品状态：否则这一行留在计数里，作品恢复后又会回到收藏中。
+	save(5, false, reader.AccessToken, 200, "")
+	var kept int
+	if err := db.pool.QueryRow(t.Context(), `SELECT count(*) FROM `+k.saves+` WHERE `+k.column+`=$1 AND user_id=$2`, savedID(5), reader.User.ID).Scan(&kept); err != nil || kept != 0 {
+		t.Fatal("unsave of a removed item kept the row", kept, err)
 	}
 
 	// 删除作品时收藏随之级联删除。
@@ -285,6 +292,7 @@ func TestCommunityCandidateSkinSavesPrivate(t *testing.T) {
 		}
 	}
 	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+public+"/rating", `{"stars":5}`, reader.AccessToken, 404)
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+public+"/save", `{"saved":false}`, reader.AccessToken, 200)
 }
 
 // 词库和回复模板的评分不再要求先收藏；自己的作品仍是 403 save_before_rating_or_own_resource，不存在和已下架的是 404。
@@ -305,7 +313,7 @@ func TestResourceRatingWithoutSave(t *testing.T) {
 	if w := apiRequest(t, mux, "PUT", "/v1/community/resources/reply-rated/rating", `{"stars":4}`, owner.AccessToken, 403); !strings.Contains(w.Body.String(), "save_before_rating_or_own_resource") {
 		t.Fatal(w.Body.String())
 	}
-	apiRequest(t, mux, "PUT", "/v1/community/resources/reply-removed/rating", `{"stars":4}`, owner.AccessToken, 403)
+	apiRequest(t, mux, "PUT", "/v1/community/resources/reply-removed/rating", `{"stars":4}`, owner.AccessToken, 404)
 	for _, id := range []string{"reply-removed", "missing"} {
 		if w := apiRequest(t, mux, "PUT", "/v1/community/resources/"+id+"/rating", `{"stars":4}`, reader.AccessToken, 404); !strings.Contains(w.Body.String(), "resource_not_found") {
 			t.Fatal(id, w.Body.String())

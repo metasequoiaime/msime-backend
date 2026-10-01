@@ -358,7 +358,7 @@ func (a *Service) resourceRate(w http.ResponseWriter, r *http.Request) {
 	if result.RowsAffected() == 0 {
 		// 不存在或已下架（作者本人除外）时返回 404，与详情接口一致；剩下的只可能是自己的作品，沿用客户端已经认识的错误码。
 		var own bool
-		if err = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_resources WHERE id=$1 AND owner_id=$2)`, r.PathValue("id"), p.UserID).Scan(&own); err != nil {
+		if err = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_resources WHERE id=$1 AND owner_id=$2 AND moderation<>'removed')`, r.PathValue("id"), p.UserID).Scan(&own); err != nil {
 			a.error(w, err)
 			return
 		}

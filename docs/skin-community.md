@@ -10,7 +10,7 @@
 - `PATCH /v1/community/skins/{id}?fields=&include=`：仅作者可修改（他人的作品与不存在一样返回 404 `skin_not_found`），提交 `{"category":"<分类>"}`；category 缺省、为 null、空串或未知值都返回 400 `invalid_category`，其他键返回 400 `invalid_json`。返回 200 和与详情形状相同的作品（含完整 design），同样支持 `fields=moderation` 与 `include=category`。不改变审核状态，设为当前分类同样返回 200。被审核员下架的作品作者仍可修改。限流与其他社区接口相同，计入按地址的每分钟额度（超出 429 `rate_limit_exceeded`）。分类见下文「键盘皮肤分类」。
 - `POST /v1/community/skins/{id}/download`：需要用户会话，返回 `{design}`，每个账号只计一次下载。
 - `PUT /v1/community/skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。登录即可评分，不需要先下载；不能给自己的作品评分（403 `download_before_rating_or_own_skin`，错误码沿用旧名，现在只表示「自己的作品」）；不存在或已下架的作品返回 404 `skin_not_found`。重复提交更新同一条评分。
-- `PUT /v1/community/skins/{id}/save`：需要用户会话，提交 `{"saved":true|false}` 收藏或取消收藏，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`（saves 为收藏总数）。不存在或已下架（作者本人除外）的作品返回 404 `skin_not_found`，取消收藏也一样。
+- `PUT /v1/community/skins/{id}/save`：需要用户会话，提交 `{"saved":true|false}` 收藏或取消收藏，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`（saves 为收藏总数）。不存在或已下架（作者本人除外）的作品收藏时返回 404 `skin_not_found`；取消收藏不看作品状态，总是删除并返回 200，作品下架后用户仍能把它移出收藏。
 - `DELETE /v1/community/skins/{id}`：仅作者可删除；不删除其他设备已下载的本地副本。
 
 摘要字段：id、name、description、author、design、downloads、rating_count、rating_average、owned、my_rating，仅在 `fields=moderation` 时出现在自己作品上的 moderation，仅在 `fields=saved` 时出现的 saved（当前用户是否收藏，匿名为 false）和 saves（收藏总数），以及仅在 `include=category` 时出现的 category。列表和详情的 `fields` 是逗号分隔的列表，可以组合，例如 `fields=moderation,saved`；不带 `saved` 时响应与加入收藏之前逐字节相同。人数代表累计去重下载账号数，不代表实时活跃使用人数。发布之后不允许原地替换设计以继承旧版评分；修改设计需发布新作品。
@@ -116,7 +116,7 @@ msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID
 - `PATCH /v1/community/candidate-skins/{id}`：仅作者可修改（否则 404），提交 `{"visibility"?: "public"|"private", "category"?: "<分类>"}`，两个键至少带一个（都缺省返回 400 `invalid_visibility`），在同一事务里生效，返回 200 和作品。转为公开要求已存的 license assets 非空（否则 400 `candidate_skin_license_required`），占用公开配额（满额 409 `candidate_skin_publish_limit`），并计入每小时发布限流；切换可见性会更新 `updated_at`，已有下载与评分保留。修改分类（未知值 400 `invalid_category`）计入私有创建与替换共用的每小时 60 次，不更新 `updated_at`、不改 `request_sha256`，也不让作品重新进入审核。设为当前值时不做任何修改，也不计限流。
 - `POST /v1/community/candidate-skins/{id}/download`：需要用户会话，返回 `{id,package_id,manifest,files}`，每个账号只计一次下载。私有作品仅作者可下载，否则 404。
 - `PUT /v1/community/candidate-skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。登录即可评分，不需要先下载；不能给自己的公开作品评分（403 `download_before_rating_or_own_skin`，错误码沿用旧名，现在只表示「自己的作品」）；不存在、私有或已下架的作品返回 404 `skin_not_found`。重复提交更新同一条评分。
-- `PUT /v1/community/candidate-skins/{id}/save`：需要用户会话，提交 `{"saved":true|false}`，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`。不存在、已下架（作者本人除外）或别人的私有作品返回 404 `skin_not_found`；作者可以收藏自己的私有作品。
+- `PUT /v1/community/candidate-skins/{id}/save`：需要用户会话，提交 `{"saved":true|false}`，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`。不存在、已下架（作者本人除外）或别人的私有作品收藏时返回 404 `skin_not_found`；取消收藏总是返回 200；作者可以收藏自己的私有作品。
 - `DELETE /v1/community/candidate-skins/{id}`：仅作者可删除，连带删除图片、下载、评分和收藏记录；不删除其他设备已安装的副本。
 
 摘要字段：id、package_id、name、description、author、version、license（code、assets、source，缺省为空字符串）、size（重新编码后的图片总字节数）、file_count（图片数量，不含 skin.toml）、downloads、rating_count、rating_average、owned、my_rating、created_at，以及仅在 `fields=saved` 时出现的 saved 和 saves。

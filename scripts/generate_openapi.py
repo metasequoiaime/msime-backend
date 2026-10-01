@@ -274,7 +274,7 @@ for path,method,title,body,response,status,description in [
  ('/v1/community/candidate-skins/{id}/preview','get','候选窗皮肤预览图',None,obj({'path':string(),'content_type':string(enum=['image/png','image/jpeg']),'data':string(format='byte')}),'200','返回重新编码后的预览图，data 为标准 base64；私有作品仅作者可取。'),
  ('/v1/community/candidate-skins/{id}/download','post','下载候选窗皮肤包并去重计数',None,community_candidate_skin_package,'200','返回原样清单和重新编码后的图片；下载人数按账号去重。私有作品仅作者可下载。'),
  ('/v1/community/candidate-skins/{id}/rating','put','为候选窗皮肤评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200','登录即可评分，不需要先下载；不能给自己的作品评分（403 download_before_rating_or_own_skin），重复提交更新同一条评分；不存在、私有或已下架的作品返回 404。'),
- ('/v1/community/candidate-skins/{id}/save','put','收藏或取消收藏候选窗皮肤',save_request,save_response,'200','请求体为 {"saved":bool}，重复提交结果相同，返回收藏状态与收藏总数。不存在、已下架（作者本人除外）或别人的私有作品返回 404 skin_not_found。'),
+ ('/v1/community/candidate-skins/{id}/save','put','收藏或取消收藏候选窗皮肤',save_request,save_response,'200','请求体为 {"saved":bool}，重复提交结果相同，返回收藏状态与收藏总数。不存在、已下架（作者本人除外）或别人的私有作品收藏时返回 404 skin_not_found；取消收藏不看作品状态，总是返回 200。'),
 ]:
     parameters=[]
     fields={'name':'fields','in':'query','schema':string(enum=['','sync','moderation','saved','sync,moderation','sync,saved','moderation,saved','sync,moderation,saved'],default=''),'description':'逗号分隔：sync 表示在响应中接收同步字段并可看到自己的私有作品；moderation 表示在自己的作品上接收审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。'}
@@ -304,7 +304,7 @@ for path,method,title,body,response,status,description in [
  ('/v1/community/plugins/{id}','delete','作者下架插件',None,obj({'deleted':{'type':'boolean'}}),'200','仅作者可下架，连带删除下载和评分记录。'),
  ('/v1/community/plugins/{id}/download','post','下载插件包并去重计数',None,community_plugin_package,'200','返回原样 zip 包（标准 base64）与 SHA-256，客户端安装前应校验摘要；下载人数按账号去重。每个账号每小时最多 60 次下载，同一进程最多同时发送 8 个包，排队超时返回 503 plugin_busy。'),
  ('/v1/community/plugins/{id}/rating','put','为插件评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200','登录即可评分，不需要先下载；不能给自己的作品评分（403 download_before_rating_or_own_plugin），重复提交更新同一条评分；不存在或已下架的插件返回 404。'),
- ('/v1/community/plugins/{id}/save','put','收藏或取消收藏插件',save_request,save_response,'200','请求体为 {"saved":bool}，重复提交结果相同，返回收藏状态与收藏总数。不存在或已下架（作者本人除外）的插件返回 404 plugin_not_found。'),
+ ('/v1/community/plugins/{id}/save','put','收藏或取消收藏插件',save_request,save_response,'200','请求体为 {"saved":bool}，重复提交结果相同，返回收藏状态与收藏总数。不存在或已下架（作者本人除外）的插件收藏时返回 404 plugin_not_found；取消收藏不看作品状态，总是返回 200。'),
 ]:
     parameters=[]
     if '{id}' in path: parameters.append({'name':'id','in':'path','required':True,'schema':string(format='uuid')})

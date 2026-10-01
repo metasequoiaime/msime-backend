@@ -215,7 +215,8 @@ func (a *Service) communitySave(w http.ResponseWriter, r *http.Request, t commun
 		a.error(w, e)
 		return
 	}
-	if !visible {
+	// 只在收藏时检查可见性。取消收藏和 resourceSave 一样总是成功：作品被下架或改为私有后，用户仍要能把它从收藏里删掉，否则这一行留在 saves 计数里，作品恢复后又会重新出现在收藏中。
+	if input.Saved && !visible {
 		writeError(w, 404, t.notFound)
 		return
 	}
@@ -586,7 +587,7 @@ func (a *Service) communityRate(w http.ResponseWriter, r *http.Request) {
 	if result.RowsAffected() == 0 {
 		// 不存在或已下架（作者本人除外）时返回 404，与详情接口一致；剩下的只可能是自己的作品，沿用客户端已经认识的错误码。
 		var own bool
-		e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_skins WHERE id=$1 AND owner_id=$2)`, r.PathValue("id"), p.UserID).Scan(&own)
+		e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_skins WHERE id=$1 AND owner_id=$2 AND moderation<>'removed')`, r.PathValue("id"), p.UserID).Scan(&own)
 		if e != nil {
 			a.error(w, e)
 			return

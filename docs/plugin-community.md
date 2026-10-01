@@ -9,7 +9,7 @@
 - `POST /v1/community/plugins`：需要用户会话，提交 `{id,name,description,kind,plugin_id,version,archive}`，成功返回 201 和摘要。`archive` 为 zip 的标准 base64。`id` 为客户端生成的 UUID，用于网络失败后的安全重试：同一账号用完全相同的内容重试返回 200 和已存记录，任何字段不同或他人占用同一 id 返回 409 `plugin_id_conflict`。
 - `POST /v1/community/plugins/{id}/download`：需要用户会话，返回 `{id,kind,plugin_id,version,size,sha256,archive}`，`archive` 为原样 zip 的标准 base64。客户端安装前应核对 `sha256`。下载人数按账号去重；重复下载不计人数，但计入下面的下载频率限制。
 - `PUT /v1/community/plugins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`，返回 `{stars}`。登录即可评分，不需要先下载；不能给自己的作品评分（403 `download_before_rating_or_own_plugin`，错误码沿用旧名，现在只表示「自己的作品」）；不存在或已下架的插件返回 404 `plugin_not_found`。重复提交更新同一条评分。
-- `PUT /v1/community/plugins/{id}/save`：需要用户会话，提交 `{"saved":true|false}` 收藏或取消收藏，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`（saves 为收藏总数）。不存在或已下架（作者本人除外）的插件返回 404 `plugin_not_found`，取消收藏也一样。
+- `PUT /v1/community/plugins/{id}/save`：需要用户会话，提交 `{"saved":true|false}` 收藏或取消收藏，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`（saves 为收藏总数）。不存在或已下架（作者本人除外）的插件收藏时返回 404 `plugin_not_found`；取消收藏不看作品状态，总是删除并返回 200，作品下架后用户仍能把它移出收藏。
 - `DELETE /v1/community/plugins/{id}`：仅作者可删除，返回 `{deleted:true}`；不是作者或不存在都返回 404。连带删除下载、评分和收藏记录，不影响其他设备已安装的本地副本。
 
 摘要字段：`id`、`kind`、`plugin_id`、`name`、`description`、`author`、`version`、`license`、`size`、`sha256`、`downloads`、`rating_count`、`rating_average`、`owned`、`my_rating`、`created_at`，以及仅在 `fields=moderation` 时出现在自己作品上的 `moderation`、仅在 `fields=saved` 时出现的 `saved`（当前用户是否收藏，匿名为 false）和 `saves`（收藏总数）。`fields` 是逗号分隔的列表，可以组合，例如 `fields=moderation,saved`；不带 `saved` 时响应与加入收藏之前逐字节相同。
