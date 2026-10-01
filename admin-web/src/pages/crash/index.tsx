@@ -96,7 +96,8 @@ export default function CrashPage() {
     { id: "status", header: "状态", width: "90px", cell: group => <Pill tone={crashStatusTone[group.status]}>{crashStatusLabel[group.status]}</Pill> },
     {
       id: "actions", header: "", width: "150px", align: "right",
-      cell: group => group.status === "open"
+      // An open group that already has an issue (reopened after 已知问题) gets 查看堆栈, since a second issue would be refused.
+      cell: group => group.status === "open" && !group.issue_url
         ? <Button size="sm" variant="primary" disabled={!canTriage || githubDisabled} title={!canTriage ? noPermissionHint : githubDisabled ? "未配置 GitHub 集成" : undefined}
           onClick={event => { event.stopPropagation(); createIssue(group); }}>建 Issue</Button>
         : <Button size="sm" variant="outline" onClick={event => { event.stopPropagation(); setSelected(group.signature); }}>查看堆栈</Button>,

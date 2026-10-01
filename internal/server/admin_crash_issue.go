@@ -82,6 +82,26 @@ func (s *Server) adminCrashIssue(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, map[string]any{"target": target, "issue_url": nilIfEmpty(group.IssueURL)})
 		return
 	}
+	// Hold the group's issue lock from the duplicate check until the issue is recorded, and re-read the group under it, so two concurrent requests cannot both open an issue.
+	release, err := s.accounts.LockCrashGroupIssue(ctx, signature)
+	if errors.Is(err, account.ErrCrashIssueBusy) {
+		fail(w, 409, "issue_in_progress")
+		return
+	}
+	if err != nil {
+		fail(w, 503, "auth_unavailable")
+		return
+	}
+	defer release()
+	if group, err = s.accounts.CrashGroupForIssue(ctx, signature); err != nil {
+		if errors.Is(err, account.ErrCrashGroupNotFound) {
+			fail(w, 404, "not_found")
+		} else {
+			fail(w, 503, "auth_unavailable")
+		}
+		return
+	}
+	platform, configured = s.crashIssuePlatform(group.Platform)
 	if group.IssueURL != "" {
 		respond(w, 409, map[string]any{"error": map[string]string{"code": "issue_exists", "message": "issue_exists"}, "issue_url": group.IssueURL})
 		return
@@ -131,7 +151,10 @@ func (s *Server) adminCrashIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client.Invalidate("/repos/" + platform.Repo + "/issues")
-	if err = s.accounts.SetCrashGroupIssue(ctx, signature, platform.Repo, created.Number, created.HTMLURL); err != nil {
+	// The issue now exists on GitHub; record it even if the request deadline ran out or the admin went away during the GitHub call. WithoutCancel keeps the actor for the audit row.
+	recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelRecord()
+	if err = s.accounts.SetCrashGroupIssue(recordCtx, signature, platform.Repo, created.Number, created.HTMLURL); err != nil {
 		// The issue exists on GitHub but the group does not point at it; hand the link back so it is not lost.
 		slog.Error("crash issue: record", "signature", signature, "issue", created.HTMLURL, "reason", err.Error())
 		respond(w, 503, map[string]any{"error": map[string]string{"code": "issue_not_recorded", "message": "issue_not_recorded"}, "issue_url": created.HTMLURL})

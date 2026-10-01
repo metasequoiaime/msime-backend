@@ -336,7 +336,8 @@ func TestNotifyCrashSpikes(t *testing.T) {
 	rising := seed("rising", "rising crash", 6, 4, "open")
 	seed("flat", "flat crash", 6, 5, "open")
 	fresh := seed("fresh", "fresh crash", 5, 0, "known")
-	seed("small", "small crash", 4, 0, "open")
+	small := seed("small", "small crash", 4, 0, "open")
+	seed("minor", "minor crash", 2, 1, "open")
 	seed("fixed", "fixed crash", 9, 1, "fixed")
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
@@ -344,16 +345,17 @@ func TestNotifyCrashSpikes(t *testing.T) {
 	}
 	spikes, err := crashSpikes(ctx, tx)
 	tx.Rollback(ctx)
-	if err != nil || len(spikes) != 2 || spikes[0].Signature != rising || spikes[1].Signature != fresh {
+	// A new group alerts whatever its size; an older group needs crashSpikeMinimum crashes, so minor (1 to 2) stays quiet.
+	if err != nil || len(spikes) != 3 || spikes[0].Signature != rising || spikes[1].Signature != fresh || spikes[2].Signature != small {
 		t.Fatalf("%+v %v", spikes, err)
 	}
-	if n := spikes[0].notification(); n.Kind != NotifyCrashSpike || n.TargetPage != "crash" || n.TargetID != rising || n.Title != "ios 崩溃分组 rising crash 上升 50%" {
+	if n := spikes[0].notification(); n.Kind != NotifyCrashSpike || n.TargetPage != "crash" || n.TargetID != rising || n.Title != "iOS 崩溃分组 rising crash 上升 50%" {
 		t.Fatalf("%+v", n)
 	}
-	if n := spikes[1].notification(); n.Title != "ios 新增崩溃分组 fresh crash" {
+	if n := spikes[1].notification(); n.Title != "iOS 新增崩溃分组 fresh crash" {
 		t.Fatalf("%+v", n)
 	}
-	if count, err := a.NotifyCrashSpikes(ctx); err != nil || count != 2 {
+	if count, err := a.NotifyCrashSpikes(ctx); err != nil || count != 3 {
 		t.Fatal(count, err)
 	}
 	// A spike already notified within the quiet period is not notified again.
@@ -365,7 +367,7 @@ func TestNotifyCrashSpikes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if spikes, err = crashSpikes(ctx, tx); err != nil || len(spikes) != 1 || spikes[0].Signature != fresh {
+	if spikes, err = crashSpikes(ctx, tx); err != nil || len(spikes) != 2 || spikes[0].Signature != fresh || spikes[1].Signature != small {
 		t.Fatalf("%+v %v", spikes, err)
 	}
 }

@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import { APIError, useAPI } from "../../api/client";
 import type { API } from "../../api/client";
 import { keys } from "../../api/keys";
-import { crashIssueCreatedSchema, crashIssueErrors } from "../../api/crash";
+import { crashIssueCreatedSchema, crashIssueErrors, crashStatusSchema } from "../../api/crash";
 import type { CrashGroup, CrashStatus } from "../../api/crash";
 import { useToast } from "../../ui/toast";
 
@@ -37,10 +37,13 @@ export function useCrashActions(): CrashActions {
   const refresh = useCallback(() => client.invalidateQueries({ queryKey: keys.page("crash") }), [client]);
 
   const setStatus = useCallback(async (group: CrashGroup, to: CrashStatus, text: string) => {
-    const from = group.status;
+    let from: CrashStatus = group.status;
     setOverrides(previous => ({ ...previous, [group.signature]: to }));
     try {
-      await api.action({ action: "crash_group_status", id: group.signature, value: to });
+      const result = await api.action({ action: "crash_group_status", id: group.signature, value: to });
+      // Undo restores what the server replaced, which differs from the shown status when another admin changed it meanwhile.
+      const previous = crashStatusSchema.safeParse(result.previous);
+      if (previous.success) from = previous.data;
       await refresh();
     } finally {
       clear(group.signature);

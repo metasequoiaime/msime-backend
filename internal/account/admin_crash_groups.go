@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -314,6 +316,37 @@ func (a *Service) CrashGroupForIssue(ctx context.Context, signature string) (Cra
 	return source, nil
 }
 
+// ErrCrashIssueBusy is returned while another request is opening an issue for the same crash group.
+var ErrCrashIssueBusy = errors.New("crash group issue in progress")
+
+// crashIssueLockSpace is the first key of the per-group advisory lock that serializes issue creation; the second is hashtext(signature).
+const crashIssueLockSpace int32 = 0x6d736369
+
+// LockCrashGroupIssue serializes opening a GitHub issue for one crash group across requests and replicas, so two clicks cannot open two issues: it holds a session advisory lock on its own connection until the returned release is called, and returns ErrCrashIssueBusy when another request holds it. Read the group again after locking.
+func (a *Service) LockCrashGroupIssue(ctx context.Context, signature string) (func(), error) {
+	conn, err := a.store.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var locked bool
+	if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1,hashtext($2))`, crashIssueLockSpace, signature).Scan(&locked); err != nil || !locked {
+		conn.Release()
+		if err == nil {
+			err = ErrCrashIssueBusy
+		}
+		return nil, err
+	}
+	return func() {
+		// The request context may already be done; unlock on a fresh one, and drop the connection rather than return it to the pool still holding the lock.
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(unlockCtx, `SELECT pg_advisory_unlock($1,hashtext($2))`, crashIssueLockSpace, signature); err != nil {
+			_ = conn.Conn().Close(unlockCtx)
+		}
+		conn.Release()
+	}, nil
+}
+
 // SetCrashGroupIssue records the GitHub issue opened for a crash group, marks the group known and audits both in one transaction. Call it only after the issue was created.
 func (a *Service) SetCrashGroupIssue(ctx context.Context, signature, repo string, number int64, url string) error {
 	tx, err := a.store.pool.Begin(ctx)
@@ -338,7 +371,7 @@ func (a *Service) SetCrashGroupIssue(ctx context.Context, signature, repo string
 	return tx.Commit(ctx)
 }
 
-// Crash spikes: a group whose last 7 days exceed the 7 days before by more than 20% (a new group counts as rising), with at least crashSpikeMinimum crashes so a single report does not alert anyone, notifies the console at most once per crashSpikeQuiet.
+// Crash spikes: a new group (first seen within 7 days), or a group whose last 7 days exceed the 7 days before by more than 20% with at least crashSpikeMinimum crashes so a jump from one report to two does not alert anyone, notifies the console at most once per crashSpikeQuiet. This matches the console's 崩溃告警 preference: 新增崩溃分组或崩溃率上升超过 20%.
 const (
 	crashSpikeRise    = 1.2
 	crashSpikeMinimum = 5
@@ -379,25 +412,36 @@ type crashSpike struct {
 	Count7d, CountPrev7d       int64
 }
 
-// notification phrases the spike like the console's other alerts, for example "ios 崩溃分组 EXC_BAD_ACCESS 上升 32%".
+// notification phrases the spike like the console's other alerts, for example "iOS 崩溃分组 EXC_BAD_ACCESS 上升 32%".
 func (s crashSpike) notification() Notification {
 	title := []rune(s.Title)
 	if len(title) > 80 {
 		title = append(title[:79], '…')
 	}
-	text := s.Platform + " 新增崩溃分组 " + string(title)
+	platform := crashPlatformName(s.Platform)
+	text := platform + " 新增崩溃分组 " + string(title)
 	if s.CountPrev7d > 0 {
 		rise := (s.Count7d*100+s.CountPrev7d/2)/s.CountPrev7d - 100
-		text = s.Platform + " 崩溃分组 " + string(title) + " 上升 " + strconv.FormatInt(rise, 10) + "%"
+		text = platform + " 崩溃分组 " + string(title) + " 上升 " + strconv.FormatInt(rise, 10) + "%"
 	}
 	return Notification{Kind: NotifyCrashSpike, Title: text, TargetPage: "crash", TargetID: s.Signature}
+}
+
+// crashPlatformNames are the product names of the lowercase platform ids telemetry reports, as the console shows them.
+var crashPlatformNames = map[string]string{"windows": "Windows", "macos": "macOS", "linux": "Linux", "android": "Android", "ios": "iOS", "harmonyos": "HarmonyOS", "harmony": "HarmonyOS", "ohos": "HarmonyOS"}
+
+func crashPlatformName(platform string) string {
+	if name, ok := crashPlatformNames[strings.ToLower(platform)]; ok {
+		return name
+	}
+	return platform
 }
 
 // crashSpikes lists the groups to notify, skipping fixed groups and those already notified within crashSpikeQuiet.
 func crashSpikes(ctx context.Context, tx pgx.Tx) ([]crashSpike, error) {
 	rows, err := tx.Query(ctx, `WITH c AS (`+crashGroupCounts+`)
 SELECT g.signature,g.platform,g.title,c.c7,c.p7 FROM admin_crash_groups g JOIN c USING(signature)
-WHERE g.status<>'fixed' AND c.c7>=$2 AND c.c7>c.p7*$3::float8
+WHERE g.status<>'fixed' AND c.c7>c.p7*$3::float8 AND (c.c7>=$2 OR (c.p7=0 AND g.first_seen>=now()-interval '7 days'))
  AND NOT EXISTS (SELECT 1 FROM admin_notifications n WHERE n.kind=$4 AND n.target_id=g.signature AND n.created_at>now()-$5::interval)
 ORDER BY c.c7 DESC,g.signature`, "", crashSpikeMinimum, crashSpikeRise, NotifyCrashSpike, crashSpikeQuiet)
 	if err != nil {
@@ -593,7 +637,9 @@ WHERE kind='crash' AND signature IS NULL AND (created_at,id)>($1,$2) ORDER BY cr
 		}
 		var keys, platforms, versions, titles []string
 		var firsts, lasts []time.Time
-		for signature, group := range groups {
+		// A fixed order keeps two replicas backfilling at once from deadlocking on the group rows.
+		for _, signature := range slices.Sorted(maps.Keys(groups)) {
+			group := groups[signature]
 			keys, platforms, versions, titles = append(keys, signature), append(platforms, group.platform), append(versions, group.version), append(titles, group.title)
 			firsts, lasts = append(firsts, group.first), append(lasts, group.last)
 		}
