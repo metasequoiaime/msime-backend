@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useRef, useState } from "react"
 import type { KeyboardEvent, ReactNode } from "react";
 import { Dialog, ToggleGroup } from "radix-ui";
 import { Button } from "./button";
-import { useRegisterOverlay } from "./overlay";
+import { keepOpenForToast, useRegisterOverlay } from "./overlay";
 
 export type ConfirmOptions = {
   title: string;
@@ -49,7 +49,7 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (value: 
   const [pick, setPick] = useState(reasons?.[0] ?? "");
   const [note, setNote] = useState("");
   const okRef = useRef<HTMLButtonElement>(null);
-  useRegisterOverlay(true);
+  useRegisterOverlay(true, () => onDone(null));
   const submit = () => {
     const trimmed = note.trim();
     onDone(pick ? pick + (trimmed ? `：${trimmed}` : "") : "");
@@ -66,12 +66,12 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (value: 
   return <Dialog.Root open onOpenChange={open => { if (!open) onDone(null); }}>
     <Dialog.Portal>
       <div className="fixed inset-0 z-70 grid place-items-center bg-[rgba(10,20,14,.38)] p-5">
-        <Dialog.Content onKeyDown={onKeyDown} onOpenAutoFocus={event => { event.preventDefault(); okRef.current?.focus(); }}
+        <Dialog.Content onKeyDown={onKeyDown} onInteractOutside={keepOpenForToast} onOpenAutoFocus={event => { event.preventDefault(); okRef.current?.focus(); }}
           className="w-full max-w-[400px] animate-pop-in rounded-[18px] bg-panel px-6 py-[22px] shadow-dialog outline-none">
           <Dialog.Title className="m-0 text-[17px] font-bold text-ink">{title}</Dialog.Title>
           {description ? <Dialog.Description className="m-0 mt-2 text-sm leading-[1.8] text-body">{description}</Dialog.Description> : <Dialog.Description className="sr-only">{title}</Dialog.Description>}
           {reasons && reasons.length > 0 && <div className="mt-4">
-            <div className="mb-2 text-[12.5px] font-semibold text-muted" id="confirm-reason-label">原因（会发给对方）</div>
+            <div className="mb-2 text-[12.5px] font-semibold text-muted" id="confirm-reason-label">原因</div>
             <ToggleGroup.Root type="single" value={pick} onValueChange={next => { if (next) setPick(next); }} aria-labelledby="confirm-reason-label" className="flex flex-wrap gap-1.5">
               {reasons.map(reason => <ToggleGroup.Item key={reason} value={reason}
                 className="h-[30px] rounded-full px-3 text-[13px] text-body inset-ring inset-ring-hair-2 transition hover:bg-panel-2 data-[state=on]:bg-accent-soft data-[state=on]:text-accent-ink data-[state=on]:inset-ring-accent-ring">{reason}</ToggleGroup.Item>)}

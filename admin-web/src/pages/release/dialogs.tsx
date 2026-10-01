@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Dialog } from "radix-ui";
 import { Button } from "../../ui/button";
-import { useRegisterOverlay } from "../../ui/overlay";
+import { keepOpenForToast, useRegisterOverlay } from "../../ui/overlay";
 
 // FormDialog is the release page's modal form (trigger version, notes editor). Like the shared confirm dialog it has no Dialog.Overlay, whose scroll lock injects a <style> element the admin CSP blocks.
 function FormDialog({ title, description, okLabel, okDisabled, pending, onClose, onSubmit, wide, children }: {
@@ -16,7 +16,7 @@ function FormDialog({ title, description, okLabel, okDisabled, pending, onClose,
   wide?: boolean;
   children: ReactNode;
 }) {
-  useRegisterOverlay(true);
+  useRegisterOverlay(true, () => { if (!pending) onClose(); });
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!pending && !okDisabled) onSubmit();
@@ -24,7 +24,7 @@ function FormDialog({ title, description, okLabel, okDisabled, pending, onClose,
   return <Dialog.Root open onOpenChange={open => { if (!open && !pending) onClose(); }}>
     <Dialog.Portal>
       <div className="fixed inset-0 z-70 grid place-items-center bg-[rgba(10,20,14,.38)] p-5">
-        <Dialog.Content className={`w-full animate-pop-in rounded-[18px] bg-panel px-6 py-[22px] shadow-dialog outline-none ${wide ? "max-w-[640px]" : "max-w-[400px]"}`}>
+        <Dialog.Content onInteractOutside={keepOpenForToast} className={`w-full animate-pop-in rounded-[18px] bg-panel px-6 py-[22px] shadow-dialog outline-none ${wide ? "max-w-[640px]" : "max-w-[400px]"}`}>
           <form onSubmit={submit}>
             <Dialog.Title className="m-0 text-[17px] font-bold text-ink">{title}</Dialog.Title>
             {description ? <Dialog.Description className="m-0 mt-2 text-sm leading-[1.8] text-body">{description}</Dialog.Description> : <Dialog.Description className="sr-only">{title}</Dialog.Description>}

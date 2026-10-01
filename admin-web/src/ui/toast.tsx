@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import type { ReactNode } from "react";
 import { Toast } from "radix-ui";
 import { errorMessage } from "../api/client";
+import { TOAST_ATTRIBUTE, closeTopOverlay } from "./overlay";
 
 const TOAST_MS = 4000;
 
@@ -89,10 +90,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return <ToastContext.Provider value={show}>
     <Toast.Provider duration={Number.POSITIVE_INFINITY} swipeDirection="down" label="通知">
       {children}
-      {current && <Toast.Root key={current.id} open={open} type="foreground"
+      {current && <Toast.Root key={current.id} open={open} type="foreground" {...{ [TOAST_ATTRIBUTE]: "" }}
         // 撤销 closes its own toast after its click handler already showed 已撤销; ignore close events from a toast that has been replaced.
         onOpenChange={next => { if (!next && shownID.current === current.id) setOpen(false); }}
-        className="fixed bottom-7 left-1/2 z-80 flex max-w-[calc(100vw-32px)] animate-toast-in items-center gap-3.5 rounded-xl bg-ink px-[18px] py-3 text-sm text-bg shadow-dialog">
+        // A toast shown after a dialog or drawer opened is the topmost dismissable layer and would take Escape for itself; the key closes that overlay instead and the toast stays for its 撤销.
+        onEscapeKeyDown={event => { if (closeTopOverlay()) event.preventDefault(); }}
+        // While a modal overlay disables outside pointer events, the toast stays clickable (!important beats the layer's inline pointer-events: none) so 撤销 still works; the overlays ignore that click through keepOpenForToast.
+        className="pointer-events-auto! fixed bottom-7 left-1/2 z-80 flex max-w-[calc(100vw-32px)] animate-toast-in items-center gap-3.5 rounded-xl bg-ink px-[18px] py-3 text-sm text-bg shadow-dialog">
         <Toast.Description>{current.text}</Toast.Description>
         {canUndo && <Toast.Action altText="撤销刚才的操作" onClick={undo} className="shrink-0 font-bold text-bg underline underline-offset-2">撤销</Toast.Action>}
       </Toast.Root>}

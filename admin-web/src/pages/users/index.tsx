@@ -92,12 +92,10 @@ export default function UsersPage() {
       columns={columns}
       getRowId={row => row.id}
       onRowClick={open}
-      toolbar={<FilterChips label="角色" value={role} options={chips} className="[&>button]:whitespace-nowrap" onChange={next => setSearch({ role: next === "all" ? undefined : next, page: undefined })} />}
+      toolbar={<FilterChips label="角色" value={role} options={chips} onChange={next => setSearch({ role: next === "all" ? undefined : next, page: undefined })} />}
       searchText={row => `${displayName(row)} ${row.contact} ${row.id}`}
       emptyText={role === "all" ? "还没有注册用户" : "没有这个角色的账号"}
       minWidth="720px"
-      // On phones the role chips get the toolbar's full first line and the page filter wraps below, instead of the chips being squeezed beside the search box.
-      className="max-[759px]:[&>div:first-child>div:first-child]:basis-full"
       pagination={{ page, total: list.data?.total ?? 0, pageSize: 50, onPageChange: next => setSearch({ page: next > 1 ? String(next) : undefined }) }}
     />
     <UserDrawer id={focus} onClose={() => setSearch({ focus: undefined })} actions={actions} />

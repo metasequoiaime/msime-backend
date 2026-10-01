@@ -36,13 +36,15 @@ const statusRoute = page("/status", () => import("../pages/status"));
 const permRoute = page("/perm", () => import("../pages/perm"));
 const meRoute = page("/me", () => import("../pages/me"));
 
-// Old console paths redirect to the pages that replaced them (see legacyRedirects in nav.ts and pagePaths in embed.go).
-const moved = <P extends string>(path: P, to: "/perm" | "/status" | "/crash" | "/community") =>
-  createRoute({ getParentRoute: () => rootRoute, path, component: Outlet, beforeLoad: () => { throw redirect({ to, replace: true }); } });
+// Old console paths redirect to the pages that replaced them (see legacyRedirects in nav.ts and pagePaths in embed.go). Incoming search params are kept, and tab selects the community section an old content path stood for.
+const moved = <P extends string>(path: P, to: "/perm" | "/status" | "/crash" | "/community", tab?: string) =>
+  createRoute({ getParentRoute: () => rootRoute, path, component: Outlet, beforeLoad: ({ location }) => {
+    throw redirect({ to, search: validatePageSearch({ ...(location.search as Record<string, unknown>), ...(tab ? { tab } : {}) }) as never, replace: true });
+  } });
 
 const routeTree = rootRoute.addChildren([
   overviewRoute, dictprRoute, communityRoute, issuesRoute, wordsRoute, usersRoute, downloadsRoute, noticeRoute, releaseRoute, cloudRoute, crashRoute, statusRoute, permRoute, meRoute,
-  moved("/admins", "/perm"), moved("/audit", "/perm"), moved("/system", "/status"), moved("/crashes", "/crash"), moved("/skins", "/community"), moved("/dictionaries", "/community"), moved("/replies", "/community"),
+  moved("/admins", "/perm"), moved("/audit", "/perm"), moved("/system", "/status"), moved("/crashes", "/crash"), moved("/skins", "/community", "skins"), moved("/dictionaries", "/community", "dictionaries"), moved("/replies", "/community", "replies"),
 ]);
 
 export const router = createRouter({ routeTree, defaultPreload: "intent", scrollRestoration: true });

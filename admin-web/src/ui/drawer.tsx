@@ -6,7 +6,7 @@ import type { ButtonProps } from "./button";
 import { cn } from "./cn";
 import { Pill } from "./pill";
 import type { Tone } from "./pill";
-import { useRegisterOverlay } from "./overlay";
+import { keepOpenForToast, useRegisterOverlay } from "./overlay";
 
 export type DrawerField = { label: string; value: ReactNode; mono?: boolean };
 export type DrawerItem = { text: ReactNode; meta?: ReactNode };
@@ -32,12 +32,12 @@ const actionVariants: Record<NonNullable<DrawerAction["variant"]>, ButtonProps["
 
 // DetailDrawer is the right-hand detail panel. Footer actions close the drawer before running unless keepOpen is set, as in the prototype.
 export function DetailDrawer({ open, onClose, title, sub, pills, fields, sections, actions, composer, children }: DetailDrawerProps) {
-  useRegisterOverlay(open);
+  useRegisterOverlay(open, onClose);
   return <Dialog.Root open={open} onOpenChange={next => { if (!next) onClose(); }}>
     <Dialog.Portal>
       {/* Plain scrim instead of Dialog.Overlay: the overlay's scroll lock injects a <style> element that the admin CSP blocks. */}
       <div aria-hidden="true" className="fixed inset-0 z-65 bg-[rgba(10,20,14,.3)]" />
-      <Dialog.Content aria-describedby={undefined} className="fixed inset-y-0 right-0 z-66 flex w-[min(440px,100vw)] animate-drawer-in flex-col bg-panel shadow-dialog outline-none">
+      <Dialog.Content aria-describedby={undefined} onInteractOutside={keepOpenForToast} className="fixed inset-y-0 right-0 z-66 flex w-[min(440px,100vw)] animate-drawer-in flex-col bg-panel shadow-dialog outline-none">
         <div className="flex items-start gap-3 px-[22px] pt-5 pb-3">
           <div className="min-w-0 flex-1">
             <Dialog.Title className="m-0 text-[17px] font-bold text-pretty text-ink">{title}</Dialog.Title>

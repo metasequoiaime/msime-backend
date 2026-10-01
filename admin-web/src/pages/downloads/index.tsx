@@ -4,7 +4,6 @@ import { useAPI } from "../../api/client";
 import { channelLabel, downloadsSummarySchema, platformKey, platformLabel, platformOptions } from "../../api/downloads";
 import type { DownloadRow, DownloadsSummary } from "../../api/downloads";
 import { keys } from "../../api/keys";
-import { MOBILE_QUERY, useMediaQuery } from "../../shell/media";
 import { PageIntro } from "../../shell/page-intro";
 import { usePageSearch, useSetPageSearch } from "../../shell/page-search";
 import { Banner } from "../../ui/card";
@@ -101,16 +100,11 @@ export default function DownloadsPage() {
   const max = useMemo(() => Math.max(0, ...(rows ?? []).map(row => row.week)), [rows]);
   const columns = useMemo(() => columnsFor(max), [max]);
   const empty = rows && rows.length === 0;
-  // The table toolbar gives its left slot no basis, so on phones the chips would collapse into a narrow column; there they get their own scrollable row above the table.
-  const mobile = useMediaQuery(MOBILE_QUERY);
-  const filter = <FilterChips label="平台" value={platform} onChange={key => setSearch({ platform: key === "all" ? undefined : key })} options={chips}
-    className={mobile ? "-mx-1 flex-nowrap overflow-x-auto px-1 pb-1 whitespace-nowrap" : undefined} />;
 
   return <>
     <PageIntro page="downloads" />
     <div className="grid gap-4">
       <Stats summary={query.data} />
-      {mobile && filter}
       {query.data?.truncated && <Banner tone="warn">分组过多，表格只显示近 7 天下载量最高的部分分组；统计卡片仍按全部下载计算。</Banner>}
       <DataTable
         ariaLabel="下载记录"
@@ -120,7 +114,7 @@ export default function DownloadsPage() {
         onRetry={() => void query.refetch()}
         columns={columns}
         getRowId={rowId}
-        toolbar={mobile ? undefined : filter}
+        toolbar={<FilterChips label="平台" value={platform} onChange={key => setSearch({ platform: key === "all" ? undefined : key })} options={chips} />}
         searchText={rowSearchText}
         emptyText={empty ? "近 7 天没有下载上报，也没有 GitHub Release 下载快照" : "这一栏是空的"}
         minWidth="720px"

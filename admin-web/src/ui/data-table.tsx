@@ -149,7 +149,8 @@ export function DataTable<T extends RowData>({ data, columns, getRowId, selectab
 
   return <div className={cn("min-w-0 overflow-clip rounded-[18px] bg-panel ring-1 ring-hair", className)}>
     {(toolbar || searchText) && <div className="flex flex-wrap items-center gap-3 border-b border-hair px-3.5 py-3">
-      <div className="min-w-0 flex-1">{toolbar}</div>
+      {/* The toolbar slot keeps a real basis so filter chips take the first line on phones and the page filter wraps below them, instead of the chips collapsing into a narrow column. */}
+      <div className="min-w-0 grow basis-[260px] max-[759px]:basis-full">{toolbar}</div>
       {searchText && <input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="在本页筛选…" aria-label="在本页筛选"
         className="h-[30px] w-[180px] rounded-lg bg-panel-2 px-2.5 text-[13px] text-ink outline-none placeholder:text-muted focus:ring-[1.5px] focus:ring-accent" />}
       <span className="text-[12.5px] whitespace-nowrap text-muted tabular-nums">共 {total.toLocaleString("zh-CN")} 条</span>

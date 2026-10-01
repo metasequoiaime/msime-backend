@@ -29,7 +29,7 @@ PAGES = {
     "/users": "用户账号", "/downloads": "下载记录", "/notice": "公告推送", "/release": "发布管理", "/cloud": "云端监控",
     "/crash": "崩溃上报", "/status": "系统状态", "/perm": "权限日志", "/me": "个人中心",
 }
-REDIRECTS = {"/admins": "/perm", "/audit": "/perm", "/system": "/status", "/crashes": "/crash", "/skins": "/community", "/dictionaries": "/community", "/replies": "/community"}
+REDIRECTS = {"/admins": "/perm", "/audit": "/perm", "/system": "/status", "/crashes": "/crash", "/skins": "/community?tab=skins", "/dictionaries": "/community?tab=dictionaries", "/replies": "/community?tab=replies"}
 
 # Test fixtures for the shell endpoints, shaped like gap.md section 1.
 FIXTURES = {
@@ -525,6 +525,35 @@ def main() -> int:
                 expect(drawer.get_by_role("img", name=re.compile("26 键"))).to_be_visible()
                 page.keyboard.press("Escape")
                 expect(drawer).to_be_hidden()
+                # A toast raised from inside the drawer must not swallow Escape: the first press closes the drawer.
+                page.get_by_role("button", name="打开抽屉").click()
+                expect(drawer).to_be_visible()
+                drawer.get_by_role("button", name="通过").click()
+                expect(page.get_by_text("已通过", exact=True)).to_be_visible()
+                page.keyboard.press("Escape")
+                expect(drawer).to_be_hidden()
+                # A toast shown before a modal opens keeps its 撤销 clickable for the pointer (the modal hides the rest of the page from assistive tech), and clicking it leaves the modal open.
+                page.get_by_role("button", name="延迟提交").click()
+                page.get_by_role("button", name="打开抽屉").click()
+                expect(drawer).to_be_visible()
+                page.locator("[data-msime-toast] button").click()
+                expect(page.get_by_test_id("committed")).to_have_text("undone")
+                expect(drawer).to_be_visible()
+                page.keyboard.press("Escape")
+                expect(drawer).to_be_hidden()
+                # Escape closes the confirm dialog while a toast is on screen, whichever opened first.
+                page.get_by_role("checkbox", name="全选").check()
+                page.get_by_role("button", name="批量驳回").click()
+                dialog = page.get_by_role("dialog", name=re.compile("驳回 \\d 项？"))
+                expect(dialog).to_be_visible()
+                page.keyboard.press("Escape")
+                expect(dialog).to_be_hidden()
+                page.get_by_role("button", name="延迟提交").click()
+                page.get_by_role("button", name="批量驳回").click()
+                expect(dialog).to_be_visible()
+                page.keyboard.press("Escape")
+                expect(dialog).to_be_hidden()
+                page.get_by_role("button", name="取消选择").click()
                 violations("ui harness")
             finally:
                 browser.close()
