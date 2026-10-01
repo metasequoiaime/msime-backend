@@ -472,7 +472,7 @@ func (s *Server) rememberIssues(ctx context.Context, items []issueRow, complete 
 			title = string([]rune(title)[:299]) + "…"
 		}
 		key := issueRef{Repo: row.Repo, N: row.Number}.key()
-		if err := s.accounts.NotifyNow(ctx, account.Notification{Kind: account.NotifyIssue, Title: title, TargetPage: "issues", TargetID: key}); err != nil {
+		if err := s.accounts.NotifyOnce(ctx, account.Notification{Kind: account.NotifyIssue, Title: title, TargetPage: "issues", TargetID: key}); err != nil {
 			slog.Error("issues: notification failed", "issue", key, "reason", err.Error())
 		}
 	}
