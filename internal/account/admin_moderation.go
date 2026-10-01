@@ -33,10 +33,10 @@ const authorColumn = `COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'
 
 // The lists serve GET /api/{skins,candidate-skins,plugins,dictionaries,replies}.
 var (
-	// The skin design travels without its photo, so the console can draw the keyboard preview on each card.
+	// The skin design travels without its photo, so the console can draw the keyboard preview on each card. 也可以按图库分类筛选。
 	skinsList = adminList{
-		query:      `SELECT s.id,s.name,s.description,s.owner_id,` + authorColumn + `,s.created_at,s.design-'photo' AS design,(SELECT count(*) FROM community_skin_downloads WHERE skin_id=s.id) AS downloads,` + moderationColumns("s", "skins") + ` FROM community_skins s JOIN auth_users u ON u.id=s.owner_id`,
-		filters:    []listFilter{statusFilter},
+		query:      `SELECT s.id,s.name,s.description,s.owner_id,` + authorColumn + `,s.created_at,s.design-'photo' AS design,(SELECT count(*) FROM community_skin_downloads WHERE skin_id=s.id) AS downloads,s.category,` + moderationColumns("s", "skins") + ` FROM community_skins s JOIN auth_users u ON u.id=s.owner_id`,
+		filters:    []listFilter{candidateCategoryFilter(), statusFilter},
 		unsearched: []string{"design"},
 	}
 	// Candidate skins hold both the public gallery and each account's private library, so moderation can list either one. 也可以按图库分类筛选。
@@ -84,7 +84,7 @@ var (
 	actionDeleteReply         = deleteContent(`DELETE FROM community_resources WHERE id=$1 AND kind='reply'`)
 )
 
-// candidateCategoryFilter 让候选皮肤列表按图库分类筛选，取值即 candidateSkinCategories。
+// candidateCategoryFilter 让键盘皮肤和候选皮肤列表按图库分类筛选，取值即 candidateSkinCategories。
 func candidateCategoryFilter() listFilter {
 	values := make(map[string]string, len(candidateSkinCategories))
 	longest := 0
@@ -95,51 +95,60 @@ func candidateCategoryFilter() listFilter {
 	return listFilter{param: "category", field: "category", max: longest, values: values}
 }
 
-// actionSetCandidateSkinCategory 修改候选皮肤 ids（或 id）的图库分类，value 为 {"category":"<分类>"}。section 可省略，给出时必须是 candidate-skins。分类只是发布元数据，所以不改 updated_at（审核时固定的版本不受影响），也不改变审核状态；设为当前值同样算作命中。审计记录分类、数量、ids，单项时还有名称和原分类 from。
-func actionSetCandidateSkinCategory(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
-	if v.Section != "" && v.Section != "candidate-skins" {
-		return actionResult{}, actionFail(400, "invalid_section")
-	}
-	v.Section = "candidate-skins"
-	_, ids, err := moderationRequest(v)
-	if err != nil {
-		return actionResult{}, err
-	}
-	var value struct {
-		Category string `json:"category"`
-	}
-	d := json.NewDecoder(bytes.NewReader(v.Value))
-	d.DisallowUnknownFields()
-	if len(v.Value) == 0 || d.Decode(&value) != nil || !validCandidateSkinCategory(value.Category) {
-		return actionResult{}, actionFail(400, "invalid_category")
-	}
-	rows, err := tx.Query(ctx, `UPDATE community_candidate_skins s SET category=$2 FROM (SELECT id,category FROM community_candidate_skins WHERE id=ANY($1) FOR UPDATE) o WHERE s.id=o.id RETURNING s.id,s.name,o.category`, ids, value.Category)
-	if err != nil {
-		return actionResult{}, err
-	}
-	var changed []moderatedItem
-	var from string
-	for rows.Next() {
-		var item moderatedItem
-		if err = rows.Scan(&item.ID, &item.Name, &from); err != nil {
-			rows.Close()
+// setSkinCategory 返回修改 section 中 ids（或 id）图库分类的操作，value 为 {"category":"<分类>"}。请求里的 section 可省略，给出时必须与之相同。分类只是发布元数据，所以不改 updated_at（审核时固定的版本不受影响），也不改变审核状态；设为当前值同样算作命中。审计记录分类、数量、ids，单项时还有名称和原分类 from。table 是 moderationSections 中的固定表名，不来自请求。
+func setSkinCategory(section, table string) adminActionFunc {
+	return func(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
+		if v.Section != "" && v.Section != section {
+			return actionResult{}, actionFail(400, "invalid_section")
+		}
+		v.Section = section
+		_, ids, err := moderationRequest(v)
+		if err != nil {
 			return actionResult{}, err
 		}
-		changed = append(changed, item)
+		var value struct {
+			Category string `json:"category"`
+		}
+		d := json.NewDecoder(bytes.NewReader(v.Value))
+		d.DisallowUnknownFields()
+		if len(v.Value) == 0 || d.Decode(&value) != nil || !validCandidateSkinCategory(value.Category) {
+			return actionResult{}, actionFail(400, "invalid_category")
+		}
+		rows, err := tx.Query(ctx, `UPDATE `+table+` s SET category=$2 FROM (SELECT id,category FROM `+table+` WHERE id=ANY($1) FOR UPDATE) o WHERE s.id=o.id RETURNING s.id,s.name,o.category`, ids, value.Category)
+		if err != nil {
+			return actionResult{}, err
+		}
+		var changed []moderatedItem
+		var from string
+		for rows.Next() {
+			var item moderatedItem
+			if err = rows.Scan(&item.ID, &item.Name, &from); err != nil {
+				rows.Close()
+				return actionResult{}, err
+			}
+			changed = append(changed, item)
+		}
+		rows.Close()
+		if err = rows.Err(); err != nil {
+			return actionResult{}, err
+		}
+		if len(changed) == 0 {
+			return actionResult{}, actionFail(404, "not_found")
+		}
+		extra := map[string]any{"category": value.Category}
+		if len(changed) == 1 {
+			extra["from"] = from
+		}
+		return moderationResult(v, changed, extra), nil
 	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return actionResult{}, err
-	}
-	if len(changed) == 0 {
-		return actionResult{}, actionFail(404, "not_found")
-	}
-	extra := map[string]any{"category": value.Category}
-	if len(changed) == 1 {
-		extra["from"] = from
-	}
-	return moderationResult(v, changed, extra), nil
 }
+
+var (
+	// actionSetSkinCategory 修改社区键盘皮肤的图库分类。
+	actionSetSkinCategory = setSkinCategory("skins", "community_skins")
+	// actionSetCandidateSkinCategory 修改候选皮肤的图库分类。
+	actionSetCandidateSkinCategory = setSkinCategory("candidate-skins", "community_candidate_skins")
+)
 
 // moderationTable is where one admin section's rows live; kind narrows the shared resources table and label names the content kind in notifications. editable marks tables whose rows the author can change in place, which moves updated_at, so an approval can be pinned to the version the moderator reviewed.
 type moderationTable struct {

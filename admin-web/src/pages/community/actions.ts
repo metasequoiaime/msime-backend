@@ -20,7 +20,7 @@ function approveValue(target: Target) {
   return { from: target.moderation, ...(target.created_at ? { created_at: target.created_at } : {}), ...(target.updated_at ? { updated_at: target.updated_at } : {}) };
 }
 
-// useModeration wraps approve_content, remove_content and restore_content with the confirm dialog, toasts and the 撤销 that calls the reverse action. setCategory 修改候选皮肤的图库分类，撤销即改回原分类。
+// useModeration wraps approve_content, remove_content and restore_content with the confirm dialog, toasts and the 撤销 that calls the reverse action. setCategory 修改键盘皮肤或候选皮肤的图库分类，撤销即改回原分类。
 export function useModeration() {
   const api = useAPI();
   const client = useQueryClient();
@@ -91,7 +91,8 @@ export function useModeration() {
 
   const setCategory = useCallback(async (target: Target, from: CandidateCategory, to: CandidateCategory) => {
     if (from === to) return;
-    const change = (category: CandidateCategory) => run({ action: "set_candidate_skin_category", section: "candidate-skins", id: target.id, value: { category } });
+    const action = target.section === "skins" ? "set_skin_category" : "set_candidate_skin_category";
+    const change = (category: CandidateCategory) => run({ action, section: target.section, id: target.id, value: { category } });
     try {
       await change(to);
     } catch (error) {

@@ -24,7 +24,7 @@ export function itemMeta(section: Section, item: Item): string {
   if (section === "dictionaries" && item.entries != null) parts.push(`${count(item.entries)} 条`);
   if (item.downloads !== undefined) parts.push(`下载 ${count(item.downloads)}`);
   if (item.saves !== undefined) parts.push(`收藏 ${count(item.saves)}`);
-  if (section === "candidate-skins" && item.category) parts.push(candidateCategoryLabel(item.category));
+  if ((section === "skins" || section === "candidate-skins") && item.category) parts.push(candidateCategoryLabel(item.category));
   if (section === "candidate-skins" && item.visibility === "private") parts.push("私有");
   if (item.reports > 0) parts.push(`被举报 ${item.reports} 次`);
   return parts.join(" · ");

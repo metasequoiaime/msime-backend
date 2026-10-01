@@ -1320,8 +1320,8 @@ func TestAdminCandidateSkinCategory(t *testing.T) {
 	if w := call("GET", "/api/candidate-skins?category=anime", ""); w.Code != 400 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if w := call("GET", "/api/skins?category=tech", ""); w.Code != 400 {
-		t.Fatal("category is a candidate-skin filter only", w.Code)
+	if w := call("GET", "/api/plugins?category=tech", ""); w.Code != 400 {
+		t.Fatal("category is a skin filter only", w.Code)
 	}
 	if w := call("GET", "/api/candidate-skins/"+first, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"category":"tech"`) {
 		t.Fatal(w.Body.String())

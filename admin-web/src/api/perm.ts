@@ -101,6 +101,7 @@ export function describeAudit(entry: AuditEntry): string {
     case "approve_content": return `通过了${section}${item}`;
     case "remove_content": return `下架了${section}${item}${suffix}`;
     case "restore_content": return `恢复了${section}${item}`;
+    case "set_skin_category": return `将皮肤${text(d.name) ? `「${text(d.name)}」` : count ? ` ${count} 项` : ""}的分类改为「${candidateCategoryLabel(text(d.category))}」`;
     case "set_candidate_skin_category": return `将候选框皮肤${text(d.name) ? `「${text(d.name)}」` : count ? ` ${count} 项` : ""}的分类改为「${candidateCategoryLabel(text(d.category))}」`;
     case "delete_skin": return `删除了皮肤「${target}」${suffix}`;
     case "delete_candidate_skin": return `删除了候选框皮肤「${target}」${suffix}`;

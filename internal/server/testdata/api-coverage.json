@@ -262,6 +262,9 @@
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart",
       "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
     ],
+    "PATCH /v1/community/skins/{id}": [
+      "internal/account/community_test.go::TestCommunitySkinCategory"
+    ],
     "DELETE /v1/community/skins/{id}": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
     ],

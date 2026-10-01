@@ -61,6 +61,7 @@ var adminActions = map[string]adminActionSpec{
 	"approve_content":             {PermReviewCommunity, actionApproveContent},
 	"remove_content":              {PermReviewCommunity, actionRemoveContent},
 	"restore_content":             {PermReviewCommunity, actionRestoreContent},
+	"set_skin_category":           {PermReviewCommunity, actionSetSkinCategory},
 	"set_candidate_skin_category": {PermReviewCommunity, actionSetCandidateSkinCategory},
 	// U4 sensitive words: sensitive_words.go
 	"add_sensitive_word":       {PermReviewCommunity, actionAddSensitiveWord},

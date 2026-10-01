@@ -256,6 +256,7 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"POST /v1/community/skins":                         (*Service).communityPublish,
 		"GET /v1/community/skins/{id}":                     (*Service).communityDetail,
 		"DELETE /v1/community/skins/{id}":                  (*Service).communityDelete,
+		"PATCH /v1/community/skins/{id}":                   (*Service).communityUpdate,
 		"POST /v1/community/skins/{id}/download":           (*Service).communityDownload,
 		"PUT /v1/community/skins/{id}/rating":              (*Service).communityRate,
 

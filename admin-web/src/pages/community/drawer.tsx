@@ -105,7 +105,7 @@ function contentSection(section: Section, detail: Detail): DrawerSection | null 
   return null;
 }
 
-// CategorySelect 是候选皮肤详情里的分类下拉框；没有 review_community 权限时只读。
+// CategorySelect 是键盘皮肤和候选皮肤详情里的分类下拉框；没有 review_community 权限时只读。
 function CategorySelect({ value, disabled, onChange }: { value: CandidateCategory; disabled: boolean; onChange: (next: CandidateCategory) => void }) {
   return <select value={value} disabled={disabled} aria-label="分类" onChange={event => { if (isCandidateCategory(event.target.value)) onChange(event.target.value); }}
     className="h-8 max-w-full rounded-[9px] bg-panel px-2 text-[13px] text-ink inset-ring inset-ring-hair-2 disabled:opacity-45">
@@ -150,7 +150,7 @@ export function ContentDrawer({ target, onClose, onApprove, onRemove, onRestore,
       { label: "版本", value: detail.version ? `v${detail.version}` : detail.revision ? `第 ${detail.revision} 版` : "—" },
       ...sectionFields(section, detail),
     );
-    if (section === "candidate-skins" && detail.category && isCandidateCategory(detail.category)) {
+    if ((section === "skins" || section === "candidate-skins") && detail.category && isCandidateCategory(detail.category)) {
       const from = detail.category;
       fields.push({ label: "分类", value: <CategorySelect value={from} disabled={!canReview} onChange={to => onCategory(item, from, to)} /> });
     }

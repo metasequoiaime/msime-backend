@@ -9,6 +9,24 @@ CREATE TABLE IF NOT EXISTS community_skins (
  UNIQUE(owner_id,id)
 );
 CREATE INDEX IF NOT EXISTS community_skins_newest ON community_skins(created_at DESC,id);
+-- 社区键盘皮肤的图库分类，只是发布元数据，不属于 design。已有行迁移后为 other。取值与 Go 中的 candidateSkinCategories 一致（与候选窗皮肤共用同一组分类）。约束在下面的循环里以命名约束单独添加，因为 PostgreSQL 12 每次重跑 ADD COLUMN IF NOT EXISTS 都会再加一份行内 CHECK；之前重跑留下的副本（name1、name2……）会被删掉。
+ALTER TABLE community_skins ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'other';
+DO $$
+DECLARE c record; d record;
+BEGIN
+ FOR c IN SELECT * FROM (VALUES
+  ('community_skins','community_skins_category_check','category IN (''nature'',''guofeng'',''acg'',''cute'',''food'',''tech'',''minimal'',''other'')')
+ ) v(tbl,name,expr) LOOP
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=c.tbl::regclass AND conname=c.name) THEN
+   EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I CHECK(%s)',c.tbl,c.name,c.expr);
+  END IF;
+  FOR d IN SELECT conname FROM pg_constraint WHERE conrelid=c.tbl::regclass AND contype='c' AND conname ~ ('^'||c.name||'[0-9]+$') LOOP
+   EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I',c.tbl,d.conname);
+  END LOOP;
+ END LOOP;
+END $$;
+-- 按分类筛选的公开目录沿用 community_skins_newest 的排序（created_at DESC,id）。
+CREATE INDEX IF NOT EXISTS community_skins_category_newest ON community_skins(category,created_at DESC,id);
 CREATE TABLE IF NOT EXISTS community_skin_downloads (
  skin_id text NOT NULL REFERENCES community_skins(id) ON DELETE CASCADE,
  user_id text NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,

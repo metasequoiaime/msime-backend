@@ -4,20 +4,32 @@
 
 ## 接口
 
-- `GET /v1/community/skins?q=&offset=0&scope=&fields=`：公开目录，每页 20 条，返回 `skins` 和 `has_more`。目录不含壁纸字节。`scope=mine` 只列出自己的作品（含被审核员下架的），需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。
-- `GET /v1/community/skins/{id}?fields=`：公开详情，含完整 design；登录时额外返回自己的评分与是否为作者。
-- `POST /v1/community/skins`：需要用户会话，提交 `{id,name,description,design}`。id 为客户端生成的 UUID，用于网络失败后的安全重试。每个账号最多 50 款。
+- `GET /v1/community/skins?q=&offset=0&scope=&fields=&category=&include=`：公开目录，按发布时间倒序每页 20 条，返回 `skins` 和 `has_more`。目录不含壁纸字节。`scope=mine` 只列出自己的作品（含被审核员下架的），需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。`category` 只列出该分类的作品（见下文「键盘皮肤分类」），未知分类返回 400 `invalid_category`。
+- `GET /v1/community/skins/{id}?fields=&include=`：公开详情，含完整 design；登录时额外返回自己的评分与是否为作者。
+- `POST /v1/community/skins`：需要用户会话，提交 `{id,name,description,design,category?}`。id 为客户端生成的 UUID，用于网络失败后的安全重试。`category` 缺省（或为 null）时为 `other`，未知值或空串返回 400 `invalid_category`。每个账号最多 50 款。响应仍为 `{id}`（首次 201，重试 200），不是作品条目，所以不读 `include`。
+- `PATCH /v1/community/skins/{id}?fields=&include=`：仅作者可修改（他人的作品与不存在一样返回 404 `skin_not_found`），提交 `{"category":"<分类>"}`；category 缺省、为 null、空串或未知值都返回 400 `invalid_category`，其他键返回 400 `invalid_json`。返回 200 和与详情形状相同的作品（含完整 design），同样支持 `fields=moderation` 与 `include=category`。不改变审核状态，设为当前分类同样返回 200。被审核员下架的作品作者仍可修改。限流与其他社区接口相同，计入按地址的每分钟额度（超出 429 `rate_limit_exceeded`）。分类见下文「键盘皮肤分类」。
 - `POST /v1/community/skins/{id}/download`：需要用户会话，返回 `{design}`，每个账号只计一次下载。
 - `PUT /v1/community/skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。必须已下载，作者不可自评；重复提交更新同一条评分。
 - `DELETE /v1/community/skins/{id}`：仅作者可删除；不删除其他设备已下载的本地副本。
 
-摘要字段：id、name、description、author、design、downloads、rating_count、rating_average、owned、my_rating，以及仅在 `fields=moderation` 时出现在自己作品上的 moderation。人数代表累计去重下载账号数，不代表实时活跃使用人数。发布之后不允许原地替换设计以继承旧版评分；修改设计需发布新作品。
+摘要字段：id、name、description、author、design、downloads、rating_count、rating_average、owned、my_rating，仅在 `fields=moderation` 时出现在自己作品上的 moderation，以及仅在 `include=category` 时出现的 category。人数代表累计去重下载账号数，不代表实时活跃使用人数。发布之后不允许原地替换设计以继承旧版评分；修改设计需发布新作品。
 
 标题最多 32 个 Unicode 字符，说明最多 280 个；设计颜色为 24-bit RGB、数值范围与 iOS 编辑器一致。JSON 请求最大 710,000 字节，壁纸最多 512,000 字节且长宽均不超过 1024。服务器解码后重编码 JPEG，移除原图元数据。未知字段或错误图片会被拒绝。
 
 作者查看自己作品的审核状态：列表和详情带 `fields=moderation` 时，当前用户自己的作品多一个 `moderation` 字段（`approved`、`pending` 或 `removed`）；他人的作品和匿名访问永远不带，也不返回下架原因。不带这个参数时响应与以前逐字节相同，因为已发布的客户端按拒绝未知字段的方式解析。社区是事后审核，`pending` 的作品已经公开，客户端只需对 `removed` 显示「已下架」徽标。其他 `fields` 值返回 400 `invalid_fields`。
 
 发布时名称、描述等文本命中拦截级敏感词返回 422 `blocked_content`（提示「内容包含不允许发布的词语，请修改后再提交」，不要说成服务故障）；敏感词库暂时无法加载时返回 503 `screening_unavailable` 并带 `Retry-After`，作品未保存，稍后重试即可。被封禁的账号返回 403 `account_banned`。
+
+### 键盘皮肤分类
+
+键盘皮肤的图库分类与候选窗皮肤共用同一组 id（`nature`、`guofeng`、`acg`、`cute`、`food`、`tech`、`minimal`、`other`，文案见 [候选窗皮肤 · 分类](#分类)），客户端按 id 显示自己的文案。分类是作品的发布元数据，不写进 design，也不参与 design 校验。
+
+- 分类字段 `category` 只在客户端声明支持时出现：列表、详情和 PATCH 的查询串带 `include=category` 时，每个条目都带 `"category": "<分类>"`；不带时响应与引入分类之前逐字节相同。`include` 只接受空值和 `category`，其他值返回 400 `invalid_include`。`include=category` 与 `fields=moderation` 互相独立，可以同时使用。
+- 发布时用 `category` 指定，缺省为 `other`；引入分类之前发布的作品迁移后都是 `other`。分类不参与发布重试的比较：同一 id、内容相同而分类不同的重试仍返回 200，保留已存的分类，之后改分类用 PATCH。
+- 作者用 `PATCH /v1/community/skins/{id}` 修改，审核员在管理后台修改（`set_skin_category`，见 [管理后台](admin.md)）。
+- 滚动升级期间旧版本副本仍在服务：它们忽略 `include` 和 `category` 查询参数（响应不带分类、列表不筛选），会以 400 `invalid_json` 拒绝发布请求体里的 `category` 键，且没有 PATCH 路由（返回纯文本的 405，不是 JSON 错误体）。客户端应把缺少的 `category` 当作 `other`，并在所有副本升级之后再在发布请求体中发送 `category` 或调用 PATCH。
+
+加入分类的版本在启动时给 `community_skins` 增加 `category text NOT NULL DEFAULT 'other'`（已有行为 `other`，PostgreSQL 11 起带常量默认值的加列不重写表）、命名约束 `community_skins_category_check` 和服务按分类筛选的索引 `community_skins_category_newest (category, created_at DESC, id)`，重复执行不会改变任何东西；启动探测会检查这一列，缺列时自动执行迁移。没有新表，所以不需要新的授权：按最小权限部署时只需在上线前用迁移账号执行新版本的 `-migrate-users`，运行角色对这张表已有的 SELECT/INSERT/UPDATE/DELETE 覆盖新列。旧二进制插入的行取默认值 `other`，回滚不需要处理这一列。
 
 ## 账号与 K8s
 

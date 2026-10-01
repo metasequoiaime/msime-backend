@@ -110,6 +110,9 @@ func TestConsoleEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 		{"restore", "POST", "/api/actions", func(consoleFailureFixture) string {
 			return `{"action":"restore_content","section":"replies","id":"fail-reply"}`
 		}},
+		{"skin category", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"set_skin_category","id":"fail-skin","value":{"category":"food"}}`
+		}},
 		{"candidate category", "POST", "/api/actions", func(consoleFailureFixture) string {
 			return `{"action":"set_candidate_skin_category","id":"fa334455-1234-4234-8234-123456789abc","value":{"category":"food"}}`
 		}},
@@ -212,6 +215,7 @@ func TestConsolePublicEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 		{"site mirrors", "GET", "/v1/site/download-mirrors", "", false},
 		{"skins", "GET", "/v1/community/skins", "", true},
 		{"skin", "GET", "/v1/community/skins/fail-skin", "", true},
+		{"skin category", "PATCH", "/v1/community/skins/fail-skin", `{"category":"food"}`, true},
 		{"delete skin", "DELETE", "/v1/community/skins/fail-skin", "", true},
 		{"resources", "GET", "/v1/community/resources?kind=dictionary", "", true},
 		{"resource", "GET", "/v1/community/resources/fail-dict", "", true},
