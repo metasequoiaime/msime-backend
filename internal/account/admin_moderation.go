@@ -184,7 +184,7 @@ func bannedOwnerGuard(ctx context.Context, tx pgx.Tx, section moderationTable, i
 
 // actionApproveContent approves the items ids (or id) of section. A pending row keeps its automatic flag in moderation_reason, so undoing the approval brings the warning back; a removed row's removal reason is cleared.
 //
-// With value {"from":"pending"|"removed","updated_at":"<RFC 3339>"} the approval applies only to rows still in the state the moderator saw and, for sections the author can edit, still at the version the moderator reviewed (updated_at as the list or detail returned it). Otherwise nothing changes and the action fails with 409 conflict, so a stale card can neither republish an item another moderator just removed nor publish an author's edit nobody reviewed.
+// With value {"from":"pending"|"removed","created_at":"<RFC 3339>","updated_at":"<RFC 3339>"} the approval applies only to rows still in the state the moderator saw, still the same row (created_at, since an author can delete an item and publish different content under the same id) and, for sections the author can edit, still at the version the moderator reviewed (updated_at), each as the list or detail returned it. Otherwise nothing changes and the action fails with 409 conflict, so a stale card can neither republish an item another moderator just removed nor publish content nobody reviewed.
 func actionApproveContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
 	section, ids, err := moderationRequest(v)
 	if err != nil {
@@ -192,6 +192,7 @@ func actionApproveContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRe
 	}
 	var expect struct {
 		From      string     `json:"from"`
+		CreatedAt *time.Time `json:"created_at"`
 		UpdatedAt *time.Time `json:"updated_at"`
 	}
 	pinned := len(v.Value) > 0 && string(v.Value) != "null"
@@ -205,15 +206,15 @@ func actionApproveContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRe
 	if err = bannedOwnerGuard(ctx, tx, section, ids); err != nil {
 		return actionResult{}, err
 	}
-	// $3 and $4 are NULL without a pin, which leaves the conditions true.
+	// $3, $4 and $5 are NULL without a pin, which leaves the conditions true.
 	var from *string
 	if pinned {
 		from = &expect.From
 	}
-	condition := ` AND ($3::text IS NULL OR moderation=$3)`
-	args := []any{ids, adminActor(ctx), from}
+	condition := ` AND ($3::text IS NULL OR moderation=$3) AND ($4::timestamptz IS NULL OR created_at=$4)`
+	args := []any{ids, adminActor(ctx), from, expect.CreatedAt}
 	if section.editable {
-		condition += ` AND ($4::timestamptz IS NULL OR updated_at=$4)`
+		condition += ` AND ($5::timestamptz IS NULL OR updated_at=$5)`
 		args = append(args, expect.UpdatedAt)
 	}
 	changed, err := moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET moderation='approved',previous_moderation=NULL,moderation_reason=CASE WHEN moderation='pending' THEN moderation_reason END,moderated_by=$2,moderated_at=now()`+section.match()+condition+` RETURNING id,name`, args...)

@@ -871,6 +871,39 @@ func TestPinnedApprovalRefusesStaleTargets(t *testing.T) {
 	}
 }
 
+// A stale approval pinned to a row's created_at changes nothing once the author deleted the item and published different content under the same id.
+func TestPinnedApprovalRefusesRepublishedItem(t *testing.T) {
+	_, a, owner, _, call := moderationFixture(t)
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	skin := "b9334455-1234-4234-8234-123456789abc"
+	apiRequest(t, mux, "POST", "/v1/community/skins", `{"id":"`+skin+`","name":"晚霞","description":"示例","design":`+communityFixture+`}`, owner.AccessToken, 201)
+	var list struct {
+		Items []struct {
+			CreatedAt string `json:"created_at"`
+		}
+	}
+	if w := call("GET", "/api/skins?q="+skin, ""); json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list.Items) != 1 || list.Items[0].CreatedAt == "" {
+		t.Fatal(w.Body.String())
+	}
+	reviewed := list.Items[0].CreatedAt
+	time.Sleep(2 * time.Millisecond)
+	apiRequest(t, mux, "DELETE", "/v1/community/skins/"+skin, "", owner.AccessToken, 200)
+	apiRequest(t, mux, "POST", "/v1/community/skins", `{"id":"`+skin+`","name":"没人审过","description":"新内容","design":`+communityFixture+`}`, owner.AccessToken, 201)
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"`+skin+`","value":{"from":"pending","created_at":"`+reviewed+`"}}`); w.Code != 409 {
+		t.Fatal("a republished item nobody reviewed was approved", w.Code, w.Body.String())
+	}
+	var detail struct {
+		CreatedAt string `json:"created_at"`
+	}
+	if w := call("GET", "/api/skins/"+skin, ""); json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.CreatedAt == "" {
+		t.Fatal(w.Body.String())
+	}
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"`+skin+`","value":{"from":"pending","created_at":"`+detail.CreatedAt+`"}}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
 // Undoing the approval of a rejected item puts it back with the restore state it had, so a later restore returns it to review instead of publishing it.
 func TestUndoingApprovalOfRemovedItemKeepsItsRestoreState(t *testing.T) {
 	db, _, _, _, call := moderationFixture(t)

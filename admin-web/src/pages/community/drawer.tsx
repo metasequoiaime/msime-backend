@@ -130,7 +130,7 @@ export function ContentDrawer({ target, onClose, onApprove, onRemove, onRestore 
   const sections: DrawerSection[] = [];
   const actions: DrawerAction[] = [];
   if (detail) {
-    const item: Target = { section, id: detail.id, name: detail.name, moderation: detail.moderation, moderation_reason: detail.moderation_reason, previous_moderation: detail.previous_moderation, updated_at: detail.updated_at };
+    const item: Target = { section, id: detail.id, name: detail.name, moderation: detail.moderation, moderation_reason: detail.moderation_reason, previous_moderation: detail.previous_moderation, created_at: detail.created_at, updated_at: detail.updated_at };
     pills.push({ text: moderationLabels[detail.moderation], tone: moderationTones[detail.moderation] });
     if (detail.report_count > 0) pills.push({ text: `被举报 ${detail.report_count} 次`, tone: "bad" });
     if (detail.owner_banned) pills.push({ text: "作者已封禁", tone: "bad" });

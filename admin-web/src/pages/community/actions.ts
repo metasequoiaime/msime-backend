@@ -12,12 +12,12 @@ function failure(error: unknown): string {
   return isAPIError(error, "conflict") ? "该内容刚被其他审核员处理或被作者修改，未做改动，请查看最新内容后重试。" : errorMessage(error);
 }
 
-// Target is what an action needs to know about an item, from a list row or a detail. updated_at is the version the moderator is looking at (only editable sections have one) and previous_moderation is a removed item's restore state.
-export type Target = { section: Section; id: string; name: string; moderation: Moderation; moderation_reason?: string | null; previous_moderation?: Moderation | null; updated_at?: string | null };
+// Target is what an action needs to know about an item, from a list row or a detail. updated_at is the version the moderator is looking at (only editable sections have one) and previous_moderation is a removed item's restore state. created_at tells the row apart from one the author published under the same id after deleting it.
+export type Target = { section: Section; id: string; name: string; moderation: Moderation; moderation_reason?: string | null; previous_moderation?: Moderation | null; created_at?: string; updated_at?: string | null };
 
-// approveValue pins an approval to the state and version the moderator saw, so a stale card cannot republish a removed item or publish an unreviewed edit.
+// approveValue pins an approval to the state, row and version the moderator saw, so a stale card cannot republish a removed item or publish content nobody reviewed.
 function approveValue(target: Target) {
-  return target.updated_at ? { from: target.moderation, updated_at: target.updated_at } : { from: target.moderation };
+  return { from: target.moderation, ...(target.created_at ? { created_at: target.created_at } : {}), ...(target.updated_at ? { updated_at: target.updated_at } : {}) };
 }
 
 // useModeration wraps approve_content, remove_content and restore_content with the confirm dialog, toasts and the 撤销 that calls the reverse action.
