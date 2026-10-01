@@ -177,10 +177,32 @@ func requireActionID(v actionRequest) error {
 	return nil
 }
 
+// Action value limits, in bytes of the raw JSON value. Most actions carry a small object; a notice carries a body of up to noticeBodyMax characters, which JSON may send as \u escapes (12 bytes for a character outside the BMP), so notice actions get room for that.
+const (
+	actionValueMax       = 8 << 10
+	noticeActionValueMax = 256 << 10
+	// actionBodyMax bounds the whole request: the largest value plus the generic fields (100 ids, reason, section).
+	actionBodyMax = noticeActionValueMax + 16<<10
+)
+
+// actionValueLimits raises the value limit for the actions that need more than actionValueMax.
+var actionValueLimits = map[string]int{
+	"save_notice_draft": noticeActionValueMax,
+	"publish_notice":    noticeActionValueMax,
+}
+
+// actionValueLimit is the largest value, in bytes, the action accepts.
+func actionValueLimit(action string) int {
+	if limit, ok := actionValueLimits[action]; ok {
+		return limit
+	}
+	return actionValueMax
+}
+
 // adminAction runs one registered action and its audit record in a single transaction; a failed action leaves no audit record.
 func (a *Service) adminAction(w http.ResponseWriter, r *http.Request) {
 	var v actionRequest
-	if !read(w, r, &v) {
+	if !readSized(w, r, &v, actionBodyMax) {
 		return
 	}
 	switch {
@@ -196,7 +218,7 @@ func (a *Service) adminAction(w http.ResponseWriter, r *http.Request) {
 	case len(v.Section) > 64:
 		writeError(w, 400, "invalid_section")
 		return
-	case len(v.Value) > 8192:
+	case len(v.Value) > actionValueLimit(v.Action):
 		writeError(w, 400, "invalid_value")
 		return
 	}

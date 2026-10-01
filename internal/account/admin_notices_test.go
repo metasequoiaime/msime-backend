@@ -384,3 +384,31 @@ func TestAdminNoticesKeepsLiveNoticesAheadOfArchived(t *testing.T) {
 		t.Fatal(archived, live, len(list.Items))
 	}
 }
+
+// A notice body may use the whole 20000-character column, sent as plain UTF-8 or as \u escapes; other actions keep the 8 KiB value limit.
+func TestNoticeBodyUsesTheFullColumn(t *testing.T) {
+	a, db := noticeTestService(t)
+	owner := adminTestContext(context.Background(), "legacy-token")
+	for name, body := range map[string]string{
+		"utf-8":   strings.Repeat("水", noticeBodyMax),
+		"escaped": strings.Repeat(`水`, noticeBodyMax),
+	} {
+		status, out := noticeAction(t, a, owner, `{"action":"save_notice_draft","value":{"title":"长公告","targets":["all"],"channels":["site"],"body":"`+body+`"}}`)
+		if status != 200 {
+			t.Fatal(name, status, out)
+		}
+		var stored int
+		if err := db.pool.QueryRow(context.Background(), `SELECT length(body) FROM admin_notices WHERE id=$1`, out["id"]).Scan(&stored); err != nil || stored != noticeBodyMax {
+			t.Fatal(name, stored, err)
+		}
+		if status, out := noticeAction(t, a, owner, `{"action":"publish_notice","id":"`+out["id"].(string)+`"}`); status != 200 {
+			t.Fatal(name, status, out)
+		}
+	}
+	if status, out := noticeAction(t, a, owner, `{"action":"save_notice_draft","value":{"title":"超长","targets":["all"],"body":"`+strings.Repeat("水", noticeBodyMax+1)+`"}}`); status != 400 || errorCode(out) != "invalid_body" {
+		t.Fatal(status, out)
+	}
+	if status, out := noticeAction(t, a, owner, `{"action":"add_sensitive_word","value":{"pattern":"`+strings.Repeat("a", actionValueMax)+`"}}`); status != 400 || errorCode(out) != "invalid_value" {
+		t.Fatal("generic value limit", status, out)
+	}
+}

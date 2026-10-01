@@ -21,7 +21,7 @@ type actionRequest struct {
 	Reason string `json:"reason"`
 	// Section names the content kind for community actions: skins, candidate-skins, plugins, dictionaries or replies.
 	Section string `json:"section"`
-	// Value is an action-specific JSON payload, at most 8 KiB.
+	// Value is an action-specific JSON payload, at most 8 KiB except for the actions listed in actionValueLimits.
 	Value json.RawMessage `json:"value"`
 }
 
