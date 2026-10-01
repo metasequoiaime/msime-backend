@@ -2,8 +2,8 @@ import { useContext } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { APICredentialsContext, APIError, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
-import type { Detail, Section } from "../../api/community";
-import { detailSchema, moderationLabels, moderationTones, pluginKindLabels, resourceContentSchema, sectionLabels, sensitiveCategoryLabels, sensitiveLevelLabels } from "../../api/community";
+import type { CandidateCategory, Detail, Section } from "../../api/community";
+import { candidateCategories, candidateCategoryLabels, detailSchema, isCandidateCategory, moderationLabels, moderationTones, pluginKindLabels, resourceContentSchema, sectionLabels, sensitiveCategoryLabels, sensitiveLevelLabels } from "../../api/community";
 import { relativeTime } from "../../shell/notifications";
 import { usePermissions } from "../../shell/permissions";
 import { DetailDrawer } from "../../ui/drawer";
@@ -105,16 +105,25 @@ function contentSection(section: Section, detail: Detail): DrawerSection | null 
   return null;
 }
 
+// CategorySelect 是候选皮肤详情里的分类下拉框；没有 review_community 权限时只读。
+function CategorySelect({ value, disabled, onChange }: { value: CandidateCategory; disabled: boolean; onChange: (next: CandidateCategory) => void }) {
+  return <select value={value} disabled={disabled} aria-label="分类" onChange={event => { if (isCandidateCategory(event.target.value)) onChange(event.target.value); }}
+    className="h-8 max-w-full rounded-[9px] bg-panel px-2 text-[13px] text-ink inset-ring inset-ring-hair-2 disabled:opacity-45">
+    {candidateCategories.map(category => <option key={category} value={category}>{candidateCategoryLabels[category]}</option>)}
+  </select>;
+}
+
 export type ContentDrawerProps = {
   target: { section: Section; id: string } | null;
   onClose: () => void;
   onApprove: (target: Target) => void;
   onRemove: (target: Target) => void;
   onRestore: (target: Target) => void;
+  onCategory: (target: Target, from: CandidateCategory, to: CandidateCategory) => void;
 };
 
 // ContentDrawer is the right-hand detail of one community item, with its reports, the live sensitive-word check and the author's other works.
-export function ContentDrawer({ target, onClose, onApprove, onRemove, onRestore }: ContentDrawerProps) {
+export function ContentDrawer({ target, onClose, onApprove, onRemove, onRestore, onCategory }: ContentDrawerProps) {
   const api = useAPI();
   const { can } = usePermissions();
   const section = target?.section ?? "skins";
@@ -141,6 +150,10 @@ export function ContentDrawer({ target, onClose, onApprove, onRemove, onRestore 
       { label: "版本", value: detail.version ? `v${detail.version}` : detail.revision ? `第 ${detail.revision} 版` : "—" },
       ...sectionFields(section, detail),
     );
+    if (section === "candidate-skins" && detail.category && isCandidateCategory(detail.category)) {
+      const from = detail.category;
+      fields.push({ label: "分类", value: <CategorySelect value={from} disabled={!canReview} onChange={to => onCategory(item, from, to)} /> });
+    }
     if (detail.moderated_by) fields.push({ label: "审核人", value: detail.moderated_by, mono: true }, { label: "审核时间", value: formatTime(detail.moderated_at) });
     if (detail.moderation === "removed" && detail.moderation_reason) fields.push({ label: "下架原因", value: detail.moderation_reason === "owner_banned" ? "作者账号被封禁" : detail.moderation_reason });
     if (detail.description) sections.push({ title: "简介", items: [{ text: detail.description }] });

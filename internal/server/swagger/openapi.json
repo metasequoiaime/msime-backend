@@ -11600,9 +11600,40 @@
               "default": ""
             },
             "description": "sync 表示在响应中接收同步字段并可看到自己的私有作品。"
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "nature",
+                "guofeng",
+                "acg",
+                "cute",
+                "food",
+                "tech",
+                "minimal",
+                "other"
+              ]
+            },
+            "description": "只列出该图库分类的作品。"
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "category"
+              ],
+              "default": ""
+            },
+            "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
-        "description": "公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，需要用户会话；只有 scope=mine 且 fields=sync 时才包含自己的私有作品。 详见 docs/skin-community.md。",
+        "description": "公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，需要用户会话；只有 scope=mine 且 fields=sync 时才包含自己的私有作品。category 按图库分类筛选，未知分类返回 400 invalid_category。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11700,6 +11731,20 @@
                             "type": "string",
                             "pattern": "^[0-9a-f]{64}$",
                             "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
+                          },
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "nature",
+                              "guofeng",
+                              "acg",
+                              "cute",
+                              "food",
+                              "tech",
+                              "minimal",
+                              "other"
+                            ],
+                            "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
                           }
                         }
                       }
@@ -11748,7 +11793,21 @@
             "userSession": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "category"
+              ],
+              "default": ""
+            },
+            "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
+          }
+        ],
         "description": "请求最多 3,200,000 字节（高于其他 JSON 接口的 64 KiB）。只接受 skin.toml 加 PNG/JPEG 图片（最多 3 个文件，均须被清单引用）：单个图片不超过 1 MiB、合计不超过 2 MiB，每边 1 到 2048 像素、整包不超过 800 万像素；必须用 preview 指定一张包内图片作为预览图（重新编码后不超过 256 KiB），公开作品的 [license] 必须填写非空 assets，私有作品可省略。服务器解码后重新编码图片，去除 EXIF、XMP、ICC 等元数据。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 100 款，其中公开最多 20 款。公开发布每小时最多 10 次，私有创建与替换共用每小时 60 次。 详见 docs/skin-community.md。",
         "responses": {
           "201": {
@@ -11841,6 +11900,20 @@
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$",
                       "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "nature",
+                        "guofeng",
+                        "acg",
+                        "cute",
+                        "food",
+                        "tech",
+                        "minimal",
+                        "other"
+                      ],
+                      "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
                     }
                   }
                 }
@@ -11961,6 +12034,20 @@
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$",
                       "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "nature",
+                        "guofeng",
+                        "acg",
+                        "cute",
+                        "food",
+                        "tech",
+                        "minimal",
+                        "other"
+                      ],
+                      "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
                     }
                   }
                 }
@@ -12010,6 +12097,20 @@
                       "public"
                     ],
                     "description": "缺省为 public；带上该字段即选择在响应中接收同步字段。"
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "nature",
+                      "guofeng",
+                      "acg",
+                      "cute",
+                      "food",
+                      "tech",
+                      "minimal",
+                      "other"
+                    ],
+                    "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。缺省为 other，未知值返回 400 invalid_category；不计入 request_sha256。"
                   }
                 },
                 "required": [
@@ -12146,6 +12247,19 @@
               "default": ""
             },
             "description": "sync 表示在响应中接收同步字段并可看到自己的私有作品。"
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "category"
+              ],
+              "default": ""
+            },
+            "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
         "description": "公开详情；登录时额外返回自己的评分与是否为作者。私有作品仅作者带 fields=sync 可见，其他情况返回 404。 详见 docs/skin-community.md。",
@@ -12240,6 +12354,20 @@
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$",
                       "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "nature",
+                        "guofeng",
+                        "acg",
+                        "cute",
+                        "food",
+                        "tech",
+                        "minimal",
+                        "other"
+                      ],
+                      "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
                     }
                   }
                 }
@@ -12291,6 +12419,19 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "category"
+              ],
+              "default": ""
+            },
+            "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
         "description": "仅作者可替换，校验与限制同发布；清单 id 须与原包相同，否则 409。保留 id、可见性、发布时间、下载与评分，重新计算 request_sha256 并更新 updated_at；与已存内容相同时不写入。计入每小时 60 次的私有额度。 详见 docs/skin-community.md。",
@@ -12385,6 +12526,20 @@
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$",
                       "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "nature",
+                        "guofeng",
+                        "acg",
+                        "cute",
+                        "food",
+                        "tech",
+                        "minimal",
+                        "other"
+                      ],
+                      "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
                     }
                   }
                 }
@@ -12461,7 +12616,7 @@
         }
       },
       "patch": {
-        "summary": "作者切换候选窗皮肤可见性",
+        "summary": "作者修改候选窗皮肤的可见性或分类",
         "tags": [
           "皮肤社区"
         ],
@@ -12479,9 +12634,22 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "category"
+              ],
+              "default": ""
+            },
+            "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
-        "description": "仅作者可切换。转为公开须声明 assets 许可、占用公开配额，并计入每小时 10 次的发布额度。 详见 docs/skin-community.md。",
+        "description": "仅作者可修改，visibility 与 category 至少带一个（都缺省返回 400 invalid_visibility）。转为公开须声明 assets 许可、占用公开配额，并计入每小时 10 次的发布额度；修改分类计入每小时 60 次的私有额度，不更新 updated_at，也不重新进入审核。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -12573,6 +12741,20 @@
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$",
                       "description": "同步字段，仅作者可见：上传请求原始字节的摘要。"
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "nature",
+                        "guofeng",
+                        "acg",
+                        "cute",
+                        "food",
+                        "tech",
+                        "minimal",
+                        "other"
+                      ],
+                      "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
                     }
                   }
                 }
@@ -12617,12 +12799,24 @@
                       "private",
                       "public"
                     ]
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "nature",
+                      "guofeng",
+                      "acg",
+                      "cute",
+                      "food",
+                      "tech",
+                      "minimal",
+                      "other"
+                    ],
+                    "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。"
                   }
                 },
-                "required": [
-                  "visibility"
-                ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "minProperties": 1
               }
             }
           }
