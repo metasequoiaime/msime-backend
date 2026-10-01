@@ -690,3 +690,51 @@ func TestDictPRSensitiveFlagDoesNotCountHits(t *testing.T) {
 		t.Fatal("review views counted sensitive hits", hits, err)
 	}
 }
+
+// Every GitHub call a review page request makes can fail; whichever one does, the request answers with an error the console understands (or, for the counts that only decorate the list, with the list itself), and never with a success that hides the failure.
+func TestDictPRGitHubFailuresAtEveryCall(t *testing.T) {
+	s, _, _, _ := dictPRServer(t)
+	s.config.Engine.Binary = fakeEngine(t, `request=$(cat); case "$request" in *listed_english_batch*) echo '{"listed":[false]}';; *) echo '{"listed":[false,false,false]}';; esac`)
+	cases := []struct{ method, path, body string }{
+		{"GET", "/api/dict-prs", ""},
+		{"GET", "/api/dict-prs/12", ""},
+		{"POST", "/api/dict-prs/12/trim", `{"keep":[0,2,4],"head_sha":"head12"}`},
+		{"POST", "/api/dict-prs/12/approve", `{"keep":[0,2,4],"head_sha":"head12"}`},
+		{"POST", "/api/dict-prs/12/approve", `{}`},
+		{"POST", "/api/dict-prs/12/reject", `{"reason":"拼音不规范"}`},
+	}
+	for _, tc := range cases {
+		f := newFakeDictRepo(t)
+		s.adminGitHub = dictGitHubClient(t, f)
+		baseline := dictCall(s, tc.method, tc.path, tc.body)
+		if baseline.Code != 200 {
+			t.Fatal(tc, baseline.Code, baseline.Body.String())
+		}
+		f.mu.Lock()
+		calls := slices.Compact(slices.Sorted(slices.Values(f.calls)))
+		f.mu.Unlock()
+		for _, call := range calls {
+			if strings.HasPrefix(call, "POST /app/") {
+				continue
+			}
+			for _, status := range []int{404, 409, 422, 500} {
+				// A file a commit does not have reads as empty, so a 404 on a file read is not a failure.
+				if status == 404 && strings.HasPrefix(call, "GET ") && strings.Contains(call, "/contents/") {
+					continue
+				}
+				f := newFakeDictRepo(t)
+				f.status[call] = status
+				s.adminGitHub = dictGitHubClient(t, f)
+				w := dictCall(s, tc.method, tc.path, tc.body)
+				// Optional calls: the list's entry counts, and the retitle after a trim, which only logs when it fails.
+				optional := (tc.path == "/api/dict-prs" && strings.Contains(call, "/contents/")) || (!strings.HasSuffix(tc.path, "/reject") && strings.HasPrefix(call, "PATCH "))
+				if w.Code == 200 && !optional {
+					t.Fatalf("%s %s with %s answering %d: HTTP 200 %s", tc.method, tc.path, call, status, w.Body.String())
+				}
+				if w.Code != 200 && !strings.Contains(w.Body.String(), `"error"`) {
+					t.Fatalf("%s %s with %s answering %d: HTTP %d %s", tc.method, tc.path, call, status, w.Code, w.Body.String())
+				}
+			}
+		}
+	}
+}
