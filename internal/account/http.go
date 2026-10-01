@@ -125,7 +125,7 @@ func (a *Service) RateLimit(ctx context.Context, scope, subject string, limit in
 	return a.store.Rate(ctx, scope+":"+hash(subject), limit, window)
 }
 func IsPath(path string) bool {
-	return strings.HasPrefix(path, "/v1/community/") || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
+	return strings.HasPrefix(path, "/v1/community/") || path == siteDownloadMirrorsPath || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
 }
 
 // accountRouteTimeout is the context each mounted route runs under: 15 s, except the transfers whose body alone can take longer: the dictionary snapshot restore, a candidate-skin publish or replacement, and a plugin pack publish or download.
@@ -151,6 +151,7 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"PUT /v1/community/resources/{id}/save":            (*Service).resourceSave,
 		"PUT /v1/community/resources/{id}/rating":          (*Service).resourceRate,
 		"GET /v1/community/stats":                          (*Service).communityStats,
+		"GET /v1/site/download-mirrors":                    (*Service).siteDownloadMirrors,
 		"GET /v1/community/candidate-skins":                (*Service).communityCandidateList,
 		"POST /v1/community/candidate-skins":               (*Service).communityCandidatePublish,
 		"GET /v1/community/candidate-skins/sync":           (*Service).communityCandidateSync,

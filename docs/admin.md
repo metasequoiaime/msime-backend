@@ -138,7 +138,7 @@ PostgreSQL 集成测试需设置 `MSIME_TEST_DATABASE_URL`，数据库名称必�
 
 接口请求体为 `{"email":"admin@example.com","action":"add|enable|disable|revoke"}`，其中 action 必须是四个值之一。重复添加返回 409；无效邮箱/动作返回 400，非超级管理员或修改受保护账号返回 403。普通管理员记录不创建输入法用户账户，也不发送邀请邮件；被添加者直接使用其 Google 账号登录。
 
-上线前需执行更新后的 `internal/account/admin_schema.sql`，新增 `admin_members` 表，归既有迁移所有者所有，并授予运行角色该表 SELECT/INSERT/UPDATE/DELETE；缺少迁移时后台拒绝启动。无需把 Google 密钥或超级管理员邮箱写入前端。
+上线前需执行更新后的 `internal/account/admin_schema.sql`，新增 `admin_members` 与 `site_settings` 表，归既有迁移所有者所有，并授予运行角色这些表 SELECT/INSERT/UPDATE/DELETE（`GRANT SELECT, INSERT, UPDATE, DELETE ON admin_members, site_settings TO msime_backend;`，已配置 default privileges 时无需手动授权）；缺少迁移时服务拒绝启动。无需把 Google 密钥或超级管理员邮箱写入前端。
 
 ### 用户详情与单个会话管理
 
@@ -162,3 +162,9 @@ PostgreSQL 集成测试需设置 `MSIME_TEST_DATABASE_URL`，数据库名称必�
 ### 皮肤外观预览
 
 社区皮肤详情顶部支持 26 键和九键示意预览，使用经过类型和范围校验的设计参数渲染 SVG，支持 RGB 配色、渐变、圆角、边框、透明度、阴影、纹理、材质、等宽字体和内嵌 JPEG 背景。图标使用 Lucide，不加载皮肤提供的外部 URL、CSS 或脚本；不需要放宽后台 CSP。未知或非法设计格式显示提示，原始 JSON 仍可展开检查。此预览用于外观检查，字体、纹理和材质细节可能与原生客户端略有差异。
+
+### 站点设置
+
+「系统管理 → 站点设置」页面维护官网下载页的 Windows 安装包蓝奏云盘链接，普通管理员和超级管理员都可修改。`GET /api/site-settings` 返回 `{"lanzou_url","updated_at","updated_by"}`；`POST /api/site-settings` 请求体为 `{"lanzou_url":"https://..."}`，空字符串表示清空。链接必须是带主机名的 `https://` 绝对地址，不能含账号密码，最长 512 字节，否则返回 400。修改与审计（`set_lanzou_url` / `clear_lanzou_url`）写在同一事务中；清空后仍保留最近修改时间和操作者。
+
+官网通过 API 域名的公开接口 `GET /v1/site/download-mirrors` 读取，响应为 `{"lanzou_url","updated_at"}`，未设置或已清空时两个字段均为空字符串。接口免令牌，按 IP 每分钟 120 次限流，成功响应带 `Cache-Control: public, max-age=60`；官网侧再缓存约 10 分钟，修改后最多约 10 分钟生效。数据存放在 `admin_schema.sql` 新增的 `site_settings` 表，迁移与授权见「管理员账号管理」一节。

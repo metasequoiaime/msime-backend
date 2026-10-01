@@ -1,4 +1,4 @@
-import { ShieldCheck, ArrowRight, BookOpen, CircleAlert, Download, History, LayoutDashboard, MessageSquare, RefreshCw, Shirt, Users, Activity } from "lucide-react";
+import { ShieldCheck, ArrowRight, BookOpen, CircleAlert, Download, Globe, History, LayoutDashboard, MessageSquare, RefreshCw, Shirt, Users, Activity } from "lucide-react";
 
 const icons = {
   admins: ShieldCheck,
@@ -11,6 +11,7 @@ const icons = {
   replies: MessageSquare,
   audit: History,
   system: Activity,
+  "site-settings": Globe,
   refresh: RefreshCw,
   "arrow-right": ArrowRight,
 } as const;
