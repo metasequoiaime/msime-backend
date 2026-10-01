@@ -1,17 +1,19 @@
 # 插件社区
 
-社区插件接口位于 `/v1/community/plugins`，分发客户端插件包：按键音（`sound`）、背景音乐（`music`）、命令表（`command_table`）和打字特效参数（`effect`），与客户端的 `PluginKind` 一致。插件包是一个 zip，内含 `plugin.toml`、被引用的音频和可选的说明文本（`effect` 包没有音频）。服务器只校验、存储和原样分发字节，从不解码音频、执行脚本或加载包内任何内容；客户端安装前仍按自己的规则再校验一次。
+社区插件接口位于 `/v1/community/plugins`，分发客户端插件包：音效包（`sound`）、音乐包（`music`）、指令表（`command_table`）、特效包（`effect`）、辅助码表（`helpcode`）、符号集（`symbol_set`）、短语表（`phrase_table`）和单词本（`wordbook`），与客户端的 `PluginKind` 一致。插件包是一个 zip，内含 `plugin.toml`、被引用的音频或数据文件和可选的说明文本（`effect`、`phrase_table`、`symbol_set` 只有清单）。新增的四种类型都是纯数据，不能带可执行内容。服务器只校验、存储和原样分发字节，从不解码音频、执行脚本或加载包内任何内容；客户端安装前仍按自己的规则再校验一次。
 
 ## 接口
 
-- `GET /v1/community/plugins?q=&kind=&offset=0&scope=&fields=`：公开目录，按发布时间倒序每页 20 条，返回 `plugins` 和 `has_more`。`kind` 为空表示全部，否则只能是上述几种之一；`q` 按名称不区分大小写子串匹配，最长 128 字节；`offset` 为 0 到 100000。`scope=mine` 只列出自己的作品（含被审核员下架的），需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。目录不含 zip 字节和清单。
-- `GET /v1/community/plugins/{id}?fields=`：公开详情；登录时额外返回 `owned`（是否为作者）和 `my_rating`（自己的评分，未评为 0）。不存在返回 404 `plugin_not_found`。
+- `GET /v1/community/plugins?q=&kind=&kinds=&offset=0&scope=&fields=`：公开目录，按发布时间倒序每页 20 条，返回 `plugins` 和 `has_more`。只列出可见类型（见下面的「类型声明」）。`kind` 为空表示全部可见类型，否则只能是上述八种之一（指定的类型本身算作已声明）；`q` 按名称不区分大小写子串匹配，最长 128 字节；`offset` 为 0 到 100000。`scope=mine` 只列出自己的作品（含被审核员下架的），需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。目录不含 zip 字节和清单。
+- `GET /v1/community/plugins/{id}?fields=&kinds=`：公开详情；登录时额外返回 `owned`（是否为作者）和 `my_rating`（自己的评分，未评为 0）。不存在，或类型不在可见范围内，返回 404 `plugin_not_found`。
 - `POST /v1/community/plugins`：需要用户会话，提交 `{id,name,description,kind,plugin_id,version,archive}`，成功返回 201 和摘要。`archive` 为 zip 的标准 base64。`id` 为客户端生成的 UUID，用于网络失败后的安全重试：同一账号用完全相同的内容重试返回 200 和已存记录，任何字段不同或他人占用同一 id 返回 409 `plugin_id_conflict`。
 - `POST /v1/community/plugins/{id}/download`：需要用户会话，返回 `{id,kind,plugin_id,version,size,sha256,archive}`，`archive` 为原样 zip 的标准 base64。客户端安装前应核对 `sha256`。下载人数按账号去重；重复下载不计人数，但计入下面的下载频率限制。
 - `PUT /v1/community/plugins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`，返回 `{stars}`。必须已下载，作者不可自评（403 `download_before_rating_or_own_plugin`）；重复提交更新同一条评分。
 - `DELETE /v1/community/plugins/{id}`：仅作者可删除，返回 `{deleted:true}`；不是作者或不存在都返回 404。连带删除下载和评分记录，不影响其他设备已安装的本地副本。
 
 摘要字段：`id`、`kind`、`plugin_id`、`name`、`description`、`author`、`version`、`license`、`size`、`sha256`、`downloads`、`rating_count`、`rating_average`、`owned`、`my_rating`、`created_at`，以及仅在 `fields=moderation` 时出现在自己作品上的 `moderation`。
+
+类型声明：已发布的客户端按严格模式解析列表，遇到不认识的 `kind` 会整页失败，所以列表和详情默认只返回它们认识的 `sound`、`music`、`command_table`、`effect`（服务端冻结的 `legacyPluginKinds`，以后新增类型也不改）。客户端用 `kinds` 声明自己能安装的其他类型，逗号分隔，例如 `kinds=helpcode,symbol_set,phrase_table,wordbook`；可见类型是这四种旧类型、声明的类型和 `kind` 指定的类型的并集。不认识的名字直接忽略、不报错，这样声明了未来类型的客户端在服务端认识该类型之前也能正常浏览。不带 `kinds` 或为空时，响应与引入这个参数之前逐字节相同。`scope=mine` 同样按可见类型过滤；下载、评分、删除和发布的回显不受影响。
 
 作者查看自己作品的审核状态：列表和详情带 `fields=moderation` 时，当前用户自己的作品多一个 `moderation` 字段（`approved`、`pending` 或 `removed`）；他人的作品和匿名访问永远不带，也不返回下架原因。不带这个参数时响应与以前逐字节相同，因为已发布的客户端按拒绝未知字段的方式解析。社区是事后审核，`pending` 的作品已经公开，客户端只需对 `removed` 显示「已下架」徽标。其他 `fields` 值返回 400 `invalid_fields`。`name`/`description` 是社区列表展示用的标题和说明；`plugin_id`、`version`、`license` 来自包内清单。发布后不允许原地替换包以继承旧版评分，新版本需以新 UUID 发布。
 
@@ -39,7 +41,12 @@
 - `music`：`[music]` 的 `tracks` 为 1 到 8 个不重复文件，单个不超过 16 MiB。
 - `command_table`：1 到 256 个 `[[commands]]`，每行 `trigger`（1 到 32 个小写字母，不重复）、`title`（≤ 48 字节）、`template`（≤ 199 个 UTF-16 单元）。模板的花括号必须成对且不嵌套，占位符只能是 `{date}`、`{time}`、`{weekday}`、`{date:FMT}`、`{time:FMT}`。FMT 按客户端所用 time crate 的 strftime 规则解析，不认识的说明符（如 `%Q`、`%E`、`%O`、`%Z`）以及需要时区偏移的 `%s`、`%z` 均拒绝。模板在 2026-09-30 和 2026-12-30 的 23:59:59 各展开一次（`{weekday}` 为“星期三”，月份和星期用英文名），展开结果不能含控制字符（`%n`、`%t` 会产生换行和制表符），也不能超过 199 个 UTF-16 单元。
 - `effect`：只有 `[effect]` 表，键限 `style`（必填，`flash`、`sparks` 或 `power_mode`）、`intensity`（0 到 100 的整数）、`colors`（1 到 4 个 `#RRGGBB`，不接受缩写、透明度或颜色名）、`duration_ms`（60 到 1500 的整数）和 `particles`（0 到 64 的整数），后四项可省略。特效由各端内置绘制，包只选择样式并在这些范围内调参，所以不能带任何音频或其他文件，只能附 `.txt`/`.md` 说明。
-- 引用的音频必须存在、非空、扩展名为 `.wav` 或 `.ogg` 且文件头分别为 `RIFF....WAVE` 或 `OggS`；`sound` 的采样只能是 `.wav`（各端播放前整段解码，只有 WAV 能事先核实时长，鸿蒙端会静音 Ogg 采样），`.ogg` 只用于 `music`；其余文件只能是 `plugin.toml` 或不超过 64 KiB 的 `.txt`/`.md` 说明。
+- `phrase_table`：1 到 2000 个 `[[phrases]]`，每行只有 `key`（1 到 32 个小写 ASCII 字母，K 模式的要求）和 `text`（非空白、1 到 199 个 UTF-16 单元、不含任何控制字符，包括换行和制表符）。同一个 `key` 可以对应多条 `text`，但 (`key`,`text`) 不能重复。没有数据文件。
+- `helpcode`：`[helpcode]` 只有一个键 `table`，点名一个 `.txt` 数据文件，1 字节到 1 MiB。文件为 UTF-8（可带 BOM），行尾 LF 或 CRLF；每行是空行、`#` 开头的注释或 `<字>=<码>`：`<字>` 恰好一个非 ASCII、非空白、非控制字符的 Unicode 字符，`<码>` 恰好 1 到 2 个小写 ASCII 字母，`=` 两侧不能有空格。1 到 30000 条，同一个字不能出现两次。
+- `wordbook`：`[wordbook]` 只有一个键 `file`，点名一个 `.tsv` 数据文件，1 字节到 4 MiB。文件为 UTF-8（可带 BOM），行尾 LF 或 CRLF；跳过空行和 `#` 开头的行，其余每行是 `单词<TAB>释义` 或 `单词<TAB>音标<TAB>释义`，不支持引号、不裁剪空白。单词 1 到 64 个字符、音标至多 64 个字符（可为空）、释义 1 到 256 个字符，都不能含控制字符；1 到 20000 条，单词不能重复，任何一行不合规整个包拒绝。插件 `id` 还只能由小写字母、数字和 `-` 组成、首尾不是 `-`、不超过 59 个字符（客户端把书 id 记为 `pack-<id>`，最长 64），`name` 不超过 64 个字符。
+- `symbol_set`：1 到 32 个 `[[groups]]`，每组 `tab`（`"symbols"` 或 `"kaomoji"`）、`title`（非空白、≤ 48 字节）、可选 `keywords`（出现时非空白、≤ 256 字节，用于搜索）和 `items`（只能是字符串，每组 1 到 512 个，每个非空白、1 到 64 个 UTF-16 单元、不含控制字符，组内不重复）。所有组合计至多 2048 项。没有数据文件。
+- 引用的音频必须存在、非空、扩展名为 `.wav` 或 `.ogg` 且文件头分别为 `RIFF....WAVE` 或 `OggS`；`sound` 的采样只能是 `.wav`（各端播放前整段解码，只有 WAV 能事先核实时长，鸿蒙端会静音 Ogg 采样），`.ogg` 只用于 `music`。清单点名的数据文件必须存在、非空、不超过该类型的上限，不按说明文件计。其余文件只能是 `plugin.toml` 或不超过 64 KiB 的 `.txt`/`.md` 说明。
+- 新类型的语法与客户端解析器逐条一致，两边用同一批 fixture 包测试（本仓库在 `internal/account/testdata/plugin-packs/`，`valid/` 下的包必须接受，`invalid/` 下的包必须拒绝）。
 
 zip 层面的错误返回 400 `invalid_plugin_archive`，清单与文件规则不符返回 400 `invalid_plugin_manifest`，任何大小上限返回 400 `plugin_too_large`。
 
@@ -50,7 +57,7 @@ zip 层面的错误返回 400 `invalid_plugin_archive`，清单与文件规则�
 | 400 | `invalid_json` | 请求体超限、JSON 损坏或含未知字段 |
 | 400 | `invalid_community_id` | id 不是 UUID |
 | 400 | `invalid_plugin_metadata` | 标题、说明、`plugin_id` 或 `version` 不合规 |
-| 400 | `invalid_kind` | `kind` 不在白名单（发布与列表） |
+| 400 | `invalid_kind` | `kind` 不在白名单（发布与列表）；`kinds` 中不认识的名字只忽略，不报这个错 |
 | 400 | `invalid_offset` / `invalid_search` | 列表参数不合规 |
 | 400 | `plugin_too_large` / `invalid_plugin_archive` / `invalid_plugin_manifest` | 包校验失败 |
 | 400 | `plugin_kind_mismatch` / `plugin_manifest_mismatch` | 清单与请求不一致 |
@@ -76,7 +83,11 @@ zip 层面的错误返回 400 `invalid_plugin_archive`，清单与文件规则�
 GRANT SELECT, INSERT, UPDATE, DELETE ON community_plugins, community_plugin_downloads, community_plugin_ratings TO msime_backend;
 ```
 
-先迁移再滚动更新，旧二进制不读这三张表。单个插件最多 8 MiB、每账号最多 32 MiB，数据库容量和备份需按预期发布量规划。
+先迁移再滚动更新，旧二进制不读这三张表。
+
+`kind` 的 CHECK 约束 `community_plugins_kind_known` 一次列出客户端认识的全部类型，某个类型能否发布由服务端的 `pluginKinds` 决定。迁移在约束定义不含 `wordbook` 时删除并重建它（需要表的属主权限，最小权限部署同样要用迁移账号执行 `-migrate-users` 或配置 `migration_role`）；启动探测发现旧约束也会触发迁移，所以已有数据库升级时不需要手工操作。重建约束会短暂持有表锁并扫描现有行，旧二进制只写四种旧类型，滚动更新期间不受影响。
+
+上线顺序：客户端先发出容忍未知类型的版本，再部署本服务端（类型声明、迁移和四种新类型的校验器），最后发布会发布这些类型、带 `kinds` 声明的客户端。服务端某个类型的校验器必须先于发布该类型的客户端上线。回退到旧版本时，旧版本不认识 `kinds` 参数，会把已发布的新类型返回给所有客户端，所以回退前要确认已发布的客户端都能容忍未知类型，或先下架新类型的作品。单个插件最多 8 MiB、每账号最多 32 MiB，数据库容量和备份需按预期发布量规划。
 
 ## 管理后台
 
