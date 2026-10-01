@@ -72,6 +72,9 @@ license = "MIT"
 [effect]
 style = "sparks"
 intensity = 60
+colors = ["#FFB000", "#ff4060"]
+duration_ms = 400
+particles = 24
 `
 
 var (
@@ -122,6 +125,8 @@ func TestPluginArchiveAcceptsEveryKind(t *testing.T) {
 		{"music", "community-rain", "2.1", pluginZip(t, pluginFile{name: "rain/plugin.toml", data: pluginMusicManifest}, pluginFile{name: "rain/rain.ogg", data: pluginOGG}, pluginFile{name: "rain/night.wav", data: pluginWAV}, pluginFile{name: "rain/", mode: fs.ModeDir | 0o755})},
 		{"command_table", "community-dates", "1", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginCommandManifest}, pluginFile{name: "README.md", data: "# Dates"})},
 		{"command_table", "community-dates", "1", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginCommandManifest}, pluginFile{name: ".DS_Store", data: "x"}, pluginFile{name: "__MACOSX/._plugin.toml", data: "resource fork"})},
+		{"effect", "community-sparks", "1", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginEffectManifest}, pluginFile{name: "LICENSE.txt", data: "MIT"})},
+		{"effect", "community-sparks", "1", pluginZip(t, pluginFile{name: "plugin.toml", data: "schema_version = 1\nkind = \"effect\"\nid = \"community-sparks\"\nname = \"Flash\"\nversion = \"1\"\nlicense = \"MIT\"\n\n[effect]\nstyle = \"flash\"\n"})},
 	} {
 		pack, code := validPluginArchive(tc.archive)
 		if code != "" || pack.Kind != tc.kind || pack.ID != tc.id || pack.Version != tc.version || pack.License == "" || len(pack.Manifest) == 0 {
@@ -212,6 +217,12 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 	command := func(old, new string) []byte {
 		return pluginZip(t, pluginFile{name: "plugin.toml", data: strings.Replace(pluginCommandManifest, old, new, 1)})
 	}
+	effect := func(old, new string, files ...pluginFile) []byte {
+		if !strings.Contains(pluginEffectManifest, old) {
+			t.Fatal("fixture lacks", old)
+		}
+		return pluginZip(t, append([]pluginFile{{name: "plugin.toml", data: strings.Replace(pluginEffectManifest, old, new, 1)}}, files...)...)
+	}
 	for _, tc := range []struct {
 		name    string
 		archive []byte
@@ -261,8 +272,25 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 		{"strftime timestamp", command(`template = "{time}"`, `template = "{time:%s}"`), "invalid_plugin_manifest"},
 		{"strftime trailing percent", command(`template = "{time}"`, `template = "{date:%Y%}"`), "invalid_plugin_manifest"},
 		{"long expansion", command(`template = "{time}"`, `template = "`+strings.Repeat("a", 178)+`{date:%A %B %d}"`), "invalid_plugin_manifest"},
-		// The client has no effect kind: its effects are built into the hosts and tuned only through preferences.
-		{"effect kind", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginEffectManifest}), "invalid_plugin_manifest"},
+		{"effect without table", effect("[effect]\nstyle = \"sparks\"\nintensity = 60\ncolors = [\"#FFB000\", \"#ff4060\"]\nduration_ms = 400\nparticles = 24\n", ""), "invalid_plugin_manifest"},
+		{"effect without style", effect(`style = "sparks"`, ""), "invalid_plugin_manifest"},
+		{"effect style off", effect(`style = "sparks"`, `style = "off"`), "invalid_plugin_manifest"},
+		{"effect unknown style", effect(`style = "sparks"`, `style = "confetti"`), "invalid_plugin_manifest"},
+		{"effect unknown key", effect("particles = 24", "particles = 24\nsound = \"boom.wav\""), "invalid_plugin_manifest"},
+		{"effect intensity range", effect("intensity = 60", "intensity = 101"), "invalid_plugin_manifest"},
+		{"effect negative intensity", effect("intensity = 60", "intensity = -1"), "invalid_plugin_manifest"},
+		{"effect intensity float", effect("intensity = 60", "intensity = 60.0"), "invalid_plugin_manifest"},
+		{"effect short duration", effect("duration_ms = 400", "duration_ms = 59"), "invalid_plugin_manifest"},
+		{"effect long duration", effect("duration_ms = 400", "duration_ms = 1501"), "invalid_plugin_manifest"},
+		{"effect particles range", effect("particles = 24", "particles = 65"), "invalid_plugin_manifest"},
+		{"effect no colors", effect(`colors = ["#FFB000", "#ff4060"]`, "colors = []"), "invalid_plugin_manifest"},
+		{"effect five colors", effect(`colors = ["#FFB000", "#ff4060"]`, `colors = ["#000000", "#111111", "#222222", "#333333", "#444444"]`), "invalid_plugin_manifest"},
+		{"effect shorthand color", effect(`"#ff4060"`, `"#f40"`), "invalid_plugin_manifest"},
+		{"effect color with alpha", effect(`"#ff4060"`, `"#ff4060ff"`), "invalid_plugin_manifest"},
+		{"effect named color", effect(`"#ff4060"`, `"red"`), "invalid_plugin_manifest"},
+		{"effect non-hex color", effect(`"#ff4060"`, `"#ff40g0"`), "invalid_plugin_manifest"},
+		{"effect with audio", effect("", "", pluginFile{name: "boom.wav", data: pluginWAV}), "invalid_plugin_manifest"},
+		{"effect with sounds table", effect("[effect]", "[sounds]\ndefault = \"boom.wav\"\n[effect]", pluginFile{name: "boom.wav", data: pluginWAV}), "invalid_plugin_manifest"},
 	} {
 		if _, code := validPluginArchive(tc.archive); code != tc.code {
 			t.Errorf("%s: got %q, want %q", tc.name, code, tc.code)
@@ -272,6 +300,14 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 	sequence := strings.Replace(pluginSoundManifest, "[sounds]\ndefault = \"click.wav\"\nenter = \"enter.wav\"\n", "mode = \"sequence\"\n[sequence]\nsample = \"click.wav\"\nsemitones = [0, 2, 4, -24, 24]\nadvance = \"commit\"\n", 1)
 	if _, code := validPluginArchive(sound(sequence, pluginFile{name: "click.wav", data: pluginWAV})); code != "" {
 		t.Fatal("sequence", code)
+	}
+	// The bounds themselves are accepted.
+	bounds := strings.NewReplacer("intensity = 60", "intensity = 100", "duration_ms = 400", "duration_ms = 1500", "particles = 24", "particles = 0", `colors = ["#FFB000", "#ff4060"]`, `colors = ["#000000", "#111111", "#222222", "#FFFFFF"]`).Replace(pluginEffectManifest)
+	if _, code := validPluginArchive(pluginZip(t, pluginFile{name: "plugin.toml", data: bounds})); code != "" {
+		t.Fatal("effect bounds", code)
+	}
+	if _, code := validPluginArchive(effect("duration_ms = 400", "duration_ms = 60")); code != "" {
+		t.Fatal("shortest duration", code)
 	}
 	// The longest expansion that still fits: "Wednesday September 30" brings 177 letters to 199 UTF-16 units.
 	if _, code := validPluginArchive(command(`template = "{time}"`, `template = "`+strings.Repeat("a", 177)+`{date:%A %B %d}"`)); code != "" {
@@ -743,5 +779,50 @@ func TestCommunityPluginTransferSlots(t *testing.T) {
 	}
 	if w := waitFor("POST", path, "{}", owner.AccessToken); w.Code != 200 {
 		t.Fatal("other account", w.Code, w.Body.String())
+	}
+}
+
+func TestCommunityPluginKindSchemaUpgrade(t *testing.T) {
+	db := testStore(t)
+	owner := complete(t, db, Identity{"email", "plugin-kind-upgrade@example.test"})
+	// Rebuild the released table shape, whose auto-named kind check predates effect packs, under the migration lock; then migrate it forward twice.
+	tx, err := db.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	for _, statement := range []string{
+		`SELECT pg_advisory_xact_lock(8372419)`,
+		`ALTER TABLE community_plugins DROP CONSTRAINT community_plugins_kind_known`,
+		`ALTER TABLE community_plugins ADD CONSTRAINT community_plugins_kind_check CHECK(kind IN ('sound','music','command_table'))`,
+	} {
+		if _, err = tx.Exec(t.Context(), statement); err != nil {
+			t.Fatal(statement, err)
+		}
+	}
+	if err = tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id, kind string) error {
+		_, err := db.pool.Exec(t.Context(), `INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,version,license,manifest,archive,request_sha256) VALUES($1,$2,$3,'upgrade','n','1','MIT','m'::bytea,'a'::bytea,repeat('0',64))`, id, owner.User.ID, kind)
+		return err
+	}
+	if insert("ee334455-1234-4234-8234-000000000001", "effect") == nil {
+		t.Fatal("the released shape accepted an effect pack")
+	}
+	for range 2 {
+		if err = db.Migrate(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var constraints int
+	if err = db.pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_constraint WHERE conrelid='community_plugins'::regclass AND conname LIKE 'community_plugins_kind%'`).Scan(&constraints); err != nil || constraints != 1 {
+		t.Fatal("kind constraints", constraints, err)
+	}
+	if err = insert("ee334455-1234-4234-8234-000000000002", "effect"); err != nil {
+		t.Fatal("effect pack refused after the upgrade", err)
+	}
+	if insert("ee334455-1234-4234-8234-000000000003", "theme") == nil {
+		t.Fatal("unknown kind accepted after the upgrade")
 	}
 }
