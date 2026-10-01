@@ -113,6 +113,24 @@ FIXTURES = {
             {"key": "translation", "name": "翻译（账号通道）", "provider": "", "state": "unknown", "uptime_60d": None, "p95_ms": None},
         ],
     },
+    # Personal page and permissions (U12), shaped like internal/account/admin_me.go and admin_permissions.go.
+    "/api/me": {
+        "email": "owner@example.com", "name": "Owner", "role": "maintainer", "owner": True, "via": "session", "joined_at": "2024-03-01T00:00:00Z",
+        "stats": {"dict_prs_month": 38, "community_month": 112, "issues_month": 54, "avg_handle_hours": 3.1},
+        "prefs": {"notify_dict_pr": True, "notify_report": True, "notify_crash_spike": False, "weekly_digest": False},
+        "recent": [{"id": 2, "action": "dict_pr_approve", "target": "210", "detail": {"count": 5}, "created_at": "2026-10-01T00:00:00Z"}],
+        "sessions": [{"id": "0123456789abcdef", "created_at": "2026-10-01T00:00:00Z", "last_seen_at": "2026-10-01T00:00:00Z", "device": "macOS · Safari", "current": True},
+                     {"id": "fedcba9876543210", "created_at": "2026-09-30T00:00:00Z", "last_seen_at": "2026-09-30T08:00:00Z", "device": "Windows · Edge", "current": False}],
+        "token": {"last4": "7c2e", "created_at": "2026-10-01T00:00:00Z", "expires_at": "2026-10-31T00:00:00Z"},
+    },
+    "/api/permissions": {
+        "roles": [{"key": "maintainer", "name": "维护者", "builtin": True}, {"key": "reviewer", "name": "审核志愿者", "builtin": True}, {"key": "operator", "name": "运营/客服", "builtin": True}, {"key": "readonly", "name": "只读", "builtin": True}],
+        "permissions": ["review_dict_pr", "review_community", "triage_issues", "ban_users", "publish_notices", "trigger_release", "view_cloud_usage", "manage_permissions"],
+        "matrix": {"maintainer": ["review_dict_pr", "review_community", "triage_issues", "ban_users", "publish_notices", "trigger_release", "view_cloud_usage", "manage_permissions"], "reviewer": ["review_dict_pr", "review_community", "triage_issues"], "operator": ["triage_issues", "ban_users", "publish_notices", "view_cloud_usage"], "readonly": ["view_cloud_usage"]},
+        "members": [{"email": "owner@example.com", "role": "maintainer", "enabled": True, "owner": True, "sessions": 1, "last_seen_at": "2026-10-01T00:00:00Z", "created_at": None},
+                    {"email": "helper@example.com", "role": "reviewer", "enabled": False, "owner": False, "sessions": 0, "last_seen_at": None, "created_at": "2026-09-01T00:00:00Z"}],
+    },
+    "/api/audit": {"items": [{"id": 3, "actor": "google:1:owner@example.com", "action": "permission_revoke", "target": "operator", "detail": {"role": "operator", "role_name": "运营/客服", "permission": "ban_users"}, "created_at": "2026-10-01T00:00:00Z"}], "page": 1, "total": 1, "has_more": False},
 }
 
 # Issue triage (U3): one open issue on the list and its detail, shaped like internal/server/admin_issues.go.
@@ -451,7 +469,17 @@ def main() -> int:
                 expect(page.get_by_label("标题")).to_have_value("Windows 10 工具栏图标方框的临时处理办法")
                 violations("notice")
 
+                page.goto(base + "/perm")
+                expect(page.get_by_role("button", name="运营/客服：封禁账号")).to_have_attribute("aria-pressed", "true")
+                expect(page.get_by_text("收回「运营/客服」：封禁账号")).to_be_visible()
+                expect(page.get_by_text("helper@example.com", exact=True)).to_be_visible()
+                violations("perm")
+
                 page.goto(base + "/me")
+                expect(page.get_by_text("msime_pat_••••7c2e", exact=False)).to_be_visible()
+                expect(page.get_by_text("通过了词库 PR #210（5 条）")).to_be_visible()
+                expect(page.get_by_text("当前设备")).to_be_visible()
+                violations("me")
                 page.get_by_role("button", name="退出登录").click()
                 dialog = page.get_by_role("dialog", name="退出登录？")
                 expect(dialog).to_be_visible()

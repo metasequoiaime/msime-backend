@@ -96,6 +96,10 @@ type adminAuthStore interface {
 	// AdminTokenIdentity resolves a personal access token (account.AdminTokenPrefix) to its identity.
 	AdminTokenIdentity(context.Context, string) (account.AdminIdentity, error)
 }
+
+// adminGoogleScopes asks for the profile scope only to show the admin's Google name on the console; the avatar is never loaded because the console's CSP allows images from itself only.
+var adminGoogleScopes = []string{oidc.ScopeOpenID, "email", "profile"}
+
 type adminGoogleAuth struct {
 	oauth    oauth2.Config
 	verifier account.Verifier
@@ -111,7 +115,7 @@ func (s *Server) initAdminGoogle() {
 	}
 	keys := oidc.NewRemoteKeySet(oidc.ClientContext(s.lifetime, s.client), "https://www.googleapis.com/oauth2/v3/certs")
 	s.adminGoogle = &adminGoogleAuth{
-		oauth:    oauth2.Config{ClientID: c.ClientID, ClientSecret: c.secret, RedirectURL: c.RedirectURI, Scopes: []string{oidc.ScopeOpenID, "email"}, Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", AuthStyle: oauth2.AuthStyleInParams}},
+		oauth:    oauth2.Config{ClientID: c.ClientID, ClientSecret: c.secret, RedirectURL: c.RedirectURI, Scopes: adminGoogleScopes, Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", AuthStyle: oauth2.AuthStyleInParams}},
 		verifier: oidc.NewVerifier("https://accounts.google.com", keys, &oidc.Config{ClientID: c.ClientID, SupportedSigningAlgs: []string{"RS256"}}),
 	}
 }
@@ -343,6 +347,7 @@ func (s *Server) adminGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	var claims struct {
 		Email    string `json:"email"`
 		Verified bool   `json:"email_verified"`
+		Name     string `json:"name"`
 	}
 	if token.Claims(&claims) != nil || !claims.Verified {
 		denied()
@@ -357,7 +362,7 @@ func (s *Server) adminGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		denied()
 		return
 	}
-	value, err := s.adminStore.CreateAdminSession(r.Context(), account.AdminIdentity{Subject: token.Subject, Email: strings.ToLower(claims.Email)})
+	value, err := s.adminStore.CreateAdminSession(r.Context(), account.AdminIdentity{Subject: token.Subject, Email: strings.ToLower(claims.Email), Name: claims.Name, UserAgent: r.UserAgent()})
 	if err != nil {
 		s.adminAuthError(w, err)
 		return

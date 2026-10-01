@@ -4,14 +4,38 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 )
 
+// AdminIdentity is who signed in to the console. Name and UserAgent are only recorded when a session is created: Name is the Google profile name and UserAgent the browser's User-Agent header, both for the personal page.
 type AdminIdentity struct {
-	Subject string `json:"subject"`
-	Email   string `json:"email"`
+	Subject   string `json:"subject"`
+	Email     string `json:"email"`
+	Name      string `json:"name,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
 }
+
+// adminSessionTouch is how stale last_seen_at may get before a request refreshes it, so busy consoles do not write on every request.
+const adminSessionTouch = 5 * time.Minute
+
+// adminProfileText keeps the first max runes of s with control characters removed, so untrusted profile text always fits its column.
+func adminProfileText(s string, max int) string {
+	s = strings.ToValidUTF8(s, "")
+	out := make([]rune, 0, min(len(s), max))
+	for _, c := range s {
+		if len(out) == max {
+			break
+		}
+		if !unicode.IsControl(c) {
+			out = append(out, c)
+		}
+	}
+	return strings.TrimSpace(string(out))
+}
+
 type AdminLoginFlow struct{ Nonce, Verifier string }
 type adminActorKey struct{}
 
@@ -52,7 +76,7 @@ func (a *Service) CreateAdminSession(ctx context.Context, identity AdminIdentity
 	if err == nil && !enabled {
 		return "", ErrInvalid
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO admin_sessions(token_hash,subject,email) VALUES($1,$2,$3)`, hash(token), identity.Subject, strings.ToLower(identity.Email))
+	_, err = tx.Exec(ctx, `INSERT INTO admin_sessions(token_hash,subject,email,name,user_agent) VALUES($1,$2,$3,$4,$5)`, hash(token), identity.Subject, strings.ToLower(identity.Email), adminProfileText(identity.Name, 200), adminProfileText(identity.UserAgent, 256))
 	if err != nil {
 		return "", err
 	}
@@ -63,11 +87,21 @@ func (a *Service) AdminSession(ctx context.Context, token string) (AdminIdentity
 	if len(token) != 64 {
 		return identity, ErrInvalid
 	}
-	err := a.store.pool.QueryRow(ctx, `SELECT subject,email FROM admin_sessions WHERE token_hash=$1 AND expires_at>now()`, hash(token)).Scan(&identity.Subject, &identity.Email)
+	var stale bool
+	err := a.store.pool.QueryRow(ctx, `SELECT subject,email,name,user_agent,last_seen_at<now()-make_interval(secs=>$2) FROM admin_sessions WHERE token_hash=$1 AND expires_at>now()`, hash(token), adminSessionTouch.Seconds()).Scan(&identity.Subject, &identity.Email, &identity.Name, &identity.UserAgent, &stale)
 	if errors.Is(err, pgx.ErrNoRows) {
-		err = ErrInvalid
+		return identity, ErrInvalid
 	}
-	return identity, err
+	if err != nil {
+		return identity, err
+	}
+	// The condition is repeated so concurrent requests refresh the row once.
+	if stale {
+		if _, err = a.store.pool.Exec(ctx, `UPDATE admin_sessions SET last_seen_at=now() WHERE token_hash=$1 AND last_seen_at<now()-make_interval(secs=>$2)`, hash(token), adminSessionTouch.Seconds()); err != nil {
+			return identity, err
+		}
+	}
+	return identity, nil
 }
 func (a *Service) DeleteAdminSession(ctx context.Context, token string) error {
 	_, err := a.store.pool.Exec(ctx, `DELETE FROM admin_sessions WHERE token_hash=$1`, hash(token))
