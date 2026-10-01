@@ -35,6 +35,8 @@ ALTER TABLE auth_identities ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT 
 ALTER TABLE auth_identities ADD COLUMN IF NOT EXISTS picture text NOT NULL DEFAULT '';
 ALTER TABLE auth_identities ADD COLUMN IF NOT EXISTS updated_at timestamptz;
 ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS code_verifier text NOT NULL DEFAULT '';
+-- Object key of the user's uploaded avatar in the avatar bucket; '' when they have none.
+ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS avatar_key text NOT NULL DEFAULT '';
 ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS redirect_uri text NOT NULL DEFAULT '';
 -- refresh_token is AES-256-GCM nonce||ciphertext with AAD provider:subject; the key never reaches the database.
 CREATE TABLE IF NOT EXISTS auth_provider_tokens (

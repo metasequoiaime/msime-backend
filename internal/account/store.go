@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -48,7 +50,24 @@ type User struct {
 	ID          string    `json:"id"`
 	DisplayName string    `json:"display_name"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Email is the verified address of the user's linked Google identity. It is only ever sent to the user themselves: login, refresh and /v1/users/me.
+	Email string `json:"email,omitempty"`
+	// AvatarURL is the uploaded avatar's public URL, else the Google picture; absent when the user has neither. Filled by Service.present, which knows the bucket's public address.
+	AvatarURL string `json:"avatar_url,omitempty"`
+	// avatarKey is the uploaded avatar's object key and googlePicture the Google picture URL, the two sources AvatarURL is chosen from.
+	avatarKey, googlePicture string
 }
+
+// userQuery loads a user by id together with their avatar key and the profile of their most recently refreshed Google identity: its verified email and its picture.
+const userQuery = `SELECT u.id,COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'||upper(left(u.id,6))),u.created_at,u.avatar_key,
+ COALESCE((SELECT i.email FROM auth_identities i WHERE i.user_id=u.id AND i.provider='google' AND i.email_verified AND i.email<>'' ORDER BY i.updated_at DESC NULLS LAST LIMIT 1),''),
+ COALESCE((SELECT i.picture FROM auth_identities i WHERE i.user_id=u.id AND i.provider='google' AND i.picture<>'' ORDER BY i.updated_at DESC NULLS LAST LIMIT 1),'')
+ FROM auth_users u WHERE u.id=$1`
+
+func scanUser(row pgx.Row, u *User) error {
+	return row.Scan(&u.ID, &u.DisplayName, &u.CreatedAt, &u.avatarKey, &u.Email, &u.googlePicture)
+}
+
 type Identity struct {
 	Provider string `json:"provider"`
 	Subject  string `json:"subject"`
@@ -177,7 +196,7 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_plugin_downloads cpd ON cpd.user_id=u.id
  LEFT JOIN community_plugin_ratings cpr ON cpr.user_id=u.id
  LEFT JOIN site_settings ss ON false
- LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture='' AND ai.updated_at IS NULL
+ LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture||u.avatar_key='' AND ai.updated_at IS NULL
  LEFT JOIN auth_challenges ch ON false AND ch.code_verifier||ch.redirect_uri=''
  LEFT JOIN auth_provider_tokens pt ON false WHERE false`).Scan(&n)
 }
@@ -258,6 +277,12 @@ func (s *Store) completeWith(ctx context.Context, c Challenge, identity Identity
 		if _, e = tx.Exec(ctx, "UPDATE auth_identities SET email=$3,email_verified=$4,name=$5,picture=$6,updated_at=now() WHERE provider=$1 AND subject=$2", identity.Provider, identity.Subject, p.Email, p.EmailVerified, p.Name, p.Picture); e != nil {
 			return Tokens{}, e
 		}
+		// The Google name becomes the nickname only while the user has not chosen one: an empty name or the generated 水杉小鹿 default. A name the user set themselves is never replaced by a later login.
+		if name := profileDisplayName(p.Name); name != "" {
+			if _, e = tx.Exec(ctx, "UPDATE auth_users SET display_name=$2 WHERE id=$1 AND (btrim(display_name)='' OR display_name=$3)", uid, name, defaultUserName(uid)); e != nil {
+				return Tokens{}, e
+			}
+		}
 	}
 	// Google omits refresh_token on repeat consents; an absent one keeps the stored token rather than erasing it.
 	if grant != nil && len(grant.SealedRefresh) > 0 {
@@ -277,7 +302,7 @@ func (s *Store) completeWith(ctx context.Context, c Challenge, identity Identity
 }
 func newSession(ctx context.Context, tx pgx.Tx, uid string) (Tokens, error) {
 	t := Tokens{AccessToken: randomToken(), RefreshToken: randomToken(), TokenType: "Bearer", ExpiresIn: 900}
-	e := tx.QueryRow(ctx, "SELECT id,COALESCE(NULLIF(btrim(display_name),''),'水杉小鹿·'||upper(left(id,6))),created_at FROM auth_users WHERE id=$1", uid).Scan(&t.User.ID, &t.User.DisplayName, &t.User.CreatedAt)
+	e := scanUser(tx.QueryRow(ctx, userQuery, uid), &t.User)
 	if e != nil {
 		return t, e
 	}
@@ -327,7 +352,7 @@ func (s *Store) Refresh(ctx context.Context, token string) (Tokens, error) {
 	if _, e = tx.Exec(ctx, "UPDATE auth_sessions SET access_hash=$1,refresh_hash=$2,access_expires=least(now()+interval '15 minutes',expires_at) WHERE id=$3", hash(t.AccessToken), hash(t.RefreshToken), sid); e != nil {
 		return t, e
 	}
-	e = tx.QueryRow(ctx, "SELECT id,COALESCE(NULLIF(btrim(display_name),''),'水杉小鹿·'||upper(left(id,6))),created_at FROM auth_users WHERE id=$1", uid).Scan(&t.User.ID, &t.User.DisplayName, &t.User.CreatedAt)
+	e = scanUser(tx.QueryRow(ctx, userQuery, uid), &t.User)
 	if e != nil {
 		return t, e
 	}
@@ -347,7 +372,7 @@ func (s *Store) Logout(ctx context.Context, p Principal, all bool) error {
 func (s *Store) Me(ctx context.Context, uid string) (User, []Identity, error) {
 	var u User
 	ids := []Identity{}
-	e := s.pool.QueryRow(ctx, "SELECT id,COALESCE(NULLIF(btrim(display_name),''),'水杉小鹿·'||upper(left(id,6))),created_at FROM auth_users WHERE id=$1", uid).Scan(&u.ID, &u.DisplayName, &u.CreatedAt)
+	e := scanUser(s.pool.QueryRow(ctx, userQuery, uid), &u)
 	if e != nil {
 		return u, ids, e
 	}
@@ -364,6 +389,38 @@ func (s *Store) Me(ctx context.Context, uid string) (User, []Identity, error) {
 		ids = append(ids, i)
 	}
 	return u, ids, rows.Err()
+}
+
+// profileDisplayName turns a provider's name claim into a nickname the PATCH /v1/users/me rules would accept, or "" when it cannot be one: blank, not UTF-8, or carrying control characters. A longer name is cut to the 64-character limit rather than dropped.
+func profileDisplayName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return ""
+	}
+	if runes := []rune(name); len(runes) > 64 {
+		name = strings.TrimSpace(string(runes[:64]))
+	}
+	return name
+}
+
+// SetAvatarKey points the user at a new uploaded avatar, or at none for "", and returns the key it replaced so the caller can delete that object.
+func (s *Store) SetAvatarKey(ctx context.Context, uid, key string) (string, error) {
+	var previous string
+	e := s.pool.QueryRow(ctx, "UPDATE auth_users u SET avatar_key=$2 FROM (SELECT avatar_key FROM auth_users WHERE id=$1 FOR UPDATE) old WHERE u.id=$1 RETURNING old.avatar_key", uid, key).Scan(&previous)
+	if errors.Is(e, pgx.ErrNoRows) {
+		return "", ErrInvalid
+	}
+	return previous, e
+}
+
+// AvatarKey returns the user's uploaded avatar key, or "" when they have none.
+func (s *Store) AvatarKey(ctx context.Context, uid string) (string, error) {
+	var key string
+	e := s.pool.QueryRow(ctx, "SELECT avatar_key FROM auth_users WHERE id=$1", uid).Scan(&key)
+	if errors.Is(e, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return key, e
 }
 func defaultUserName(uid string) string {
 	return "水杉小鹿·" + strings.ToUpper(uid[:min(6, len(uid))])

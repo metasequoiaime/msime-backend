@@ -26,6 +26,8 @@ msime-server -config /config/config.json -migrate-users
 - 微信：配置本应用 `app_id`、密钥环境变量及已登记的 HTTPS `redirect_uri`。这是网站扫码登录，不是小程序或移动应用 SDK 登录。前端打开 `authorization_url`，在回调验证 `state == challenge_id`，再提交 code。回调页面由客户端项目提供。
 - 阿里云短信：配置 region、AccessKey 环境变量、审核通过的签名及短信模板。模板参数为 `code`，六位数字、五分钟有效。手机号使用 `+8613800138000` 这样的 E.164 格式。国际短信还需相应发送资质与模板。
 - Lark 邮箱：配置实际 SMTP 主机、邮箱账号、发件地址和应用密码。支持 465 隐式 TLS 或 587 STARTTLS，强制证书验证。示例主机需按邮箱所在区域确认；不会自动发送测试邮件。
+- 头像：用户对象带 `avatar_url`，上传的自定义头像优先，其次是 Google 头像（只给出 `googleusercontent.com` 的 https 地址），都没有时省略、客户端显示昵称首字；`email` 是已绑定 Google 身份的已验证邮箱，只出现在登录、刷新和 `/v1/users/me` 的响应里。Google 登录时，若用户昵称为空或仍是生成的「水杉小鹿·XXXXXX」，用 Google 昵称替换；用户自己改过的昵称不会被覆盖。
+- 自定义头像存储：`avatars` 配置 Cloudflare R2 的 `bucket`、绑定自定义域名后的公开地址 `public_base_url`（须为 https 域名根地址，生产为 `https://media.msime.app`），以及账号 ID、Access Key ID、Secret Access Key 三个环境变量名（示例配置为 `MSIME_R2_ACCOUNT_ID`、`MSIME_R2_ACCESS_KEY_ID`、`MSIME_R2_SECRET_ACCESS_KEY`）。`bucket` 为空时上传关闭，`PUT /v1/users/me/avatar` 返回 503。服务端只写入和删除对象：上传的 PNG/JPEG（最多 1 MiB、边长不超过 4096）裁成居中正方形并重新编码为 256×256 JPEG，存为 `avatars/<随机值>.jpg`，`Cache-Control: public, max-age=31536000, immutable`；每次上传换新键，旧对象随即删除，注销账号时一并删除。Access Key 只需该 bucket 的对象读写权限。
 
 ## 登录与账号管理
 
