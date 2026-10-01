@@ -255,6 +255,13 @@ SELECT word_id,day,count FROM admin_sensitive_hits WHERE false`); e != nil {
 	if !current {
 		return errors.New("admin_role_permissions permission constraint predates view_logs")
 	}
+	// 插件类型也在 CHECK 约束里：旧约束会让新类型的发布在插入时失败，所以约束不含 wordbook 时启动要走迁移。
+	if e := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='community_plugins'::regclass AND conname='community_plugins_kind_known' AND pg_get_constraintdef(oid) LIKE '%wordbook%')`).Scan(&current); e != nil {
+		return e
+	}
+	if !current {
+		return errors.New("community_plugins kind constraint predates the helpcode, symbol_set, phrase_table and wordbook kinds")
+	}
 	return nil
 }
 func (s *Store) Rate(ctx context.Context, key string, limit int, window time.Duration) error {

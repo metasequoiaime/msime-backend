@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# 插件解析器的共享 fixture 要逐字节保留（CRLF、BOM 和非法字节都是用例的一部分），不做换行转换。
+internal/account/testdata/plugin-packs/** -text
