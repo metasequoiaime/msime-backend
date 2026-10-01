@@ -1327,3 +1327,127 @@ func TestAdminCandidateSkinCategory(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 }
+
+// 官方发布名单的格式校验：64 位小写十六进制、不重复、最多 50 项；用户体系关闭时同样校验。
+func TestCommunityConfigOfficialSkinPublishers(t *testing.T) {
+	ids := make([]string, maxOfficialSkinPublishers+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("%064x", i)
+	}
+	for name, tc := range map[string]struct {
+		list []string
+		ok   bool
+	}{
+		"empty":     {nil, true},
+		"full":      {ids[:maxOfficialSkinPublishers], true},
+		"too many":  {ids, false},
+		"duplicate": {[]string{ids[1], ids[1]}, false},
+		"uppercase": {[]string{strings.Repeat("A", 64)}, false},
+		"short":     {[]string{ids[1][:63]}, false},
+		"long":      {[]string{ids[1] + "0"}, false},
+		"not hex":   {[]string{strings.Repeat("g", 64)}, false},
+		"blank":     {[]string{""}, false},
+	} {
+		c := Config{Community: CommunityConfig{OfficialSkinPublishers: tc.list}}
+		if err := c.Validate(); (err == nil) != tc.ok {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	c := CommunityConfig{OfficialSkinPublishers: ids[:2]}
+	if !c.officialSkinPublisher(ids[1]) || c.officialSkinPublisher(ids[2]) || c.officialSkinPublisher("") {
+		t.Fatal("membership")
+	}
+}
+
+// 官方发布账号可以超过公开 20 款和每小时 10 次公开发布（POST、PUT 替换、PATCH 转公开都不受普通额度限制），作品仍进入待审核；普通账号照旧收到 409 和 429。
+func TestCommunityCandidateOfficialPublisher(t *testing.T) {
+	db := testStore(t)
+	official := complete(t, db, Identity{"email", "candidate-official@example.test"})
+	normal := complete(t, db, Identity{"email", "candidate-normal@example.test"})
+	a := &Service{store: db, config: Config{Community: CommunityConfig{OfficialSkinPublishers: []string{official.User.ID}}}}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	manifest, files := candidateFixture(t, "official")
+	setRate := func(scope, userID string, count int) {
+		t.Helper()
+		if _, err := db.pool.Exec(t.Context(), `INSERT INTO auth_rates(key,count,expires_at) VALUES($1,$2,now()+interval '1 hour') ON CONFLICT(key) DO UPDATE SET count=excluded.count,expires_at=excluded.expires_at`, scope+":"+hash(userID), count); err != nil {
+			t.Fatal(err)
+		}
+	}
+	moderation := func(id string) string {
+		t.Helper()
+		var v string
+		if err := db.pool.QueryRow(t.Context(), `SELECT moderation FROM community_candidate_skins WHERE id=$1`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	// 两个账号都已有 20 款公开作品，两份每小时额度都已用完。
+	for i := 0; i < maxCandidateSkinsPerUser; i++ {
+		insertCandidateSkin(t, db, fmt.Sprintf("0f334455-1234-4234-8234-%012d", i), official.User.ID, fmt.Sprintf("official %02d", i))
+		insertCandidateSkin(t, db, fmt.Sprintf("1f334455-1234-4234-8234-%012d", i), normal.User.ID, fmt.Sprintf("normal %02d", i))
+	}
+	for _, user := range []string{official.User.ID, normal.User.ID} {
+		setRate("candidate-publish", user, candidatePublishesPerHour)
+		setRate("candidate-library", user, candidateLibraryWritesPerHour)
+	}
+
+	// 普通账号：额度用完时 429，额度恢复后公开名额已满 409。
+	normalID := "1f334455-1234-4234-8234-aaaaaaaaaaaa"
+	w := apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidatePublishBody(t, normalID, "Normal", manifest, files), normal.AccessToken, 429)
+	if !strings.Contains(w.Body.String(), "rate_limit_exceeded") {
+		t.Fatal(w.Body.String())
+	}
+	setRate("candidate-publish", normal.User.ID, 0)
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidatePublishBody(t, normalID, "Normal", manifest, files), normal.AccessToken, 409)
+	if !strings.Contains(w.Body.String(), "candidate_skin_publish_limit") {
+		t.Fatal(w.Body.String())
+	}
+	// 普通账号的私有作品转公开同样因名额已满被拒绝，替换因私有库额度用完被拒绝。
+	normalPrivate := "1f334455-1234-4234-8234-000000000000"
+	if _, err := db.pool.Exec(t.Context(), `UPDATE community_candidate_skins SET visibility='private' WHERE id=$1`, normalPrivate); err != nil {
+		t.Fatal(err)
+	}
+	insertCandidateSkin(t, db, "1f334455-1234-4234-8234-bbbbbbbbbbbb", normal.User.ID, "normal extra")
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+normalPrivate, `{"visibility":"public"}`, normal.AccessToken, 409)
+	w = apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+normalPrivate, candidateReplaceBody(t, "Normal again", strings.Replace(manifest, "'official'", "'shared'", 1), files), normal.AccessToken, 429)
+	if !strings.Contains(w.Body.String(), "rate_limit_exceeded") {
+		t.Fatal(w.Body.String())
+	}
+
+	// 官方账号：第 21 款公开作品在额度用完时仍能发布，并且进入待审核。
+	public21 := "0f334455-1234-4234-8234-aaaaaaaaaaaa"
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidatePublishBody(t, public21, "Official 21", manifest, files), official.AccessToken, 201)
+	if moderation(public21) != "pending" {
+		t.Fatal("official publish skipped moderation", moderation(public21))
+	}
+	// 私有创建和 PUT 替换超过普通账号的每小时 60 次，替换后仍重新进入待审核。
+	private := "0f334455-1234-4234-8234-bbbbbbbbbbbb"
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidateSyncBody(t, private, "Official private", "private", manifest, files), official.AccessToken, 201)
+	if _, err := db.pool.Exec(t.Context(), `UPDATE community_candidate_skins SET moderation='approved' WHERE id=$1`, private); err != nil {
+		t.Fatal(err)
+	}
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+private, candidateReplaceBody(t, "Official replaced", manifest, files), official.AccessToken, 200)
+	if moderation(private) != "pending" {
+		t.Fatal("official replace skipped moderation", moderation(private))
+	}
+	// PATCH 转公开得到第 22 款公开作品，同样超过每小时 10 次。
+	w = apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+private, `{"visibility":"public"}`, official.AccessToken, 200)
+	if !strings.Contains(w.Body.String(), `"visibility":"public"`) || moderation(private) != "pending" {
+		t.Fatal(w.Body.String(), moderation(private))
+	}
+	var public, publishCount, libraryCount int
+	if err := db.pool.QueryRow(t.Context(), `SELECT count(*) FILTER (WHERE visibility='public'),(SELECT count FROM auth_rates WHERE key=$2),(SELECT count FROM auth_rates WHERE key=$3) FROM community_candidate_skins WHERE owner_id=$1`, official.User.ID, "candidate-publish:"+hash(official.User.ID), "candidate-library:"+hash(official.User.ID)).Scan(&public, &publishCount, &libraryCount); err != nil {
+		t.Fatal(err)
+	}
+	if public != maxCandidateSkinsPerUser+2 || publishCount != candidatePublishesPerHour+2 || libraryCount != candidateLibraryWritesPerHour+2 {
+		t.Fatal("official counters", public, publishCount, libraryCount)
+	}
+
+	// 官方账号的每小时额度仍有上限，公开作品数仍受每账号总数上限约束。
+	setRate("candidate-publish", official.User.ID, candidateOfficialWritesPerHour)
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins", candidatePublishBody(t, "0f334455-1234-4234-8234-cccccccccccc", "Official over", manifest, files), official.AccessToken, 429)
+	if a.candidatePublicLimit(official.User.ID) != maxCandidateLibraryRows || a.candidatePublicLimit(normal.User.ID) != maxCandidateSkinsPerUser {
+		t.Fatal("public limits")
+	}
+}

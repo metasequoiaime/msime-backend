@@ -164,6 +164,9 @@
       "account_id_env": "MSIME_R2_ACCOUNT_ID",
       "access_key_id_env": "MSIME_R2_ACCESS_KEY_ID",
       "secret_access_key_env": "MSIME_R2_SECRET_ACCESS_KEY"
+    },
+    "community": {
+      "official_skin_publishers": []
     }
   }
 }

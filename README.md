@@ -272,7 +272,7 @@ GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and
 
 用户可发布自定义键盘设计、下载使用和评分，使用 Apple 登录与 PostgreSQL 共享存储，支持 K8s 多副本。接口、迁移和上线说明见 [皮肤社区](docs/skin-community.md)。
 
-用户也可以分享候选窗皮肤包（skin.toml 加 PNG/JPEG，服务器重新编码图片），接口 `/v1/community/candidate-skins` 与限制见 [皮肤社区 · 候选窗皮肤包分享](docs/skin-community.md#候选窗皮肤包分享)。
+用户也可以分享候选窗皮肤包（skin.toml 加 PNG/JPEG，服务器重新编码图片），接口 `/v1/community/candidate-skins` 与限制见 [皮肤社区 · 候选窗皮肤包分享](docs/skin-community.md#候选窗皮肤包分享)。`auth.community.official_skin_publishers`（用户 ID 列表，64 位小写十六进制，默认为空，最多 50 个）指定官方发布账号，它们不受公开 20 款和每小时 10 次公开发布的限制，仍走审核和包校验。旧版本不认识这个配置项，会因未知字段拒绝启动：先让所有副本升级到新版本，再把它写进生产配置；回退版本前先删除它。
 
 用户还可以分享客户端插件包（按键音、背景音乐和命令表，zip 内含 plugin.toml、音频和说明），服务器只校验和原样分发、从不执行。接口 `/v1/community/plugins`、包校验规则与配额见 [插件社区](docs/plugin-community.md)。
 

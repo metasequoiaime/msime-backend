@@ -6,6 +6,7 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -59,6 +60,47 @@ type AnonymousConfig struct {
 	DailyPerAddress int `json:"daily_per_address"`
 }
 
+// CommunityConfig 是社区功能中只由部署方决定的设置。
+type CommunityConfig struct {
+	// OfficialSkinPublishers 列出官方发布账号的用户 ID（`auth_users.id`，64 位小写十六进制）。这些账号发布候选窗皮肤时不受每账号 20 款公开作品和每小时 10 次公开发布的限制，改用更宽的官方上限（见 community_candidate.go），审核、包校验、license 要求和每账号 100 款的总数上限不变。
+	OfficialSkinPublishers []string `json:"official_skin_publishers"`
+}
+
+// maxOfficialSkinPublishers 限制官方发布账号列表的长度：它是人工维护的白名单，过长通常意味着配置写错了。
+const maxOfficialSkinPublishers = 50
+
+func (c CommunityConfig) validate() error {
+	if len(c.OfficialSkinPublishers) > maxOfficialSkinPublishers {
+		return errors.New("official_skin_publishers 最多 50 个账号")
+	}
+	seen := map[string]bool{}
+	for _, id := range c.OfficialSkinPublishers {
+		if !validUserID(id) || seen[id] {
+			return errors.New("official_skin_publishers 中的用户 ID 必须是 64 位小写十六进制且不重复")
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+// officialSkinPublisher 判断账号是否在官方发布名单中。名单最多 50 项，线性查找即可。
+func (c CommunityConfig) officialSkinPublisher(userID string) bool {
+	return slices.Contains(c.OfficialSkinPublishers, userID)
+}
+
+// validUserID 与 randomToken 生成的用户 ID 格式一致：32 字节的小写十六进制。
+func validUserID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if !('0' <= id[i] && id[i] <= '9' || 'a' <= id[i] && id[i] <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 type Config struct {
 	Enabled     bool   `json:"enabled"`
 	DatabaseEnv string `json:"database_env"`
@@ -79,9 +121,14 @@ type Config struct {
 	SMS       SMSConfig       `json:"sms"`
 	Email     MailConfig      `json:"email"`
 	Avatars   AvatarConfig    `json:"avatars"`
+	Community CommunityConfig `json:"community"`
 }
 
 func (c Config) Validate() error {
+	// 名单格式与用户体系是否启用无关，写错时总是拒绝启动，免得启用用户体系那天才发现。
+	if e := c.Community.validate(); e != nil {
+		return e
+	}
 	if !c.Enabled {
 		return nil
 	}
