@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -52,6 +54,8 @@ type fakeIssuesGitHub struct {
 	writes []string
 	bodies map[string]map[string]any
 	tokens map[string]int
+	// before 在处理每个请求之前、不持有 mu 时调用，测试用它让某些读取阻塞或记录读取顺序。
+	before func(r *http.Request)
 }
 
 func newFakeIssuesGitHub(t *testing.T) *fakeIssuesGitHub {
@@ -111,6 +115,12 @@ func (i *fakeIssue) json(repo string) map[string]any {
 }
 
 func (f *fakeIssuesGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	before := f.before
+	f.mu.Unlock()
+	if before != nil {
+		before(r)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := r.Method + " " + r.URL.Path
@@ -837,5 +847,255 @@ func TestAdminIssueDetailNewestTimelinePage(t *testing.T) {
 	h.Set("Link", `<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?per_page=100&page=7>; rel="last"`)
 	if issueLastPage(h) != 7 {
 		t.Fatal(issueLastPage(h))
+	}
+}
+
+// setBefore 设置 fakeIssuesGitHub 处理请求前的钩子。
+func (f *fakeIssuesGitHub) setBefore(hook func(r *http.Request)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.before = hook
+}
+
+// issueReadKind 把一个列表读取归为 open、closed 或 comments，其他请求为空串。
+func issueReadKind(r *http.Request) string {
+	switch {
+	case r.Method != "GET":
+		return ""
+	case strings.HasSuffix(r.URL.Path, "/issues/comments"):
+		return "comments"
+	case strings.HasSuffix(r.URL.Path, "/issues"):
+		return r.URL.Query().Get("state")
+	}
+	return ""
+}
+
+// 外壳角标只读未关闭 issue：评论读取一直阻塞（远超 5 秒预算）时，角标照样在预算内给出待分诊数，也不去读已关闭 issue；评论放行后问题列表仍有响应时间，并复用角标已缓存的未关闭 issue 分页。
+func TestAdminIssuesBadgeSkipsComments(t *testing.T) {
+	s, f, _, _ := issuesFixture(t)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseComments := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseComments)
+	var mu sync.Mutex
+	reads := map[string]int{}
+	f.setBefore(func(r *http.Request) {
+		kind := issueReadKind(r)
+		mu.Lock()
+		reads[kind]++
+		mu.Unlock()
+		if kind == "comments" {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+	})
+	readCount := func(kind string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return reads[kind]
+	}
+	// 与 adminShell 相同的预算。
+	bounded, cancel := context.WithTimeout(context.Background(), adminShellGitHubBudget)
+	defer cancel()
+	if n, err := s.pendingIssues(bounded); n != 2 || err != nil {
+		t.Fatal("badge", n, err)
+	}
+	if readCount("comments") != 0 || readCount("closed") != 0 || readCount("open") != 2 {
+		t.Fatal("badge reads", reads)
+	}
+	// 第一次快照设定基线，之后新建的 issue 才会通知。
+	if s.issueMemory().baseline.IsZero() {
+		t.Fatal("the badge did not set the announcement baseline")
+	}
+
+	releaseComments()
+	status, v := issuesRequest(t, s, "GET", "/api/issues", "")
+	if stats, _ := v["stats"].(map[string]any); status != 200 || stats["first_response_samples"] != 2.0 || stats["pending"] != 2.0 {
+		t.Fatal("issues page", status, v)
+	}
+	if readCount("open") != 2 || readCount("closed") != 2 || readCount("comments") != 2 {
+		t.Fatal("the issues page did not reuse the badge's cached open pages", reads)
+	}
+
+	// 角标只读未关闭 issue，但不会把之前列出的已关闭 issue 从全局搜索中挤掉。
+	s.adminGitHub = f.client()
+	if n, err := s.pendingIssues(context.Background()); n != 2 || err != nil {
+		t.Fatal(n, err)
+	}
+	if hits := s.searchIssues("#21"); len(hits) != 1 || hits[0].ID != issuesCoreRepo+"#21" {
+		t.Fatal("closed issue dropped from search", hits)
+	}
+	if hits := s.searchIssues("候选窗"); len(hits) != 2 {
+		t.Fatal("open issues in search", hits)
+	}
+	// 重新打开的 issue 以角标这次读到的状态为准，不会以旧的已关闭状态重复出现。
+	f.mu.Lock()
+	f.issues[issuesCoreRepo][22].state = "open"
+	f.mu.Unlock()
+	s.adminGitHub = f.client()
+	if n, err := s.pendingIssues(context.Background()); n != 3 || err != nil {
+		t.Fatal(n, err)
+	}
+	m := s.issueMemory()
+	m.mu.Lock()
+	var states []string
+	for _, row := range m.items {
+		if row.Number == 22 {
+			states = append(states, row.State)
+		}
+	}
+	m.mu.Unlock()
+	if !slices.Equal(states, []string{"new"}) {
+		t.Fatal("reopened issue in search", states)
+	}
+}
+
+// 同一仓库的未关闭 issue、已关闭 issue 和评论三组读取并发进行：每组的第一个请求都要等另外两组到齐才返回，顺序读取会在这里卡住。
+func TestAdminIssuesReadsRunConcurrently(t *testing.T) {
+	s, f, _, _ := issuesFixture(t)
+	var mu sync.Mutex
+	arrived := map[string]bool{}
+	together := make(chan struct{})
+	f.setBefore(func(r *http.Request) {
+		kind := issueReadKind(r)
+		if kind == "" || !strings.HasPrefix(r.URL.Path, "/repos/"+issuesWinRepo+"/") {
+			return
+		}
+		mu.Lock()
+		first := !arrived[kind]
+		arrived[kind] = true
+		if first && len(arrived) == 3 {
+			close(together)
+		}
+		mu.Unlock()
+		if !first {
+			return
+		}
+		select {
+		case <-together:
+		case <-time.After(10 * time.Second):
+			t.Errorf("%s read of %s waited for the other reads: they run one after another", kind, issuesWinRepo)
+		}
+	})
+	status, v := issuesRequest(t, s, "GET", "/api/issues?state=all", "")
+	if stats, _ := v["stats"].(map[string]any); status != 200 || stats["first_response_samples"] != 2.0 || !slices.Equal(issueNumbers(v), []int{10, 11, 20, 21, 22}) {
+		t.Fatal(status, v)
+	}
+}
+
+// issueCaptureLogs 把默认 logger 换成写入缓冲区的 JSON logger，测试结束时还原。
+func issueCaptureLogs(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var mu sync.Mutex
+	var buf strings.Builder
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(lockedWriter{&mu, &buf}, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return func() []map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []map[string]any
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			var record map[string]any
+			if line != "" && json.Unmarshal([]byte(line), &record) == nil {
+				out = append(out, record)
+			}
+		}
+		buf.Reset()
+		return out
+	}
+}
+
+type lockedWriter struct {
+	mu  *sync.Mutex
+	buf *strings.Builder
+}
+
+func (w lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// 只因 ctx 到期或取消而中断的 GitHub 调用记 WARN，GitHub 的错误状态和无法解码的正文记 ERROR；日志都带仓库名和调用名。
+func TestIssueGitHubFailureLogLevel(t *testing.T) {
+	logs := issueCaptureLogs(t)
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	live := context.Background()
+	decodeErr := json.Unmarshal([]byte("{"), &struct{}{})
+	for _, tc := range []struct {
+		name  string
+		err   func() error
+		level string
+		msg   string
+	}{
+		{"deadline", func() error {
+			return issueResponseError(expired, issuesWinRepo, "list comments", githubapp.Response{Status: 200}, context.DeadlineExceeded)
+		}, "WARN", "issues: GitHub unavailable"},
+		{"canceled", func() error {
+			return issueResponseError(live, issuesWinRepo, "list comments", githubapp.Response{}, context.Canceled)
+		}, "WARN", "issues: GitHub unavailable"},
+		{"server error", func() error {
+			return issueResponseError(live, issuesWinRepo, "list comments", githubapp.Response{Status: 502}, nil)
+		}, "ERROR", "issues: GitHub unavailable"},
+		{"decode", func() error {
+			return issueResponseError(live, issuesWinRepo, "list comments", githubapp.Response{Status: 200}, decodeErr)
+		}, "ERROR", "issues: GitHub unavailable"},
+		{"refused", func() error {
+			return issueResponseError(live, issuesWinRepo, "list comments", githubapp.Response{Status: 403}, nil)
+		}, "ERROR", "issues: GitHub refused"},
+		// githubapp 铸造令牌时把原因转成了字符串，只能从 ctx 看出是超时。
+		{"token deadline", func() error {
+			return issueTokenError(expired, issuesWinRepo, errors.New("github unavailable: mint token: context deadline exceeded"))
+		}, "WARN", "issues: GitHub installation token"},
+		{"token rejected", func() error { return issueTokenError(live, issuesWinRepo, githubapp.ErrRejected) }, "ERROR", "issues: GitHub installation token"},
+	} {
+		if tc.err() == nil {
+			t.Fatal(tc.name, "no error")
+		}
+		records := logs()
+		if len(records) != 1 || records[0]["level"] != tc.level || records[0]["msg"] != tc.msg || records[0]["repo"] != issuesWinRepo {
+			t.Errorf("%s: %v", tc.name, records)
+		}
+		if tc.msg != "issues: GitHub installation token" && records[0]["call"] != "list comments" {
+			t.Errorf("%s: call missing: %v", tc.name, records)
+		}
+	}
+}
+
+// 端到端：评论分页读到超时时，日志是带仓库名和调用名的 WARN，不是 ERROR。
+func TestAdminIssuesCommentDeadlineLogsWarn(t *testing.T) {
+	s, f, _, _ := issuesFixture(t)
+	// 先读一次列表，让令牌和 issue 分页进入缓存，之后只有评论需要访问 GitHub。
+	if _, err := s.issueSnapshot(context.Background(), s.adminGitHub, issueScopeListing); err != nil {
+		t.Fatal(err)
+	}
+	f.setBefore(func(r *http.Request) {
+		if issueReadKind(r) == "comments" {
+			<-r.Context().Done()
+		}
+	})
+	logs := issueCaptureLogs(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := s.issueSnapshot(ctx, s.adminGitHub, issueScopeFull); err == nil {
+		t.Fatal("snapshot without any readable comments")
+	}
+	repos := map[string]bool{}
+	for _, record := range logs() {
+		if record["msg"] != "issues: GitHub unavailable" {
+			continue
+		}
+		if record["level"] != "WARN" || record["call"] != "list comments" {
+			t.Errorf("deadline logged as %v", record)
+		}
+		repo, _ := record["repo"].(string)
+		repos[repo] = true
+	}
+	if !repos[issuesWinRepo] || !repos[issuesCoreRepo] {
+		t.Fatal("deadline logs do not name every repository", repos)
 	}
 }
