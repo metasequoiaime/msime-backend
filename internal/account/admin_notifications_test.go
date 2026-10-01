@@ -176,8 +176,12 @@ func TestNotificationPreferencesMuteKinds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := a.store.pool.Exec(ctx, `INSERT INTO admin_preferences(email,prefs) VALUES('a@example.test','{"pr":false,"cm":true,"crash":false}')`); err != nil {
-		t.Fatal(err)
+	// The preferences are written the way the personal page writes them, so the reader and the writer agree on the keys.
+	access := AdminAccess{Actor: "google:x:a@example.test", Email: "a@example.test", Role: "readonly"}
+	for _, body := range []string{`{"action":"set_pref","key":"notify_dict_pr","value":false}`, `{"action":"set_pref","key":"notify_report","value":true}`, `{"action":"set_pref","key":"notify_crash_spike","value":false}`} {
+		if w := meRequest(a, access, "POST", body, ""); w.Code != 200 {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
 	}
 	got := listNotifications(t, a, "a@example.test", "")
 	kinds := []string{}

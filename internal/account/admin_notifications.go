@@ -94,8 +94,8 @@ func (a *Service) NotifyNow(ctx context.Context, n Notification) error {
 	return err
 }
 
-// notificationVisible is the condition shared by the list and the unread count, with $1 the admin's email: a kind is hidden when the admin switched off its personal preference (admin_preferences.prefs keys pr, cm and crash from 个人中心; a missing key means on). Kinds without a preference are always shown.
-const notificationVisible = `COALESCE((SELECT prefs FROM admin_preferences WHERE email=$1)->>(CASE n.kind WHEN 'dict_pr' THEN 'pr' WHEN 'report' THEN 'cm' WHEN 'crash_spike' THEN 'crash' END),'true')<>'false'`
+// notificationVisible is the condition shared by the list and the unread count, with $1 the admin's email: a kind is hidden when the admin switched off its personal preference (the admin_preferences.prefs key "notify_"+kind that POST /api/me set_pref writes, see adminPrefDefaults; a missing key means on). Kinds without a preference are always shown.
+const notificationVisible = `COALESCE((SELECT prefs FROM admin_preferences WHERE email=$1)->>(CASE WHEN n.kind IN ('` + NotifyDictPR + `','` + NotifyReport + `','` + NotifyCrashSpike + `') THEN 'notify_'||n.kind END),'true')<>'false'`
 
 // notificationRead is true when $1 has read n, one by one or through 全部已读 (admin_preferences.read_all_before).
 const notificationRead = `(n.created_at<=COALESCE((SELECT read_all_before FROM admin_preferences WHERE email=$1),'-infinity') OR EXISTS(SELECT 1 FROM admin_notification_reads r WHERE r.email=$1 AND r.notification_id=n.id))`
