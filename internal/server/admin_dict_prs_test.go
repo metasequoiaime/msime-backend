@@ -441,6 +441,17 @@ func TestDictPRList(t *testing.T) {
 	if got := notificationRows(t, conn, schema); !slices.Equal(got, []string{"dict_pr dictpr 12"}) {
 		t.Fatal("dictionary pull request notifications", got)
 	}
+	// A restart (or another replica) starts with an empty memory but finds the announcement in the database.
+	st := s.dictPRState()
+	st.mu.Lock()
+	st.notified = map[int]bool{}
+	st.mu.Unlock()
+	if w = dictCall(s, "GET", "/api/dict-prs", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := notificationRows(t, conn, schema); !slices.Equal(got, []string{"dict_pr dictpr 12"}) {
+		t.Fatal("dictionary pull request announced again after a restart", got)
+	}
 	if hits := s.searchDictPRs("#12"); len(hits) != 1 || hits[0].ID != "12" || hits[0].Target != "dictpr" || hits[0].Kind != "dict_pr" {
 		t.Fatalf("%+v", hits)
 	}

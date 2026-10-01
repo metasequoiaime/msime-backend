@@ -44,7 +44,7 @@ var dictPRPermissions = map[string]string{"contents": "write", "pull_requests": 
 
 var errDictPRConflict = errors.New("dictionary pull request changed concurrently")
 
-// dictPRState is the per-server memory of the review page: the last pull request list and the submitter notes last read for the global search, the pull requests already announced as notifications, and the lock that serialises review writes within this process.
+// dictPRState is the per-server memory of the review page: the last pull request list and the submitter notes last read for the global search, the pull requests this process already announced (a cache in front of NotifyOnce), and the lock that serialises review writes within this process.
 type dictPRState struct {
 	once     sync.Once
 	mu       sync.Mutex
@@ -261,7 +261,8 @@ func (s *Server) fetchDictPulls(ctx context.Context, gh *githubapp.Client) ([]di
 	st.index = index
 	st.mu.Unlock()
 	for _, p := range fresh {
-		err := s.accounts.NotifyNow(ctx, account.Notification{Kind: account.NotifyDictPR, Title: "词库 PR #" + strconv.Itoa(p.Number) + " 等待审核", TargetPage: "dictpr", TargetID: strconv.Itoa(p.Number)})
+		// NotifyOnce checks the database, so a restart or another replica, which start with an empty notified map, never announces the same pull request again.
+		err := s.accounts.NotifyOnce(ctx, account.Notification{Kind: account.NotifyDictPR, Title: "词库 PR #" + strconv.Itoa(p.Number) + " 等待审核", TargetPage: "dictpr", TargetID: strconv.Itoa(p.Number)})
 		if err != nil {
 			slog.Warn("dictionary pull requests: notification not recorded", "pull", p.Number, "reason", err.Error())
 			// Released so a later read tries again.

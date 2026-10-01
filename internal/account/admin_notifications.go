@@ -94,6 +94,27 @@ func (a *Service) NotifyNow(ctx context.Context, n Notification) error {
 	return err
 }
 
+// NotifyOnce records n unless a notification of the same kind and target already exists, for causes found by polling an outside source (an open dictionary pull request) that every replica and every restart sees again. Concurrent callers for the same kind and target are serialised by an advisory lock, so exactly one row is written.
+func (a *Service) NotifyOnce(ctx context.Context, n Notification) error {
+	n, err := normalizeNotification(n)
+	if err != nil {
+		return err
+	}
+	tx, err := a.store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	// The check runs as its own statement after the lock, so its snapshot sees a row another caller committed while this one waited.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('admin_notifications:'||$1||':'||$2,0))`, n.Kind, n.TargetID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO admin_notifications(kind,title,target_page,target_id,created_at) SELECT $1,$2,$3,$4,clock_timestamp() WHERE NOT EXISTS(SELECT 1 FROM admin_notifications WHERE kind=$1 AND target_id=$4)`, n.Kind, n.Title, n.TargetPage, n.TargetID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // notificationVisible is the condition shared by the list and the unread count, with $1 the admin's email: a kind is hidden when the admin switched off its personal preference (the admin_preferences.prefs key "notify_"+kind that POST /api/me set_pref writes, see adminPrefDefaults; a missing key means on). Kinds without a preference are always shown.
 const notificationVisible = `COALESCE((SELECT prefs FROM admin_preferences WHERE email=$1)->>(CASE WHEN n.kind IN ('` + NotifyDictPR + `','` + NotifyReport + `','` + NotifyCrashSpike + `') THEN 'notify_'||n.kind END),'true')<>'false'`
 

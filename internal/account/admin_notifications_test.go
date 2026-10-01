@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -240,4 +241,24 @@ func lastNotificationID(t *testing.T, db *Store) int64 {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestNotifyOnceWritesOneRowPerTarget(t *testing.T) {
+	a := notificationTestService(t)
+	ctx := context.Background()
+	errs := make(chan error, 6)
+	for i := range 6 {
+		go func() {
+			errs <- a.NotifyOnce(ctx, Notification{Kind: NotifyDictPR, TargetPage: "dictpr", TargetID: strconv.Itoa(12 + i%2)})
+		}()
+	}
+	for range 6 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var n int
+	if err := a.store.pool.QueryRow(ctx, `SELECT count(*) FROM admin_notifications WHERE kind='dict_pr'`).Scan(&n); err != nil || n != 2 {
+		t.Fatal(n, err)
+	}
 }
