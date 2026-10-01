@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"regexp/syntax"
 	"slices"
 	"strconv"
 	"strings"
@@ -146,7 +147,10 @@ func loadSensitiveWords(ctx context.Context, store *Store) ([]sensitiveWord, err
 	return words, rows.Err()
 }
 
-// compileSensitiveRegex compiles a pattern as a case-insensitive RE2 expression. A regex that matches the empty string would flag every text, so it is rejected.
+// maxSensitiveRegexRepeat bounds how much a regex's counted repeats multiply it (see sensitiveRegexRepeatCost). Go's regexp runs in linear time, but its cost per input byte grows with the expanded program, so `[\pL\pN]{1000}` would take seconds on one large upload and a match cannot be cancelled. At this bound the worst case on a 350 KB text stays near 0.2 s.
+const maxSensitiveRegexRepeat = 100
+
+// compileSensitiveRegex compiles a pattern as a case-insensitive RE2 expression. A regex that matches the empty string would flag every text, and one whose counted repeats expand it beyond maxSensitiveRegexRepeat would make screening slow, so both are rejected.
 func compileSensitiveRegex(pattern string) (*regexp.Regexp, error) {
 	re, err := regexp.Compile("(?i)" + pattern)
 	if err != nil {
@@ -155,7 +159,47 @@ func compileSensitiveRegex(pattern string) (*regexp.Regexp, error) {
 	if re.MatchString("") {
 		return nil, errors.New("pattern matches empty text")
 	}
+	tree, err := syntax.Parse("(?i)"+pattern, syntax.Perl)
+	if err != nil {
+		return nil, err
+	}
+	if sensitiveRegexRepeatCost(tree, 1) > maxSensitiveRegexRepeat {
+		return nil, errors.New("pattern repeats too much")
+	}
 	return re, nil
+}
+
+// sensitiveRegexRepeatCost is the number of program steps a counted repeat ({n} or {n,m}) adds, mult being the product of the enclosing repeat counts: each leaf inside a repeat counts its width times mult. Unrepeated leaves and *, + and ? cost nothing here, because they keep the program as written and the pattern length (at most 200 characters) already bounds them.
+func sensitiveRegexRepeatCost(re *syntax.Regexp, mult int) int {
+	switch re.Op {
+	case syntax.OpRepeat:
+		n := re.Max
+		if n < 0 {
+			n = re.Min
+		}
+		mult *= max(n, 1)
+		if mult > maxSensitiveRegexRepeat*1000 {
+			return mult
+		}
+	case syntax.OpLiteral:
+		if mult > 1 {
+			return mult * len(re.Rune)
+		}
+		return 0
+	case syntax.OpCharClass, syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		if mult > 1 {
+			return mult
+		}
+		return 0
+	}
+	cost := 0
+	for _, sub := range re.Sub {
+		cost += sensitiveRegexRepeatCost(sub, mult)
+		if cost > maxSensitiveRegexRepeat {
+			return cost
+		}
+	}
+	return cost
 }
 
 // foldSensitive normalises text for matching: invisible format characters (zero-width spaces and joiners, bidi marks) are removed so they cannot split a word, full-width ASCII becomes half-width, letters lowercase, and with dropSpace every white space character is removed so spacing cannot split a plain word.
@@ -259,6 +303,10 @@ func (m sensitiveMatcher) Match(ctx context.Context, text string) ([]SensitiveHi
 	}, text)
 	var hits []SensitiveHit
 	for _, w := range words {
+		// A single match cannot be interrupted, but a request that timed out or was abandoned stops before the next word.
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
 		if (w.re != nil && (w.re.MatchString(spaced) || (visible != spaced && w.re.MatchString(visible)))) || (w.re == nil && strings.Contains(compact, w.plain)) {
 			hits = append(hits, w.hit)
 		}

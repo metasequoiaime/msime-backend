@@ -95,6 +95,8 @@ func TestSensitiveWordConsole(t *testing.T) {
 		`{"pattern":"` + strings.Repeat("长", 201) + `","category":"ad","level":"block"}`,
 		`{"pattern":"/(unclosed/","category":"ad","level":"block"}`,
 		`{"pattern":"a*","is_regex":true,"category":"ad","level":"block"}`,
+		`{"pattern":"[\\pL\\pN]{1000}#","is_regex":true,"category":"ad","level":"block"}`,
+		`{"pattern":"(?:[\\pL\\pN]{20}){13}#","is_regex":true,"category":"ad","level":"block"}`,
 		`{"pattern":"line\nbreak","category":"ad","level":"block"}`,
 		`{"pattern":"x","category":"spam","level":"block"}`,
 		`{"pattern":"x","category":"ad","level":"delete"}`,
@@ -221,6 +223,23 @@ func TestSensitiveWordConsole(t *testing.T) {
 	}
 	if audits[4].Action != "delete_sensitive_word" || audits[5].Target != "代购" {
 		t.Fatal(audits[4], audits[5])
+	}
+}
+
+func TestSensitiveRegexRepeatCost(t *testing.T) {
+	for pattern, ok := range map[string]bool{
+		`加\s*v`:                          true,
+		`\d{5,11}`:                       true,
+		`(?:[\pL\pN]{20}){5}#`:           true,
+		strings.Repeat("词语|", 60) + "词语": true,
+		`[\pL\pN]{101}#`:                 false,
+		`(?:abcd){26}`:                   false,
+		`[\pL\pN]{1000}#`:                false,
+		strings.Repeat(`[\pL\pN]{1000}`, 13) + "#": false,
+	} {
+		if _, err := compileSensitiveRegex(pattern); (err == nil) != ok {
+			t.Errorf("%q: %v", pattern, err)
+		}
 	}
 }
 

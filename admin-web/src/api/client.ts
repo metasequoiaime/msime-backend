@@ -51,7 +51,7 @@ const codeMessages: Record<string, string> = {
   blocked_content: "内容命中敏感词，已被拦截。",
   screening_unavailable: "敏感词检查暂时不可用，请稍后重试。",
   // Sensitive words.
-  invalid_pattern: "规则无效：正则需符合 RE2 语法且不能匹配空文本，长度不超过 200 个字符，不能含换行等控制字符。",
+  invalid_pattern: "规则无效：正则需符合 RE2 语法且不能匹配空文本，{n} 这类计数重复展开后不超过 100 步，长度不超过 200 个字符，不能含换行等控制字符。",
   invalid_category: "请选择有效的分类。",
   invalid_level: "请选择有效的处理方式。",
   // Notices.
