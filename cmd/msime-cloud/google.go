@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -139,7 +140,14 @@ func receiveGoogleCode(listener net.Listener, state string, wait time.Duration) 
 	})
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: callbackTimeout, ReadTimeout: callbackTimeout, WriteTimeout: callbackTimeout, MaxHeaderBytes: 8 << 10}
 	go server.Serve(listener)
-	defer server.Close()
+	// The handler reports its outcome before its page is sent, so Close here would cut the browser off mid-response; Shutdown lets the page finish, bounded by the write timeout.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
+		defer cancel()
+		if server.Shutdown(ctx) != nil {
+			server.Close()
+		}
+	}()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
