@@ -51,7 +51,9 @@
       "internal/account/http_contract_test.go::TestAccountHTTPProfileRefreshLogoutDelete"
     ],
     "GET /v1/users/me": [
-      "internal/account/http_contract_test.go::TestAccountHTTPProfileRefreshLogoutDelete"
+      "internal/account/http_contract_test.go::TestAccountHTTPProfileRefreshLogoutDelete",
+      "internal/account/admin_users_ext_test.go::TestPrincipalAnswersBannedAccountWith403",
+      "internal/server/account_test.go::TestUserSessionAuthorizesAPIAndDeviceCannotManageUsers"
     ],
     "PATCH /v1/users/me": [
       "internal/account/http_contract_test.go::TestAccountHTTPProfileRefreshLogoutDelete"
@@ -330,7 +332,8 @@
     ],
     "POST /v1/telemetry/events": [
       "internal/account/admin_test.go::TestAdminDataAndActions",
-      "internal/account/admin_contract_test.go::TestTelemetryHTTPValidationAndIdempotency"
+      "internal/account/admin_contract_test.go::TestTelemetryHTTPValidationAndIdempotency",
+      "internal/account/admin_downloads_test.go::TestTelemetryDeviceActivityAndDownloadDimensions"
     ],
     "POST /v1/skins/generate": [
       "internal/server/skin_generation_test.go::TestSkinArtworkUsesFixedModelAndReturnsValidatedImage",
@@ -366,7 +369,9 @@
       "internal/server/word_submissions_test.go::TestWordSubmissionMissingFiles",
       "internal/server/word_submissions_test.go::TestWordSubmissionWeightMedians",
       "internal/server/word_submissions_test.go::TestWordSubmissionRejectsShippedWords",
-      "internal/server/word_submissions_test.go::TestWordSubmissionRejectsShippedEnglish"
+      "internal/server/word_submissions_test.go::TestWordSubmissionRejectsShippedEnglish",
+      "internal/server/word_submissions_test.go::TestWordSubmissionSensitiveWordsAndRecording",
+      "internal/server/word_submissions_test.go::TestWordSubmissionScreeningFailure"
     ],
     "GET /v1/notices": [
       "internal/server/telegram_test.go::TestPublicNoticesFeedAndTelegramPublish",
@@ -381,7 +386,8 @@
     ],
     "GET /api/users": [
       "internal/account/admin_test.go::TestAdminDataAndActions",
-      "internal/account/admin_test.go::TestAdminListFilters"
+      "internal/account/admin_test.go::TestAdminListFilters",
+      "internal/account/admin_users_ext_test.go::TestAdminUsersCountConfiguredOwnersAsMaintainers"
     ],
     "GET /api/downloads": [
       "internal/account/admin_test.go::TestAdminDataAndActions",
@@ -435,7 +441,8 @@
       "internal/account/admin_test.go::TestAdminDataAndActions",
       "internal/account/admin_contract_test.go::TestAdminHTTPValidationAndAuditAtomicity",
       "internal/account/admin_user_test.go::TestAdminUserDetailsAndSessionRevocation",
-      "internal/account/community_plugins_test.go::TestCommunityPluginModeration"
+      "internal/account/community_plugins_test.go::TestCommunityPluginModeration",
+      "internal/account/admin_notices_test.go::TestNoticeBodyUsesTheFullColumn"
     ],
     "GET /api/admins": [
       "internal/account/admin_members_test.go::TestAdminMemberLifecycle",
