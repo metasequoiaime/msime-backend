@@ -1,13 +1,18 @@
 package account
 
 import (
+	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -17,8 +22,60 @@ import (
 // pluginTransferTimeout is how long a publish or a download may take end to end: either moves up to 11.3 MB of JSON, which the default 15 s route context and the server's read and write deadlines would cut off on a slow link.
 const pluginTransferTimeout = 90 * time.Second
 
-// pluginArchiveSlots bounds concurrent archive inflation per process, because /v1/community routes bypass the server's MaxConcurrent limit and one publish may inflate up to 24 MiB.
-var pluginArchiveSlots = make(chan struct{}, 2)
+// /v1/community routes bypass the server's MaxConcurrent limit, so these slots are what bound the memory plugin transfers hold per process. A publish holds an upload slot from before its body is read until it returns, which covers the up to 11.3 MB JSON body, the decoded 8 MiB archive and its inflation; a download holds a download slot from before the archive is loaded until the response is written.
+var (
+	pluginUploadSlots   = make(chan struct{}, 4)
+	pluginDownloadSlots = make(chan struct{}, 8)
+)
+
+// pluginPublishTurns has one entry per account with a publish waiting or running. An account's publishes take turns before they claim an upload slot, so one session cannot hold every slot with slow uploads.
+var pluginPublishTurns = struct {
+	sync.Mutex
+	accounts map[string]*pluginPublishTurn
+}{accounts: map[string]*pluginPublishTurn{}}
+
+type pluginPublishTurn struct {
+	slot    chan struct{}
+	waiting int
+}
+
+// acquirePluginSlot waits for a free slot in slots until ctx ends and returns its release, or false when ctx ended first.
+func acquirePluginSlot(ctx context.Context, slots chan struct{}) (func(), bool) {
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
+// acquirePluginPublishTurn waits until no other publish of userID is running and returns the release, or false when ctx ended first.
+func acquirePluginPublishTurn(ctx context.Context, userID string) (func(), bool) {
+	pluginPublishTurns.Lock()
+	turn := pluginPublishTurns.accounts[userID]
+	if turn == nil {
+		turn = &pluginPublishTurn{slot: make(chan struct{}, 1)}
+		pluginPublishTurns.accounts[userID] = turn
+	}
+	turn.waiting++
+	pluginPublishTurns.Unlock()
+	leave := func() {
+		pluginPublishTurns.Lock()
+		if turn.waiting--; turn.waiting == 0 {
+			delete(pluginPublishTurns.accounts, userID)
+		}
+		pluginPublishTurns.Unlock()
+	}
+	release, ok := acquirePluginSlot(ctx, turn.slot)
+	if !ok {
+		leave()
+		return nil, false
+	}
+	return func() {
+		release()
+		leave()
+	}, true
+}
 
 // CommunityPlugin is the list and detail item; it never carries the archive or manifest bytes. Owned and MyRating are false and 0 for an anonymous viewer.
 type CommunityPlugin struct {
@@ -137,6 +194,18 @@ func (a *Service) communityPluginPublish(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	extendPluginTransfer(w)
+	releaseTurn, ok := acquirePluginPublishTurn(r.Context(), p.UserID)
+	if !ok {
+		writeError(w, 503, "plugin_busy")
+		return
+	}
+	defer releaseTurn()
+	releaseSlot, ok := acquirePluginSlot(r.Context(), pluginUploadSlots)
+	if !ok {
+		writeError(w, 503, "plugin_busy")
+		return
+	}
+	defer releaseSlot()
 	var input struct {
 		ID          string `json:"id"`
 		Name        string `json:"name"`
@@ -200,18 +269,7 @@ func (a *Service) communityPluginPublish(w http.ResponseWriter, r *http.Request)
 		a.error(w, e)
 		return
 	}
-	var pack pluginPack
-	var code string
-	select {
-	case pluginArchiveSlots <- struct{}{}:
-		func() {
-			defer func() { <-pluginArchiveSlots }()
-			pack, code = validPluginArchive(input.Archive)
-		}()
-	case <-r.Context().Done():
-		writeError(w, 503, "plugin_busy")
-		return
-	}
+	pack, code := validPluginArchive(input.Archive)
 	if code != "" {
 		writeError(w, 400, code)
 		return
@@ -289,7 +347,18 @@ func (a *Service) communityPluginDownload(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	// Charged before the slot is claimed, so repeated downloads from one account cannot keep the slots busy; the count of downloaders stays deduplicated separately.
+	if e := a.RateLimit(r.Context(), "plugin-download", p.UserID, pluginDownloadsPerHour, time.Hour); e != nil {
+		a.error(w, e)
+		return
+	}
 	extendPluginTransfer(w)
+	releaseSlot, ok := acquirePluginSlot(r.Context(), pluginDownloadSlots)
+	if !ok {
+		writeError(w, 503, "plugin_busy")
+		return
+	}
+	defer releaseSlot()
 	tx, e := a.store.pool.Begin(r.Context())
 	if e != nil {
 		a.error(w, e)
@@ -315,7 +384,41 @@ func (a *Service) communityPluginDownload(w http.ResponseWriter, r *http.Request
 		a.error(w, e)
 		return
 	}
-	write(w, 200, map[string]any{"id": r.PathValue("id"), "kind": kind, "plugin_id": pluginID, "version": version, "size": len(archive), "sha256": sum, "archive": archive})
+	writePluginDownload(w, pluginDownload{ID: r.PathValue("id"), Kind: kind, PluginID: pluginID, Version: version, Size: len(archive), SHA256: sum}, archive)
+}
+
+// pluginDownload is the download response without its archive field, which writePluginDownload appends.
+type pluginDownload struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	PluginID string `json:"plugin_id"`
+	Version  string `json:"version"`
+	Size     int    `json:"size"`
+	SHA256   string `json:"sha256"`
+}
+
+// writePluginDownload writes the same JSON object write would, but streams the archive through a base64 encoder instead of letting json.Encoder build a second, 4/3-sized copy of it in memory before the first byte goes out.
+func writePluginDownload(w http.ResponseWriter, head pluginDownload, archive []byte) {
+	fields, _ := json.Marshal(head)
+	prefix := append(fields[:len(fields)-1], `,"archive":"`...)
+	suffix := "\"}\n"
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Length", strconv.Itoa(len(prefix)+base64.StdEncoding.EncodedLen(len(archive))+len(suffix)))
+	w.WriteHeader(200)
+	// A failed write means the client went away; there is nothing left to report to it.
+	if _, e := w.Write(prefix); e != nil {
+		return
+	}
+	encoder := base64.NewEncoder(base64.StdEncoding, w)
+	if _, e := encoder.Write(archive); e != nil {
+		return
+	}
+	if e := encoder.Close(); e != nil {
+		return
+	}
+	_, _ = io.WriteString(w, suffix)
 }
 
 func (a *Service) communityPluginRate(w http.ResponseWriter, r *http.Request) {

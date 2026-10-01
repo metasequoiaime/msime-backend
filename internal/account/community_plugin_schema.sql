@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS community_plugins (
  id text PRIMARY KEY CHECK(id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
  owner_id text NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
- kind text NOT NULL CHECK(kind IN ('sound','music','effect','command_table')),
+ kind text NOT NULL CHECK(kind IN ('sound','music','command_table')),
  plugin_id text NOT NULL CHECK(plugin_id ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
  name text NOT NULL,
  description text NOT NULL DEFAULT '',

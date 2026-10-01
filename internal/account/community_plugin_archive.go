@@ -3,10 +3,13 @@ package account
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"io"
 	"io/fs"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -34,6 +37,8 @@ const (
 	// Total stored archive bytes per account.
 	maxPluginBytesPerUser  = 32 << 20
 	pluginPublishesPerHour = 10
+	// Download attempts per account per hour; each one holds up to 8 MiB of archive while it is written out.
+	pluginDownloadsPerHour = 60
 )
 
 // Per-kind audio bounds, from sound_pack.rs and music_pack.rs.
@@ -51,8 +56,8 @@ const (
 	maxCommandTemplate  = 199
 )
 
-// pluginKinds is the kind whitelist. sound, music and command_table follow the client's PluginKind; effect is provisional (see validPluginEffect).
-var pluginKinds = []string{"sound", "music", "effect", "command_table"}
+// pluginKinds is the kind whitelist, the client's PluginKind::ALL.
+var pluginKinds = []string{"sound", "music", "command_table"}
 
 // builtinPluginIDs are the ids the client bundles for a kind; it refuses to import a pack over one of them.
 var builtinPluginIDs = map[string][]string{
@@ -324,10 +329,6 @@ type pluginManifest struct {
 		Title    *string `toml:"title"`
 		Template *string `toml:"template"`
 	} `toml:"commands"`
-	Effect *struct {
-		Style     *string `toml:"style"`
-		Intensity *int64  `toml:"intensity"`
-	} `toml:"effect"`
 }
 
 var pluginCommonKeys = []string{"schema_version", "kind", "id", "name", "version", "license", "author", "description", "permissions"}
@@ -336,7 +337,6 @@ var pluginKindKeys = map[string][]string{
 	"sound":         {"mode", "sounds", "sequence"},
 	"music":         {"music"},
 	"command_table": {"commands"},
-	"effect":        {"effect"},
 }
 
 // validPluginArchive runs every server-side check on an uploaded pack and returns what is stored, or the error code. It never decodes audio beyond its magic bytes and never executes anything.
@@ -398,8 +398,6 @@ func validPluginArchive(archive []byte) (pluginPack, string) {
 		fileLimit, totalLimit, countLimit = maxMusicTrackBytes, maxMusicPackBytes, maxMusicTracks
 	case "command_table":
 		ok = validPluginCommands(table, m)
-	case "effect":
-		ok = validPluginEffect(table, m)
 	}
 	if !ok {
 		return pluginPack{}, "invalid_plugin_manifest"
@@ -535,7 +533,7 @@ func validPluginMusic(table map[string]any, m pluginManifest) ([]string, bool) {
 	return slices.Clone(tracks), true
 }
 
-// validPluginCommands follows command_table.rs: 1 to 256 rows with unique lowercase triggers, a short title and a template whose placeholders are {date}, {time}, {weekday}, {date:FMT} or {time:FMT}. The client also parses FMT as strftime and bounds the expanded text; those checks stay on the client.
+// validPluginCommands follows command_table.rs: 1 to 256 rows with unique lowercase triggers, a short title and a template whose placeholders are {date}, {time}, {weekday}, {date:FMT} or {time:FMT}, and whose expansion stays within the client's bounds.
 func validPluginCommands(table map[string]any, m pluginManifest) bool {
 	rows, _ := table["commands"].([]any)
 	if m.Commands == nil || len(*m.Commands) < 1 || len(*m.Commands) > maxCommandRows || len(rows) != len(*m.Commands) {
@@ -563,41 +561,179 @@ func validPluginCommands(table map[string]any, m pluginManifest) bool {
 	return true
 }
 
-// validCommandTemplate checks the brace structure the client's expand_at accepts: no stray or nested braces, and only known placeholders.
+// The two instants the client expands a template at: both a Wednesday at 23:59:59 with a two-digit day, one in September for the longest English names and one in December for the two-digit month an unpadded %-m gives, so a template that fits at both fits on every day.
+var commandTemplateInstants = []time.Time{time.Date(2026, time.September, 30, 23, 59, 59, 0, time.UTC), time.Date(2026, time.December, 30, 23, 59, 59, 0, time.UTC)}
+
+// validCommandTemplate is the rest of the client's validate: the template expands at both instants, and no expansion contains a control character (%n and %t produce them) or exceeds 199 UTF-16 units.
 func validCommandTemplate(template string) bool {
+	for _, instant := range commandTemplateInstants {
+		expanded, ok := expandCommandTemplate(template, instant)
+		if !ok || strings.ContainsFunc(expanded, unicode.IsControl) || len(utf16.Encode([]rune(expanded))) > maxCommandTemplate {
+			return false
+		}
+	}
+	return true
+}
+
+// expandCommandTemplate is the client's expand_at: no stray or nested braces, only known placeholders, and every FMT one the client's strftime parser accepts and can format for a date-time without an offset.
+func expandCommandTemplate(template string, t time.Time) (string, bool) {
+	var out strings.Builder
 	rest := template
 	for {
 		open := strings.IndexAny(rest, "{}")
 		if open < 0 {
-			return true
+			out.WriteString(rest)
+			return out.String(), true
 		}
 		if rest[open] == '}' {
-			return false
+			return "", false
 		}
+		out.WriteString(rest[:open])
 		after := rest[open+1:]
 		end := strings.IndexAny(after, "{}")
 		if end < 0 || after[end] == '{' {
-			return false
+			return "", false
 		}
 		placeholder := after[:end]
 		rest = after[end+1:]
-		name, _, _ := strings.Cut(placeholder, ":")
-		if placeholder != "weekday" && name != "date" && name != "time" {
-			return false
+		if placeholder == "weekday" {
+			out.WriteString("星期三")
+			continue
 		}
+		name, format, _ := strings.Cut(placeholder, ":")
+		switch {
+		case name == "date" && format == "":
+			format = "%Y-%m-%d"
+		case name == "time" && format == "":
+			format = "%H:%M"
+		case name != "date" && name != "time":
+			return "", false
+		}
+		expanded, ok := pluginStrftime(format, t)
+		if !ok {
+			return "", false
+		}
+		out.WriteString(expanded)
 	}
 }
 
-// validPluginEffect checks the provisional effect manifest: an [effect] table naming one of the host's built-in styles and an optional intensity 0..100, the same range as the effect_intensity preference. The client has no effect pack kind yet, so this schema is the contract it has to match; an effect pack carries no audio.
-func validPluginEffect(table map[string]any, m pluginManifest) bool {
-	effect, _ := table["effect"].(map[string]any)
-	if m.Effect == nil || !pluginKeys(effect, "style", "intensity") || m.Effect.Style == nil {
-		return false
+// pluginStrftime formats t with a strftime description the way the client does it: parse_strftime_borrowed from the time crate, then formatting a PrimitiveDateTime. ok is false for a trailing %, a specifier that parser does not know (%E, %O, %Z and the like), and %s or %z, which parse but need an offset a PrimitiveDateTime does not carry. An optional _, - or 0 after % selects space, no or zero padding for the numeric components that take it; the others ignore it.
+func pluginStrftime(format string, t time.Time) (string, bool) {
+	year, week := t.ISOWeek()
+	hour12 := t.Hour() % 12
+	if hour12 == 0 {
+		hour12 = 12
 	}
-	switch *m.Effect.Style {
-	case "flash", "sparks", "power_mode":
-	default:
-		return false
+	period := "AM"
+	if t.Hour() >= 12 {
+		period = "PM"
 	}
-	return m.Effect.Intensity == nil || *m.Effect.Intensity >= 0 && *m.Effect.Intensity <= 100
+	weekday := int(t.Weekday())
+	fixed := map[byte]string{
+		'%': "%",
+		'a': t.Weekday().String()[:3],
+		'A': t.Weekday().String(),
+		'b': t.Month().String()[:3],
+		'h': t.Month().String()[:3],
+		'B': t.Month().String(),
+		'c': t.Format("Mon Jan _2 15:04:05 2006"),
+		'D': t.Format("01/02/06"),
+		'x': t.Format("01/02/06"),
+		'F': t.Format("2006-01-02"),
+		'G': fmt.Sprintf("%04d", year),
+		'n': "\n",
+		'p': period,
+		'P': strings.ToLower(period),
+		'r': fmt.Sprintf("%02d:%02d:%02d %s", hour12, t.Minute(), t.Second(), period),
+		'R': t.Format("15:04"),
+		't': "\t",
+		'T': t.Format("15:04:05"),
+		'X': t.Format("15:04:05"),
+		'u': strconv.Itoa((weekday+6)%7 + 1),
+		'w': strconv.Itoa(weekday + 1),
+		'Y': fmt.Sprintf("%04d", t.Year()),
+	}
+	var out strings.Builder
+	for i := 0; i < len(format); {
+		if format[i] != '%' {
+			next := strings.IndexByte(format[i:], '%')
+			if next < 0 {
+				next = len(format) - i
+			}
+			out.WriteString(format[i : i+next])
+			i += next
+			continue
+		}
+		if i+1 >= len(format) {
+			return "", false
+		}
+		var pad byte
+		if c := format[i+1]; c == '_' || c == '-' || c == '0' {
+			pad = c
+			i++
+			if i+1 >= len(format) {
+				return "", false
+			}
+		}
+		component := format[i+1]
+		i += 2
+		number := func(value, width int, fallback byte) string {
+			p := pad
+			if p == 0 {
+				p = fallback
+			}
+			digits := strconv.Itoa(value)
+			switch {
+			case p == '-' || len(digits) >= width:
+				return digits
+			case p == '_':
+				return strings.Repeat(" ", width-len(digits)) + digits
+			default:
+				return strings.Repeat("0", width-len(digits)) + digits
+			}
+		}
+		if text, ok := fixed[component]; ok {
+			out.WriteString(text)
+			continue
+		}
+		var text string
+		switch component {
+		case 'C':
+			text = number(t.Year()/100, 2, '0')
+		case 'd':
+			text = number(t.Day(), 2, '0')
+		case 'e':
+			text = number(t.Day(), 2, '_')
+		case 'g':
+			text = number(year%100, 2, '0')
+		case 'H':
+			text = number(t.Hour(), 2, '0')
+		case 'I':
+			text = number(hour12, 2, '0')
+		case 'j':
+			text = number(t.YearDay(), 3, '0')
+		case 'k':
+			text = number(t.Hour(), 2, '_')
+		case 'l':
+			text = number(hour12, 2, '_')
+		case 'm':
+			text = number(int(t.Month()), 2, '0')
+		case 'M':
+			text = number(t.Minute(), 2, '0')
+		case 'S':
+			text = number(t.Second(), 2, '0')
+		case 'U':
+			text = number((t.YearDay()-weekday+6)/7, 2, '0')
+		case 'V':
+			text = number(week, 2, '0')
+		case 'W':
+			text = number((t.YearDay()-(weekday+6)%7+6)/7, 2, '0')
+		case 'y':
+			text = number(t.Year()%100, 2, '0')
+		default:
+			return "", false
+		}
+		out.WriteString(text)
+	}
+	return out.String(), true
 }

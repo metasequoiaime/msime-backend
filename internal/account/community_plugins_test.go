@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const pluginSoundManifest = `schema_version = 1
@@ -120,7 +121,7 @@ func TestPluginArchiveAcceptsEveryKind(t *testing.T) {
 		{"sound", "community-clicks", "1.0.0", pluginSoundZip(t)},
 		{"music", "community-rain", "2.1", pluginZip(t, pluginFile{name: "rain/plugin.toml", data: pluginMusicManifest}, pluginFile{name: "rain/rain.ogg", data: pluginOGG}, pluginFile{name: "rain/night.wav", data: pluginWAV}, pluginFile{name: "rain/", mode: fs.ModeDir | 0o755})},
 		{"command_table", "community-dates", "1", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginCommandManifest}, pluginFile{name: "README.md", data: "# Dates"})},
-		{"effect", "community-sparks", "1", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginEffectManifest}, pluginFile{name: ".DS_Store", data: "x"}, pluginFile{name: "__MACOSX/._plugin.toml", data: "resource fork"})},
+		{"command_table", "community-dates", "1", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginCommandManifest}, pluginFile{name: ".DS_Store", data: "x"}, pluginFile{name: "__MACOSX/._plugin.toml", data: "resource fork"})},
 	} {
 		pack, code := validPluginArchive(tc.archive)
 		if code != "" || pack.Kind != tc.kind || pack.ID != tc.id || pack.Version != tc.version || pack.License == "" || len(pack.Manifest) == 0 {
@@ -211,9 +212,6 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 	command := func(old, new string) []byte {
 		return pluginZip(t, pluginFile{name: "plugin.toml", data: strings.Replace(pluginCommandManifest, old, new, 1)})
 	}
-	effect := func(old, new string) []byte {
-		return pluginZip(t, pluginFile{name: "plugin.toml", data: strings.Replace(pluginEffectManifest, old, new, 1)})
-	}
 	for _, tc := range []struct {
 		name    string
 		archive []byte
@@ -254,9 +252,15 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 		{"unknown placeholder", command(`template = "{time}"`, `template = "{foo}"`), "invalid_plugin_manifest"},
 		{"stray brace", command(`template = "{time}"`, `template = "{time"`), "invalid_plugin_manifest"},
 		{"long template", command(`template = "{time}"`, `template = "`+strings.Repeat("字", 200)+`"`), "invalid_plugin_manifest"},
-		{"unknown effect", effect(`style = "sparks"`, `style = "rainbow"`), "invalid_plugin_manifest"},
-		{"effect intensity", effect("intensity = 60", "intensity = 101"), "invalid_plugin_manifest"},
-		{"effect with script", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginEffectManifest}, pluginFile{name: "run.sh", data: "#!/bin/sh"}), "invalid_plugin_manifest"},
+		{"unknown strftime specifier", command(`template = "{time}"`, `template = "{date:%Q}"`), "invalid_plugin_manifest"},
+		{"strftime newline", command(`template = "{time}"`, `template = "{time:%n}"`), "invalid_plugin_manifest"},
+		{"strftime tab", command(`template = "{time}"`, `template = "{date:%-t}"`), "invalid_plugin_manifest"},
+		{"strftime offset", command(`template = "{time}"`, `template = "{time:%H%z}"`), "invalid_plugin_manifest"},
+		{"strftime timestamp", command(`template = "{time}"`, `template = "{time:%s}"`), "invalid_plugin_manifest"},
+		{"strftime trailing percent", command(`template = "{time}"`, `template = "{date:%Y%}"`), "invalid_plugin_manifest"},
+		{"long expansion", command(`template = "{time}"`, `template = "`+strings.Repeat("a", 178)+`{date:%A %B %d}"`), "invalid_plugin_manifest"},
+		// The client has no effect kind: its effects are built into the hosts and tuned only through preferences.
+		{"effect kind", pluginZip(t, pluginFile{name: "plugin.toml", data: pluginEffectManifest}), "invalid_plugin_manifest"},
 	} {
 		if _, code := validPluginArchive(tc.archive); code != tc.code {
 			t.Errorf("%s: got %q, want %q", tc.name, code, tc.code)
@@ -266,6 +270,45 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 	sequence := strings.Replace(pluginSoundManifest, "[sounds]\ndefault = \"click.wav\"\nenter = \"enter.ogg\"\n", "mode = \"sequence\"\n[sequence]\nsample = \"click.wav\"\nsemitones = [0, 2, 4, -24, 24]\nadvance = \"commit\"\n", 1)
 	if _, code := validPluginArchive(sound(sequence, pluginFile{name: "click.wav", data: pluginWAV})); code != "" {
 		t.Fatal("sequence", code)
+	}
+	// The longest expansion that still fits: "Wednesday September 30" brings 177 letters to 199 UTF-16 units.
+	if _, code := validPluginArchive(command(`template = "{time}"`, `template = "`+strings.Repeat("a", 177)+`{date:%A %B %d}"`)); code != "" {
+		t.Fatal("longest expansion", code)
+	}
+}
+
+func TestCommandTemplateExpansion(t *testing.T) {
+	september, december := commandTemplateInstants[0], commandTemplateInstants[1]
+	for _, tc := range []struct {
+		template string
+		at       int
+		want     string
+	}{
+		{"{date} {time} {weekday}", 0, "2026-09-30 23:59 星期三"},
+		{"{date:}{time:}", 1, "2026-12-3023:59"},
+		{"{date:%-m/%_m/%m/%0e/%e}", 0, "9/ 9/09/30/30"},
+		{"{date:%-m}", 1, "12"},
+		{"{date:%a %A %b %h %B %C %y %Y %G %g}", 0, "Wed Wednesday Sep Sep September 20 26 2026 2026 26"},
+		{"{date:%j %-j %U %W %V %u %w}", 0, "273 273 39 39 40 3 4"},
+		{"{date:%j %U %W %V}", 1, "364 52 52 53"},
+		{"{date:%c|%D|%x|%F}", 0, "Wed Sep 30 23:59:59 2026|09/30/26|09/30/26|2026-09-30"},
+		{"{time:%H %I %k %l %M %S %p %P}", 0, "23 11 23 11 59 59 PM pm"},
+		{"{time:%r|%R|%T|%X|%%|%-%}", 0, "11:59:59 PM|23:59|23:59:59|23:59:59|%|%"},
+		{"{time:%n%t}", 0, "\n\t"},
+		{"签名 {date:%Y年%-m月%-d日}", 0, "签名 2026年9月30日"},
+	} {
+		at := september
+		if tc.at == 1 {
+			at = december
+		}
+		if got, ok := expandCommandTemplate(tc.template, at); !ok || got != tc.want {
+			t.Errorf("%s: got %q %v, want %q", tc.template, got, ok, tc.want)
+		}
+	}
+	for _, template := range []string{"{date:%Q}", "{date:%E}", "{date:%Oy}", "{time:%Z}", "{time:%z}", "{time:%s}", "{date:%}", "{date:%-}", "{date:%_é}", "{weekday:%A}", "{now}", "{}", "}", "{date"} {
+		if got, ok := expandCommandTemplate(template, september); ok {
+			t.Errorf("%s: accepted as %q", template, got)
+		}
 	}
 }
 
@@ -371,7 +414,7 @@ func TestCommunityPluginLifecycle(t *testing.T) {
 	wg.Wait()
 	w = c.do("POST", path+"/download", `{}`, user.AccessToken)
 	var download map[string]any
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &download) != nil || download["sha256"] != hex.EncodeToString(digest[:]) || download["plugin_id"] != "community-clicks" || download["version"] != "1.0.0" || download["size"] != float64(len(archive)) || download["archive"] != base64.StdEncoding.EncodeToString(archive) {
+	if w.Code != 200 || w.Header().Get("Content-Length") != fmt.Sprint(w.Body.Len()) || w.Header().Get("Content-Type") != "application/json; charset=utf-8" || json.Unmarshal(w.Body.Bytes(), &download) != nil || len(download) != 7 || download["id"] != id || download["kind"] != "sound" || download["sha256"] != hex.EncodeToString(digest[:]) || download["plugin_id"] != "community-clicks" || download["version"] != "1.0.0" || download["size"] != float64(len(archive)) || download["archive"] != base64.StdEncoding.EncodeToString(archive) {
 		t.Fatal(w.Code, w.Body.Len())
 	}
 	if w := c.do("POST", path+"/download", `{}`, ""); w.Code != 401 {
@@ -617,5 +660,86 @@ func TestCommunityPluginModeration(t *testing.T) {
 	}
 	if w := c.do("GET", "/v1/community/plugins/"+id, "", ""); w.Code != 404 {
 		t.Fatal(w.Code)
+	}
+}
+
+func TestCommunityPluginTransferSlots(t *testing.T) {
+	store := testStore(t)
+	owner := complete(t, store, Identity{"apple", "plugin-slots-owner"})
+	other := complete(t, store, Identity{"apple", "plugin-slots-other"})
+	c := pluginClient{t, &Service{store: store}}
+	archive := pluginSoundZip(t)
+	uuid := func(n int) string { return fmt.Sprintf("ab334455-1234-1234-5678-%012d", n) }
+	// waitFor sends a request whose context ends after a second, so a request that has to queue fails fast instead of waiting out the 90 s route timeout.
+	waitFor := func(method, path, body, token string) *httptest.ResponseRecorder {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		mux := http.NewServeMux()
+		Mount(mux, c.a)
+		r := httptest.NewRequest(method, path, strings.NewReader(body)).WithContext(ctx)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	busy := func(w *httptest.ResponseRecorder) {
+		t.Helper()
+		if w.Code != 503 || !strings.Contains(w.Body.String(), `"plugin_busy"`) {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	fill := func(slots chan struct{}) func() {
+		for i := 0; i < cap(slots); i++ {
+			slots <- struct{}{}
+		}
+		return func() {
+			for i := 0; i < cap(slots); i++ {
+				<-slots
+			}
+		}
+	}
+
+	// Every upload slot is taken, so a publish waits before its body is read: even a body that is not JSON gets 503, not 400.
+	drain := fill(pluginUploadSlots)
+	busy(waitFor("POST", "/v1/community/plugins", "not json", owner.AccessToken))
+	drain()
+
+	// An account's publishes take turns: while one is running, the next one from that account waits, and another account is not held up.
+	release, ok := acquirePluginPublishTurn(context.Background(), owner.User.ID)
+	if !ok {
+		t.Fatal("turn")
+	}
+	busy(waitFor("POST", "/v1/community/plugins", pluginPublishBody(uuid(1), "按键音", "sound", "community-clicks", "1.0.0", archive), owner.AccessToken))
+	if w := waitFor("POST", "/v1/community/plugins", pluginPublishBody(uuid(2), "按键音", "sound", "community-clicks", "1.0.0", archive), other.AccessToken); w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	release()
+	if w := waitFor("POST", "/v1/community/plugins", pluginPublishBody(uuid(1), "按键音", "sound", "community-clicks", "1.0.0", archive), owner.AccessToken); w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	pluginPublishTurns.Lock()
+	turns := len(pluginPublishTurns.accounts)
+	pluginPublishTurns.Unlock()
+	if turns != 0 {
+		t.Fatal("turns left behind", turns)
+	}
+
+	// Every download slot is taken, so a download waits before the archive is loaded.
+	path := "/v1/community/plugins/" + uuid(1) + "/download"
+	drain = fill(pluginDownloadSlots)
+	busy(waitFor("POST", path, "{}", other.AccessToken))
+	drain()
+	// That attempt was charged; the rest of the hourly allowance succeeds and the next one is refused.
+	for i := 1; i < pluginDownloadsPerHour; i++ {
+		if w := waitFor("POST", path, "{}", other.AccessToken); w.Code != 200 {
+			t.Fatal(i, w.Code, w.Body.String())
+		}
+	}
+	if w := waitFor("POST", path, "{}", other.AccessToken); w.Code != 429 || !strings.Contains(w.Body.String(), `"rate_limit_exceeded"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := waitFor("POST", path, "{}", owner.AccessToken); w.Code != 200 {
+		t.Fatal("other account", w.Code, w.Body.String())
 	}
 }
