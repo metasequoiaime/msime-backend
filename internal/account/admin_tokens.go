@@ -46,6 +46,10 @@ type adminTokenInfo struct {
 func issueAdminToken(ctx context.Context, tx pgx.Tx, email string) (string, adminTokenInfo, error) {
 	token := AdminTokenPrefix + randomToken()
 	info := adminTokenInfo{Last4: token[len(token)-4:]}
+	// Without this lock two concurrent regenerations each delete only committed rows and both insert, leaving an older token valid but hidden from the personal page. Owners have no admin_members row to lock, so the lock is keyed by email.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('admin_tokens:'||$1,0))`, email); err != nil {
+		return "", info, err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM admin_tokens WHERE email=$1`, email); err != nil {
 		return "", info, err
 	}

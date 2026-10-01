@@ -147,7 +147,7 @@ function Security({ me }: { me: Me }) {
         <div className="text-ink">{legacy ? "旧版管理令牌" : "Google 账号登录"}</div>
         <div className="mt-0.5 text-xs text-muted">{legacy ? "部署配置的共享令牌，不能管理权限" : "两步验证与通行密钥由 Google 账号控制"}</div>
       </div>
-      <Pill tone={legacy ? "warn" : "ok"}>{legacy ? "共享令牌" : "已启用"}</Pill>
+      <Pill tone={legacy ? "warn" : "accent"}>{legacy ? "共享令牌" : "已开启"}</Pill>
     </SectionRow>
     {!legacy && <SectionRow className="flex-wrap">
       <div className="min-w-0 flex-1">

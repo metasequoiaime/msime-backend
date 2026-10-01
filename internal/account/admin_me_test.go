@@ -88,7 +88,7 @@ func TestAdminMePage(t *testing.T) {
 	actor := "google:g1:" + email
 	user := complete(t, db, Identity{"email", "author@example.test"})
 	for _, q := range []string{
-		`INSERT INTO admin_audit(action,target,actor,detail) VALUES('dict_pr_approve','210','` + actor + `','{"count":5}'),('dict_pr_trim','210','pat:` + email + `','{}'),('dict_pr_reject','211','` + actor + `','{}'),('issue_triage','msime#1','` + actor + `','{}'),('delete_reply','r1','` + actor + `','{}')`,
+		`INSERT INTO admin_audit(action,target,actor,detail) VALUES('dict_pr_approve','210','` + actor + `','{"count":5}'),('dict_pr_trim','210','pat:` + email + `','{}'),('dict_pr_reject','211','` + actor + `','{}'),('issue_triage','msime#1','` + actor + `','{}'),('issue_comment','msime#1','` + actor + `','{}'),('delete_reply','r1','` + actor + `','{}')`,
 		`INSERT INTO admin_audit(action,target,actor,created_at) VALUES('dict_pr_approve','1','` + actor + `',now()-interval '40 days'),('dict_pr_approve','2','google:g2:other@example.test',now()),('dict_pr_approve','3','google:g3:xmember@example.test',now())`,
 		`INSERT INTO community_skins(id,owner_id,name,design,created_at,moderation,moderated_by,moderated_at) VALUES('me-skin',$1,'Skin','{}',now()-interval '4 hours','approved','` + actor + `',now()),('me-skin-2',$1,'Skin','{}',now()-interval '2 hours','removed','` + actor + `',now()),('me-skin-3',$1,'Skin','{}',now(),'approved','google:g2:other@example.test',now())`,
 	} {
@@ -325,5 +325,34 @@ func TestAdminSessionMetadata(t *testing.T) {
 		if got := adminDevice(agent); got != want {
 			t.Errorf("%q: %q want %q", agent, got, want)
 		}
+	}
+}
+
+// Concurrent regenerations must still leave exactly one valid token, so no older token stays usable without showing on the personal page.
+func TestAdminTokenRegenerateConcurrent(t *testing.T) {
+	db := testStore(t)
+	ctx := context.Background()
+	a := &Service{store: db}
+	truncateAdminPersonal(t, db)
+	email := "owner@example.test"
+	session := AdminAccess{Actor: "google:g:" + email, Email: email, Role: RoleMaintainer, Permissions: AllAdminPermissions(), Owner: true}
+	const workers = 8
+	codes := make(chan int, workers)
+	start := make(chan struct{})
+	for range workers {
+		go func() {
+			<-start
+			codes <- meRequest(a, session, "POST", `{"action":"regenerate_token"}`, "").Code
+		}()
+	}
+	close(start)
+	for range workers {
+		if code := <-codes; code != 200 {
+			t.Fatal(code)
+		}
+	}
+	var tokens int
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM admin_tokens WHERE email=$1`, email).Scan(&tokens); err != nil || tokens != 1 {
+		t.Fatal("tokens left", tokens, err)
 	}
 }

@@ -102,7 +102,7 @@ func (a *Service) adminCurrentSession(ctx context.Context, r *http.Request, emai
 	return "", nil
 }
 
-// adminMe serves GET /api/me.
+// adminMe serves GET /api/me. Dictionary PRs and issues count distinct targets, so triaging and then commenting on one issue counts it once.
 func (a *Service) adminMe(w http.ResponseWriter, r *http.Request, _ string) {
 	access, _ := AdminAccessFrom(r.Context())
 	ctx := r.Context()
@@ -140,7 +140,7 @@ func (a *Service) adminMe(w http.ResponseWriter, r *http.Request, _ string) {
 )
 SELECT (SELECT count(DISTINCT target) FROM mine WHERE action LIKE 'dict\_pr\_%'),
  (SELECT count(*) FROM moderated)+(SELECT count(*) FROM mine WHERE action IN ('delete_skin','delete_candidate_skin','delete_plugin','delete_dictionary','delete_reply')),
- (SELECT count(*) FROM mine WHERE action LIKE 'issue\_%'),
+ (SELECT count(DISTINCT target) FROM mine WHERE action LIKE 'issue\_%'),
  (SELECT avg(extract(epoch FROM moderated_at-created_at))/3600 FROM moderated)::float8`, arg).Scan(&stats.DictPRsMonth, &stats.CommunityMonth, &stats.IssuesMonth, &stats.AvgHandleHours)
 	if err != nil {
 		a.error(w, err)
