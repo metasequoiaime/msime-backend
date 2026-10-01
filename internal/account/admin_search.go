@@ -20,7 +20,7 @@ type AdminSearchHit struct {
 // MaxAdminSearchQuery is the longest query, in characters, that the console search accepts.
 const MaxAdminSearchQuery = 100
 
-// adminSearchQuery is one UNION over every searchable table. $1 is the query, $2 the limit. Each branch yields kind, id, title, where, target, rank (0 exact, 1 prefix, 2 substring) and a time for the tie-break. Matching uses strpos on lowercased text, so the query needs no LIKE escaping. Community ids are "<section>/<id>", the same form community report notifications use, so the community page can open the item.
+// adminSearchQuery is one UNION over every searchable table. $1 is the query, $2 the limit. Each branch yields kind, id, title, where, target, rank (0 exact, 1 prefix, 2 substring) and a time for the tie-break. Matching uses strpos on lowercased text, so the query needs no LIKE escaping; community ids are lowercase UUIDs, so they also match the lowercased query. Community ids are "<section>/<id>", the same form community report notifications use, so the community page can open the item.
 const adminSearchQuery = `WITH q AS (SELECT lower($1::text) AS q)
 SELECT kind,id,title,where_,target FROM (
  (SELECT 'user' AS kind,u.id,CASE WHEN u.display_name='' THEN u.id ELSE u.display_name END AS title,'用户账号' AS where_,'users' AS target,
@@ -28,21 +28,21 @@ SELECT kind,id,title,where_,target FROM (
   FROM auth_users u,q WHERE u.id=$1 OR strpos(lower(u.display_name),q.q)>0 ORDER BY rank,seen DESC LIMIT $2)
  UNION ALL
  (SELECT 'skin','skins/'||s.id,s.name||' · 皮肤','社区审核','community',
-  CASE WHEN s.id=$1 OR lower(s.name)=q.q THEN 0 WHEN starts_with(lower(s.name),q.q) THEN 1 ELSE 2 END AS rank,s.created_at
-  FROM community_skins s,q WHERE s.id=$1 OR strpos(lower(s.name),q.q)>0 ORDER BY rank,s.created_at DESC LIMIT $2)
+  CASE WHEN s.id IN ($1,q.q) OR lower(s.name)=q.q THEN 0 WHEN starts_with(lower(s.name),q.q) THEN 1 ELSE 2 END AS rank,s.created_at
+  FROM community_skins s,q WHERE s.id IN ($1,q.q) OR strpos(lower(s.name),q.q)>0 ORDER BY rank,s.created_at DESC LIMIT $2)
  UNION ALL
  (SELECT 'candidate-skin','candidate-skins/'||s.id,s.name||' · 候选皮肤','社区审核','community',
-  CASE WHEN s.id=$1 OR lower(s.name)=q.q THEN 0 WHEN starts_with(lower(s.name),q.q) THEN 1 ELSE 2 END AS rank,s.created_at
-  FROM community_candidate_skins s,q WHERE s.id=$1 OR strpos(lower(s.name),q.q)>0 ORDER BY rank,s.created_at DESC LIMIT $2)
+  CASE WHEN s.id IN ($1,q.q) OR lower(s.name)=q.q THEN 0 WHEN starts_with(lower(s.name),q.q) THEN 1 ELSE 2 END AS rank,s.created_at
+  FROM community_candidate_skins s,q WHERE s.id IN ($1,q.q) OR strpos(lower(s.name),q.q)>0 ORDER BY rank,s.created_at DESC LIMIT $2)
  UNION ALL
  (SELECT 'plugin','plugins/'||p.id,p.name||' · 插件','社区审核','community',
-  CASE WHEN p.id=$1 OR lower(p.name)=q.q THEN 0 WHEN starts_with(lower(p.name),q.q) THEN 1 ELSE 2 END AS rank,p.created_at
-  FROM community_plugins p,q WHERE p.id=$1 OR strpos(lower(p.name),q.q)>0 ORDER BY rank,p.created_at DESC LIMIT $2)
+  CASE WHEN p.id IN ($1,q.q) OR lower(p.name)=q.q THEN 0 WHEN starts_with(lower(p.name),q.q) THEN 1 ELSE 2 END AS rank,p.created_at
+  FROM community_plugins p,q WHERE p.id IN ($1,q.q) OR strpos(lower(p.name),q.q)>0 ORDER BY rank,p.created_at DESC LIMIT $2)
  UNION ALL
  (SELECT CASE r.kind WHEN 'dictionary' THEN 'dictionary' ELSE 'reply' END,CASE r.kind WHEN 'dictionary' THEN 'dictionaries/' ELSE 'replies/' END||r.id,
   r.name||CASE r.kind WHEN 'dictionary' THEN ' · 词库' ELSE ' · 回复模板' END,'社区审核','community',
-  CASE WHEN r.id=$1 OR lower(r.name)=q.q THEN 0 WHEN starts_with(lower(r.name),q.q) THEN 1 ELSE 2 END AS rank,r.created_at
-  FROM community_resources r,q WHERE r.id=$1 OR strpos(lower(r.name),q.q)>0 ORDER BY rank,r.created_at DESC LIMIT $2)
+  CASE WHEN r.id IN ($1,q.q) OR lower(r.name)=q.q THEN 0 WHEN starts_with(lower(r.name),q.q) THEN 1 ELSE 2 END AS rank,r.created_at
+  FROM community_resources r,q WHERE r.id IN ($1,q.q) OR strpos(lower(r.name),q.q)>0 ORDER BY rank,r.created_at DESC LIMIT $2)
  UNION ALL
  (SELECT 'crash_group',g.signature,g.title,'崩溃上报','crash',
   CASE WHEN g.signature=q.q OR lower(g.title)=q.q THEN 0 WHEN starts_with(lower(g.title),q.q) THEN 1 ELSE 2 END AS rank,g.last_seen

@@ -71,7 +71,8 @@ func normalizeNotification(n Notification) (Notification, error) {
 	return n, nil
 }
 
-const insertNotification = `INSERT INTO admin_notifications(kind,title,target_page,target_id) VALUES($1,$2,$3,$4)`
+// insertNotification stamps created_at with clock_timestamp() rather than the transaction start, so a notification written late in a long transaction is not already covered by a 全部已读 watermark set while that transaction was running.
+const insertNotification = `INSERT INTO admin_notifications(kind,title,target_page,target_id,created_at) VALUES($1,$2,$3,$4,clock_timestamp())`
 
 // Notify records n inside tx, so it exists exactly when the write that caused it commits.
 func (a *Service) Notify(ctx context.Context, tx pgx.Tx, n Notification) error {

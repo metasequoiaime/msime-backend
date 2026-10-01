@@ -23,6 +23,8 @@ const activeSeries = [
 
 const platformLabels: Record<string, string> = { windows: "Windows", macos: "macOS", linux: "Linux", android: "Android", ios: "iOS", harmonyos: "HarmonyOS" };
 
+const platformName = (platform: string) => platformLabels[platform] ?? platform;
+
 const stateTone: Record<ServiceState, Tone> = { ok: "ok", degraded: "warn", down: "bad", unknown: "mute" };
 const stateLabel: Record<ServiceState, string> = { ok: "运行正常", degraded: "性能降级", down: "服务中断", unknown: "暂无探测数据" };
 
@@ -59,7 +61,7 @@ function KPIs({ data }: { data: Overview }) {
     <StatTile size="kpi" label="7 日活跃设备" value={data.telemetry.active ? number(data.active_devices_7d) : "—"} delta={active?.text} deltaTone={active?.tone}
       sub={data.telemetry.active ? "全平台合计" : "客户端未上报"} />
     <StatTile size="kpi" label="无崩溃会话率" value={data.crash_free_rate === null ? "—" : `${(data.crash_free_rate * 100).toFixed(2)}%`} delta={crashFree?.text} deltaTone={crashFree?.tone}
-      sub={data.crash_free_rate !== null ? "近 7 天会话" : data.telemetry.sessions ? "近 7 天没有会话" : "客户端未上报"} />
+      sub={data.crash_free_rate !== null ? (data.crash_top ? `${platformName(data.crash_top.platform)} ${data.crash_top.version} 拖累` : "近 7 天会话") : data.telemetry.sessions ? "近 7 天没有会话" : "客户端未上报"} />
     <StatTile size="kpi" label="待审核" value={pending ? number(pending.dict_prs + pending.community + pending.issues) : "—"}
       sub={pending ? `词库 PR ${pending.dict_prs} · 社区 ${pending.community} · Issue ${pending.issues}` : "正在加载…"} />
   </StatGrid>;
@@ -85,10 +87,10 @@ function PlatformActive({ data }: { data: Overview }) {
       : <ul className="m-0 grid list-none gap-3.5 p-0 pt-1">
         {rows.map(([platform, devices]) => <li key={platform} className="min-w-0">
           <div className="mb-1.5 flex items-baseline justify-between gap-3 text-[13px]">
-            <span className="truncate text-ink">{platformLabels[platform] ?? platform}</span>
+            <span className="truncate text-ink">{platformName(platform)}</span>
             <span className="text-muted tabular-nums">{devices.toLocaleString("en-US")}</span>
           </div>
-          <ProgressBar value={devices} max={max} label={`${platformLabels[platform] ?? platform} 活跃设备`} />
+          <ProgressBar value={devices} max={max} label={`${platformName(platform)} 活跃设备`} />
         </li>)}
       </ul>}
   </Card>;
@@ -115,7 +117,7 @@ function Todos({ data }: { data: Overview }) {
       <TodoRow to="/dictpr" icon="词" title="词库 PR 待审核" sub="官网词库投稿生成的 GitHub PR" count={pending?.dict_prs} />
       <TodoRow to="/community" icon="社" title="社区内容待审核" sub={data.pending.reports_7d > 0 ? `近 7 天收到 ${number(data.pending.reports_7d)} 次举报` : "先发后审，新内容已公开展示"} count={pending?.community ?? data.pending.community} />
       <TodoRow to="/issues" icon="议" title="Issue 待分诊" sub="尚未分类的 GitHub Issue" count={pending?.issues} />
-      <TodoRow to="/crash" icon="崩" title="新增崩溃分组" sub="近 7 天首次出现、尚未处理" count={data.pending.crash_groups} />
+      <TodoRow to="/crash" icon="崩" title="新增崩溃分组" sub={data.crash_group_latest ? `${platformName(data.crash_group_latest.platform)} · ${data.crash_group_latest.title}` : "近 7 天首次出现、尚未处理"} count={data.pending.crash_groups} />
     </ul>
   </Card>;
 }

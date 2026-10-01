@@ -23,14 +23,24 @@ type overviewBody struct {
 		MacLinux int    `json:"mac_linux"`
 		Mobile   int    `json:"mobile"`
 	} `json:"active_devices_daily"`
-	ActiveDevices7d     int               `json:"active_devices_7d"`
-	ActiveDevicesPrev7d int               `json:"active_devices_prev_7d"`
-	PlatformActive7d    map[string]int    `json:"platform_active_7d"`
-	CrashFreeRate       *float64          `json:"crash_free_rate"`
-	CrashFreeRatePrev   *float64          `json:"crash_free_rate_prev"`
-	Pending             map[string]int    `json:"pending"`
-	ServicesConfigured  bool              `json:"services_configured"`
-	Services            []overviewService `json:"services"`
+	ActiveDevices7d     int            `json:"active_devices_7d"`
+	ActiveDevicesPrev7d int            `json:"active_devices_prev_7d"`
+	PlatformActive7d    map[string]int `json:"platform_active_7d"`
+	CrashFreeRate       *float64       `json:"crash_free_rate"`
+	CrashFreeRatePrev   *float64       `json:"crash_free_rate_prev"`
+	CrashTop            *struct {
+		Platform string `json:"platform"`
+		Version  string `json:"version"`
+		Crashes  int    `json:"crashes"`
+	} `json:"crash_top"`
+	CrashGroupLatest *struct {
+		Signature string `json:"signature"`
+		Platform  string `json:"platform"`
+		Title     string `json:"title"`
+	} `json:"crash_group_latest"`
+	Pending            map[string]int    `json:"pending"`
+	ServicesConfigured bool              `json:"services_configured"`
+	Services           []overviewService `json:"services"`
 }
 
 type overviewService struct {
@@ -65,7 +75,7 @@ func getOverview(t *testing.T, a *Service, query string) overviewBody {
 func TestOverviewWithoutClientTelemetry(t *testing.T) {
 	a := overviewTestService(t)
 	body := getOverview(t, a, "?days=7")
-	if body.Telemetry.Active || body.Telemetry.Sessions || body.CrashFreeRate != nil || body.ActiveDevices7d != 0 || len(body.PlatformActive7d) != 0 {
+	if body.Telemetry.Active || body.Telemetry.Sessions || body.CrashFreeRate != nil || body.CrashTop != nil || body.CrashGroupLatest != nil || body.ActiveDevices7d != 0 || len(body.PlatformActive7d) != 0 {
 		t.Fatalf("telemetry without events %+v", body)
 	}
 	if len(body.ActiveDevicesDaily) != 7 || len(body.Daily) != 7 || body.RangeDays != 7 {
@@ -84,7 +94,7 @@ func TestOverviewWithoutClientTelemetry(t *testing.T) {
 func TestOverviewTelemetryAndServices(t *testing.T) {
 	a := overviewTestService(t)
 	ctx := context.Background()
-	a.ConfigureAdmin(AdminSettings{Services: []AdminService{{Key: "cloud", Name: "云候选代理", Provider: "腾讯云"}, {Key: "chat", Name: "AI 联想", Provider: "OpenAI"}, {Key: "translation", Name: "翻译"}}})
+	a.ConfigureAdmin(AdminSettings{Services: []AdminService{{Key: "cloud", Name: "云候选代理", Provider: "腾讯云"}, {Key: "chat", Name: "AI 联想", Provider: "OpenAI"}, {Key: "translation", Name: "翻译"}, {Key: "stt", Name: "语音识别"}}})
 	if _, err := a.store.pool.Exec(ctx, `INSERT INTO admin_events(id,kind,platform,version,install_id,created_at) VALUES
  ('a1','active','Windows','1','device-windows-0001',now()),
  ('a2','active','windows','1','device-windows-0001',now()-interval '1 hour'),
@@ -94,16 +104,21 @@ func TestOverviewTelemetryAndServices(t *testing.T) {
  ('a6','active','ios','1','device-ios-0000001',now()),
  ('a7','active','harmonyos','1','device-harmony-001',now()-interval '2 days'),
  ('a8','active','android','1','device-android-001',now()-interval '10 days'),
+ ('a9','active','Darwin','1','device-darwin-0001',now()),
+ ('a10','active','OHOS','1','device-ohos-00001',now()),
+ ('a11','active','win','1','device-windows-0001',now()),
  ('s1','session','ios','1',NULL,now()),('s2','session','ios','1',NULL,now()),('s3','session','ios','1',NULL,now()),('s4','session_crash','ios','1',NULL,now()),
+ ('s6','session_crash','Darwin','2',NULL,now()),('s7','session_crash','macos','2',NULL,now()-interval '1 day'),('s8','session_crash','android','3',NULL,now()-interval '9 days'),('s9','session_crash','android','3',NULL,now()-interval '9 days'),
  ('s5','session','ios','1',NULL,now()-interval '8 days'),
  ('d1','download','windows','1',NULL,now()),('d2','download','windows','1',NULL,now()-interval '40 days'),('d3','download','windows','1',NULL,now()-interval '45 days');
-INSERT INTO admin_crash_groups(signature,platform,version,title,first_seen) VALUES('0123456789abcdef','ios','1','new',now()),('0123456789abcde0','ios','1','old',now()-interval '30 days');
+INSERT INTO admin_crash_groups(signature,platform,version,title,first_seen) VALUES('0123456789abcdef','ios','1','new',now()),('0123456789abcde2','Darwin','2','older new',now()-interval '1 day'),('0123456789abcde0','ios','1','old',now()-interval '30 days');
 INSERT INTO admin_crash_groups(signature,platform,version,title,status) VALUES('0123456789abcde1','ios','1','known','known');
 INSERT INTO admin_service_daily(service,day,ok_minutes,total_minutes,degraded,p95_ms) VALUES
  ('cloud',current_date,600,600,false,42),('cloud',current_date-1,1380,1440,false,40),
  ('chat',current_date,500,600,true,1800),
+ ('stt',current_date,0,30,true,NULL),
  ('stale',current_date,10,10,false,1);
-INSERT INTO admin_incidents(service,title) VALUES('translation','翻译超时')`); err != nil {
+INSERT INTO admin_incidents(service,title) VALUES('translation','翻译超时'),('stt','语音识别中断')`); err != nil {
 		t.Fatal(err)
 	}
 	body := getOverview(t, a, "")
@@ -111,13 +126,14 @@ INSERT INTO admin_incidents(service,title) VALUES('translation','翻译超时')`
 		t.Fatalf("flags %+v", body)
 	}
 	today := body.ActiveDevicesDaily[29]
-	if today.Windows != 2 || today.MacLinux != 2 || today.Mobile != 1 {
+	if today.Windows != 2 || today.MacLinux != 3 || today.Mobile != 2 {
 		t.Fatalf("today %+v", today)
 	}
-	if body.ActiveDevices7d != 6 || body.ActiveDevicesPrev7d != 1 {
+	if body.ActiveDevices7d != 8 || body.ActiveDevicesPrev7d != 1 {
 		t.Fatalf("7d %d prev %d", body.ActiveDevices7d, body.ActiveDevicesPrev7d)
 	}
-	wantPlatforms := map[string]int{"windows": 2, "macos": 1, "linux": 1, "ios": 1, "harmonyos": 1}
+	// Aliases (win, Darwin, OHOS) fold into the canonical keys the daily groups use.
+	wantPlatforms := map[string]int{"windows": 2, "macos": 2, "linux": 1, "ios": 1, "harmonyos": 2}
 	if len(body.PlatformActive7d) != len(wantPlatforms) {
 		t.Fatalf("platforms %+v", body.PlatformActive7d)
 	}
@@ -126,16 +142,23 @@ INSERT INTO admin_incidents(service,title) VALUES('translation','翻译超时')`
 			t.Fatalf("platforms %+v", body.PlatformActive7d)
 		}
 	}
-	if body.CrashFreeRate == nil || *body.CrashFreeRate != 0.75 || body.CrashFreeRatePrev == nil || *body.CrashFreeRatePrev != 1 {
+	if body.CrashFreeRate == nil || *body.CrashFreeRate != 0.5 || body.CrashFreeRatePrev == nil || *body.CrashFreeRatePrev != 0.3333 {
 		t.Fatalf("crash free %v %v", body.CrashFreeRate, body.CrashFreeRatePrev)
 	}
 	if body.Downloads != 3 || body.Downloads30d != 1 || body.DownloadsPrev30d != 2 {
 		t.Fatalf("downloads %+v", body)
 	}
-	if body.Pending["crash_groups"] != 1 {
+	// The macOS aliases fold together and outrank iOS; the older Android crashes are outside the 7-day window.
+	if top := body.CrashTop; top == nil || top.Platform != "macos" || top.Version != "2" || top.Crashes != 2 {
+		t.Fatalf("crash top %+v", body.CrashTop)
+	}
+	if latest := body.CrashGroupLatest; latest == nil || latest.Signature != "0123456789abcdef" || latest.Platform != "ios" || latest.Title != "new" {
+		t.Fatalf("crash group latest %+v", body.CrashGroupLatest)
+	}
+	if body.Pending["crash_groups"] != 2 {
 		t.Fatalf("pending %+v", body.Pending)
 	}
-	if !body.ServicesConfigured || len(body.Services) != 3 {
+	if !body.ServicesConfigured || len(body.Services) != 4 {
 		t.Fatalf("services %+v", body.Services)
 	}
 	cloud, chat, translation := body.Services[0], body.Services[1], body.Services[2]
@@ -145,10 +168,14 @@ INSERT INTO admin_incidents(service,title) VALUES('translation','翻译超时')`
 	if chat.State != "degraded" || translation.State != "degraded" || translation.Uptime60d != nil || translation.P95MS != nil {
 		t.Fatalf("chat %+v translation %+v", chat, translation)
 	}
+	// A service with no successful minute today is down even while an incident is open for it.
+	if stt := body.Services[3]; stt.State != "down" || stt.Uptime60d == nil || *stt.Uptime60d != 0 || stt.P95MS != nil {
+		t.Fatalf("stt %+v", stt)
+	}
 	// Without configured services the overview lists the services the status probe recorded.
 	a.ConfigureAdmin(AdminSettings{})
 	derived := getOverview(t, a, "?days=7")
-	if derived.ServicesConfigured || len(derived.Services) != 3 || derived.Services[0].Key != "chat" || derived.Services[2].Key != "stale" || derived.Services[2].Name != "stale" {
+	if derived.ServicesConfigured || len(derived.Services) != 4 || derived.Services[0].Key != "chat" || derived.Services[3].Key != "stt" || derived.Services[2].Key != "stale" || derived.Services[2].Name != "stale" {
 		t.Fatalf("derived %+v", derived.Services)
 	}
 }

@@ -37,6 +37,9 @@ export const overviewSchema = z.object({
   // crash_free_rate is a ratio (0–1) over the last 7 days; null without session telemetry.
   crash_free_rate: z.number().nullable(),
   crash_free_rate_prev: z.number().nullable(),
+  // crash_top is the platform and version with the most crashed sessions in the last 7 days; crash_group_latest the newest open crash group first seen in that window. Both are null without data.
+  crash_top: z.object({ platform: z.string(), version: z.string(), crashes: count }).nullable(),
+  crash_group_latest: z.object({ signature: z.string(), platform: z.string(), title: z.string() }).nullable(),
   pending: z.object({ community: count, reports_7d: count, crash_groups: count }),
   services_configured: z.boolean(),
   services: z.array(overviewServiceSchema),

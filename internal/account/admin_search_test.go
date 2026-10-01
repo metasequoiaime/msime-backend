@@ -73,6 +73,19 @@ INSERT INTO admin_notices(title,created_by) VALUES('Spring 版本公告','t'),('
 	if byID, err := a.AdminSearch(ctx, owner.User.ID, 8); err != nil || len(byID) != 1 || byID[0].Kind != "user" {
 		t.Fatalf("by id %+v %v", byID, err)
 	}
+	// A pasted community UUID matches whatever its case.
+	if byID, err := a.AdminSearch(ctx, "00000000-0000-4000-8000-00000000000A", 8); err != nil || len(byID) != 0 {
+		t.Fatalf("unknown uuid %+v %v", byID, err)
+	}
+	if byID, err := a.AdminSearch(ctx, "00000000-0000-4000-8000-000000000001", 8); err != nil || len(byID) != 1 || byID[0].Kind != "plugin" {
+		t.Fatalf("plugin by id %+v %v", byID, err)
+	}
+	if _, err := db.pool.Exec(ctx, `UPDATE community_plugins SET id='0000000a-0000-4000-8000-000000000001' WHERE id='00000000-0000-4000-8000-000000000001'`); err != nil {
+		t.Fatal(err)
+	}
+	if byID, err := a.AdminSearch(ctx, "0000000A-0000-4000-8000-000000000001", 8); err != nil || len(byID) != 1 || byID[0].ID != "plugins/0000000a-0000-4000-8000-000000000001" {
+		t.Fatalf("uppercase plugin id %+v %v", byID, err)
+	}
 	// LIKE metacharacters are matched literally.
 	for _, q := range []string{"%", "_", "\\"} {
 		if hits, err := a.AdminSearch(ctx, q, 8); err != nil || len(hits) != 0 {

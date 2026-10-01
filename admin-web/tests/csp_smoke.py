@@ -50,6 +50,8 @@ FIXTURES = {
         "active_devices_7d": 131, "active_devices_prev_7d": 120,
         "platform_active_7d": {"windows": 80, "macos": 21, "ios": 18, "harmonyos": 12},
         "crash_free_rate": 0.9962, "crash_free_rate_prev": 0.997,
+        "crash_top": {"platform": "ios", "version": "1.0.0", "crashes": 3},
+        "crash_group_latest": {"signature": "0123456789abcdef", "platform": "ios", "title": "内存超限"},
         "pending": {"community": 0, "reports_7d": 2, "crash_groups": 1},
         "services_configured": True,
         "services": [
@@ -170,6 +172,8 @@ def main() -> int:
                 main = page.get_by_role("main")
                 expect(main.get_by_text("4,821", exact=True)).to_be_visible()
                 expect(main.get_by_text("99.62%", exact=True)).to_be_visible()
+                expect(main.get_by_text("iOS 1.0.0 拖累", exact=True)).to_be_visible()
+                expect(main.get_by_text("iOS · 内存超限", exact=True)).to_be_visible()
                 expect(main.get_by_text("词库 PR 2 · 社区 0 · Issue 5", exact=True)).to_be_visible()
                 expect(main.get_by_text("近 7 天收到 2 次举报", exact=True)).to_be_visible()
                 expect(main.get_by_text("98.70% · 1.8s", exact=True)).to_be_visible()
