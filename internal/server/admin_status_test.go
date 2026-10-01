@@ -268,6 +268,14 @@ func TestMonitoredServices(t *testing.T) {
 	if len(services) != 1 || services[0] != (monitoredService{Key: "chat", Name: "AI 联想", Provider: "账号通道", SlowMS: 2000, QuotaLimit: 2000, QuotaUnit: "cny", UnitPrice: 0.05}) {
 		t.Fatalf("configured services = %+v", services)
 	}
+	// "database" is the status probe's own key: a configured service under it would mix its metrics with the probe's pings.
+	s.config.Admin.Services = append(s.config.Admin.Services, AdminServiceConfig{Key: databaseService, Name: "数据库", Provider: "x"})
+	if services = s.monitoredServices(); len(services) != 1 || services[0].Key != "chat" {
+		t.Fatalf("configured database service = %+v", services)
+	}
+	if status := s.statusServices(); len(status) != 2 || status[0].Key != databaseService || status[0].Provider != "PostgreSQL" || status[1].Key != "chat" {
+		t.Fatalf("status services = %+v", status)
+	}
 }
 
 // /api/cloud needs view_cloud_usage even though it is a read, and both pages are GET only.

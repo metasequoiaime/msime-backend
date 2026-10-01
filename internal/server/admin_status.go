@@ -112,7 +112,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		account.Incident
 		ServiceName string `json:"service_name"`
 	}
-	services := append([]monitoredService{{Key: databaseService, Name: "数据库", Provider: "PostgreSQL", SlowMS: databaseSlowMS}}, s.monitoredServices()...)
+	services := s.statusServices()
 	names := map[string]string{}
 	out := make([]serviceJSON, 0, len(services))
 	for _, svc := range services {
@@ -249,7 +249,7 @@ func (s *Server) statusTick(ctx context.Context, now time.Time) {
 		}
 		today[row.Service].add(rowCounts(row))
 	}
-	services := append([]monitoredService{{Key: databaseService, Name: "数据库", SlowMS: databaseSlowMS}}, s.monitoredServices()...)
+	services := s.statusServices()
 	probes := make([]account.ServiceProbe, 0, len(services))
 	results := make(map[string]probeResult, len(services))
 	for _, svc := range services {
@@ -323,6 +323,11 @@ func (s *Server) updateIncidents(ctx context.Context, services []monitoredServic
 	s.metrics.status.services = next
 	s.metrics.status.checked = time.Now().UTC()
 	s.metrics.mu.Unlock()
+}
+
+// statusServices is the status page's own database probe followed by the monitored upstream services.
+func (s *Server) statusServices() []monitoredService {
+	return append([]monitoredService{{Key: databaseService, Name: "数据库", Provider: "PostgreSQL", SlowMS: databaseSlowMS}}, s.monitoredServices()...)
 }
 
 // judgeService classifies a service by its calls in the probe window.

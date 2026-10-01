@@ -199,7 +199,7 @@ func TestIncidentActions(t *testing.T) {
 		t.Fatalf("open response %s", w.Body)
 	}
 	id := jsonString(opened.ID)
-	if w = incidentAction(a, owner, `{"action":"update_incident","id":"`+id+`","value":{"description":"上游限流，已切换备用通道"}}`); w.Code != 200 {
+	if w = incidentAction(a, owner, `{"action":"update_incident","id":"`+id+`","value":{"description":"上游限流，已切换备用通道"},"reason":"补充处理"}`); w.Code != 200 {
 		t.Fatalf("update: %d %s", w.Code, w.Body)
 	}
 	if w = incidentAction(a, owner, `{"action":"resolve_incident","id":"`+id+`","reason":"恢复"}`); w.Code != 200 {
@@ -225,7 +225,7 @@ func TestIncidentActions(t *testing.T) {
 		}
 		audit = append(audit, action+" "+detail)
 	}
-	if len(audit) != 3 || !strings.Contains(audit[0], `"title": "翻译间歇超时"`) || !strings.Contains(audit[1], `"fields": ["description"]`) || !strings.Contains(audit[2], `"reason": "恢复"`) {
+	if len(audit) != 3 || !strings.Contains(audit[0], `"title": "翻译间歇超时"`) || !strings.Contains(audit[1], `"fields": ["description"]`) || !strings.Contains(audit[1], `"reason": "补充处理"`) || !strings.Contains(audit[2], `"reason": "恢复"`) {
 		t.Fatalf("audit = %q", audit)
 	}
 

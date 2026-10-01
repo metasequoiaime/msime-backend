@@ -398,11 +398,14 @@ var derivedSlowMS = map[string]int{"images": 60000, "transcription": 10000, "niu
 
 var translationProviders = map[string]string{"tencent": "腾讯 TMT", "deepl": "DeepL", "niutrans": "小牛翻译", "openai": "OpenAI 兼容接口"}
 
-// monitoredServices is admin.services when configured, otherwise every upstream this deployment has configured, under its default name, with the upstream host as provider.
+// monitoredServices is admin.services when configured, otherwise every upstream this deployment has configured, under its default name, with the upstream host as provider. An admin.services entry keyed "database" is left out: that key holds the status probe's own database pings, rollups and incidents.
 func (s *Server) monitoredServices() []monitoredService {
 	if len(s.config.Admin.Services) > 0 {
 		services := make([]monitoredService, 0, len(s.config.Admin.Services))
 		for _, v := range s.config.Admin.Services {
+			if v.Key == databaseService {
+				continue
+			}
 			slow := v.SlowMS
 			if slow <= 0 {
 				slow = defaultServiceSlowMS

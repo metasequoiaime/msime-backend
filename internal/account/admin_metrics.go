@@ -297,7 +297,11 @@ func actionOpenIncident(a *Service, ctx context.Context, tx pgx.Tx, v actionRequ
 	if err = a.Notify(ctx, tx, Notification{Kind: NotifyIncident, Title: *value.Title, TargetPage: "status", TargetID: target}); err != nil {
 		return actionResult{}, err
 	}
-	return actionResult{Affected: 1, Target: target, Detail: map[string]any{"service": *value.Service, "title": *value.Title}, Extra: map[string]any{"id": id}}, nil
+	detail := map[string]any{"service": *value.Service, "title": *value.Title}
+	if v.Reason != "" {
+		detail["reason"] = v.Reason
+	}
+	return actionResult{Affected: 1, Target: target, Detail: detail, Extra: map[string]any{"id": id}}, nil
 }
 
 // actionResolveIncident resolves the incident id.
@@ -355,5 +359,9 @@ func actionUpdateIncident(a *Service, ctx context.Context, tx pgx.Tx, v actionRe
 	if value.Description != nil {
 		fields = append(fields, "description")
 	}
-	return actionResult{Affected: 1, Detail: map[string]any{"title": title, "fields": fields}}, nil
+	detail := map[string]any{"title": title, "fields": fields}
+	if v.Reason != "" {
+		detail["reason"] = v.Reason
+	}
+	return actionResult{Affected: 1, Detail: detail}, nil
 }
