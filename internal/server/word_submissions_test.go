@@ -413,11 +413,11 @@ func TestWordSubmissionValidation(t *testing.T) {
 }
 
 func TestWordNoteSanitising(t *testing.T) {
-	note, ok := sanitizeWordNote("  line one\nline\ttwo  @octocat #3 GH-12 gh-7 see https://evil.example ​‮ ")
+	note, ok := sanitizeWordNote("  line one\nline\ttwo  @octocat #3 GH-12 gh-7 see https://evil.example \u200b\u202e ")
 	if !ok {
 		t.Fatal("rejected")
 	}
-	want := "line one line two @​octocat #​3 GH​-12 gh​-7 see https:​//evil.example"
+	want := "line one line two @\u200boctocat #\u200b3 GH\u200b-12 gh\u200b-7 see https:\u200b//evil.example"
 	if note != want {
 		t.Fatalf("%q", note)
 	}
@@ -445,10 +445,10 @@ func TestWordNoteSanitising(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 	// Labels in commit messages cannot mention users or link issues.
-	if label := englishLines([]englishSubmissionEntry{{"x", "@x#1"}})[0].label; label != "x → @​x#​1" {
+	if label := englishLines([]englishSubmissionEntry{{"x", "@x#1"}})[0].label; label != "x → @\u200bx#\u200b1" {
 		t.Fatalf("%q", label)
 	}
-	if label := translationLines([]translationSubmissionEntry{{"gh-1", "https://x"}})[0].label; label != "gh​-1 → https:​//x" {
+	if label := translationLines([]translationSubmissionEntry{{"gh-1", "https://x"}})[0].label; label != "gh\u200b-1 → https:\u200b//x" {
 		t.Fatalf("%q", label)
 	}
 }
@@ -606,7 +606,7 @@ func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
 		t.Fatalf("%q", f.content)
 	}
 	message := put["message"].(string)
-	if !strings.HasPrefix(message, "feat(custom): add 2 words\n\n- 扛把子 kang'ba'zi\n- 二〇二六 er'ling'er'liu\n") || !strings.Contains(message, "Note: 网络流行语 @​octocat fixes #​3 https:​//example.com") {
+	if !strings.HasPrefix(message, "feat(custom): add 2 words\n\n- 扛把子 kang'ba'zi\n- 二〇二六 er'ling'er'liu\n") || !strings.Contains(message, "Note: 网络流行语 @\u200boctocat fixes #\u200b3 https:\u200b//example.com") {
 		t.Fatalf("%q", message)
 	}
 	pr := f.bodies["POST "+wordsTestRepo+"/pulls"]
@@ -952,7 +952,7 @@ func TestWordSubmissionKindValidation(t *testing.T) {
 		{"english", map[string]string{"word": strings.Repeat("a", 65), "display": "a"}, "word_too_long"},
 		{"english", map[string]string{"word": "github", "display": "  "}, "display_required"},
 		{"english", map[string]string{"word": "github", "display": "Git\tHub"}, "invalid_display"},
-		{"english", map[string]string{"word": "github", "display": "Git​Hub"}, "invalid_display"},
+		{"english", map[string]string{"word": "github", "display": "Git\u200bHub"}, "invalid_display"},
 		{"english", map[string]string{"word": "github", "display": "Git Hub"}, "invalid_display"},
 		{"english", map[string]string{"word": "github", "display": strings.Repeat("G", 65)}, "display_too_long"},
 		{"translations", map[string]string{"source": "", "gloss": "x"}, "source_required"},

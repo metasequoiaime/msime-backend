@@ -121,7 +121,9 @@ func TestCloudDoesNotRequireNativeFallback(t *testing.T) {
 			t.Fatal(w.Code, w.Body.String())
 		}
 	}
-	s := fixture(t, func(w http.ResponseWriter, r *http.Request) { http.Error(w, "unavailable", 503) })
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	})
 	w := call(s, "GET", "/v1/cloud/candidates?text=nihao", "")
 	if w.Code != 502 {
 		t.Fatal("upstream failure must remain visible", w.Code, w.Body.String())
