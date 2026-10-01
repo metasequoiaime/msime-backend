@@ -118,7 +118,7 @@ func (a *Service) resourceList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 401, "login_required")
 		return
 	}
-	rows, err := a.store.pool.Query(r.Context(), resourceSelect+`WHERE s.kind=$2 AND strpos(lower(s.name),lower($3))>0
+	rows, err := a.store.pool.Query(r.Context(), resourceSelect+`WHERE s.kind=$2 AND strpos(lower(s.name),lower($3))>0 AND (s.moderation<>'removed' OR s.owner_id=$1)
  AND ($4='' OR ($4='mine' AND s.owner_id=$1) OR ($4='saved' AND EXISTS(SELECT 1 FROM community_resource_saves WHERE resource_id=s.id AND user_id=$1)))
  ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $5`, viewer, kind, q, scope, offset)
 	if err != nil {
@@ -146,7 +146,7 @@ func (a *Service) resourceList(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"items": items, "has_more": more})
 }
 func (a *Service) resourceDetail(w http.ResponseWriter, r *http.Request) {
-	v, err := scanResource(a.store.pool.QueryRow(r.Context(), resourceSelect+`WHERE s.id=$2`, a.communityViewer(r), r.PathValue("id")))
+	v, err := scanResource(a.store.pool.QueryRow(r.Context(), resourceSelect+`WHERE s.id=$2 AND (s.moderation<>'removed' OR s.owner_id=$1)`, a.communityViewer(r), r.PathValue("id")))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "resource_not_found")
 		return
@@ -194,6 +194,10 @@ func (a *Service) resourcePublish(w http.ResponseWriter, r *http.Request) {
 		a.error(w, err)
 		return
 	}
+	flag, ok := a.screenUpload(w, r, input.Name, input.Description, resourceScreenText(content))
+	if !ok {
+		return
+	}
 	tx, err := a.store.userDataTransaction(r.Context(), p.UserID)
 	if err != nil {
 		a.error(w, err)
@@ -217,7 +221,7 @@ func (a *Service) resourcePublish(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, "revision_conflict")
 			return
 		}
-		_, err = tx.Exec(r.Context(), `UPDATE community_resources SET name=$2,description=$3,content=$4,revision=revision+1,updated_at=now() WHERE id=$1`, input.ID, input.Name, input.Description, raw)
+		_, err = tx.Exec(r.Context(), `UPDATE community_resources SET name=$2,description=$3,content=$4,revision=revision+1,updated_at=now(),`+reviewAgain("$5")+` WHERE id=$1`, input.ID, input.Name, input.Description, raw, flag)
 		revision++
 	} else if errors.Is(err, pgx.ErrNoRows) {
 		if input.Revision != 0 {
@@ -233,7 +237,7 @@ func (a *Service) resourcePublish(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, "resource_publish_limit")
 			return
 		}
-		_, err = tx.Exec(r.Context(), `INSERT INTO community_resources(id,owner_id,kind,name,description,content) VALUES($1,$2,$3,$4,$5,$6)`, input.ID, p.UserID, input.Kind, input.Name, input.Description, raw)
+		_, err = tx.Exec(r.Context(), `INSERT INTO community_resources(id,owner_id,kind,name,description,content,moderation,moderation_reason) VALUES($1,$2,$3,$4,$5,$6,'pending',$7)`, input.ID, p.UserID, input.Kind, input.Name, input.Description, raw, flag)
 		revision = 1
 	}
 	if err == nil {
@@ -277,14 +281,14 @@ func (a *Service) resourceSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Saved {
-		result, err := a.store.pool.Exec(r.Context(), `INSERT INTO community_resource_saves(resource_id,user_id) SELECT id,$2 FROM community_resources WHERE id=$1 ON CONFLICT DO NOTHING`, r.PathValue("id"), p.UserID)
+		result, err := a.store.pool.Exec(r.Context(), `INSERT INTO community_resource_saves(resource_id,user_id) SELECT id,$2 FROM community_resources WHERE id=$1 AND (moderation<>'removed' OR owner_id=$2) ON CONFLICT DO NOTHING`, r.PathValue("id"), p.UserID)
 		if err != nil {
 			a.error(w, err)
 			return
 		}
 		if result.RowsAffected() == 0 {
 			var exists bool
-			err = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_resources WHERE id=$1)`, r.PathValue("id")).Scan(&exists)
+			err = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_resources WHERE id=$1 AND (moderation<>'removed' OR owner_id=$2))`, r.PathValue("id"), p.UserID).Scan(&exists)
 			if err != nil {
 				a.error(w, err)
 				return
@@ -318,7 +322,7 @@ func (a *Service) resourceRate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := a.store.pool.Exec(r.Context(), `INSERT INTO community_resource_ratings(resource_id,user_id,stars)
- SELECT id,$2,$3 FROM community_resources WHERE id=$1 AND owner_id<>$2 AND EXISTS(SELECT 1 FROM community_resource_saves WHERE resource_id=$1 AND user_id=$2)
+ SELECT id,$2,$3 FROM community_resources WHERE id=$1 AND owner_id<>$2 AND moderation<>'removed' AND EXISTS(SELECT 1 FROM community_resource_saves WHERE resource_id=$1 AND user_id=$2)
  ON CONFLICT(resource_id,user_id) DO UPDATE SET stars=excluded.stars`, r.PathValue("id"), p.UserID, input.Stars)
 	if err != nil {
 		a.error(w, err)

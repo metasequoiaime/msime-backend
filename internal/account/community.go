@@ -159,7 +159,7 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_search")
 		return
 	}
-	rows, e := a.store.pool.Query(r.Context(), communitySelect+`WHERE strpos(lower(s.name),lower($2))>0 ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $3`, a.communityViewer(r), search, offset)
+	rows, e := a.store.pool.Query(r.Context(), communitySelect+`WHERE strpos(lower(s.name),lower($2))>0 AND (s.moderation<>'removed' OR s.owner_id=$1) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $3`, a.communityViewer(r), search, offset)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -185,7 +185,7 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"skins": items, "has_more": more})
 }
 func (a *Service) communityDetail(w http.ResponseWriter, r *http.Request) {
-	v, e := scanSkin(a.store.pool.QueryRow(r.Context(), communitySelect+`WHERE s.id=$2`, a.communityViewer(r), r.PathValue("id")))
+	v, e := scanSkin(a.store.pool.QueryRow(r.Context(), communitySelect+`WHERE s.id=$2 AND (s.moderation<>'removed' OR s.owner_id=$1)`, a.communityViewer(r), r.PathValue("id")))
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -232,6 +232,10 @@ func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
 		a.error(w, e)
 		return
 	}
+	flag, ok := a.screenUpload(w, r, input.Name, input.Description)
+	if !ok {
+		return
+	}
 	tx, e := a.store.userDataTransaction(r.Context(), p.UserID)
 	if e != nil {
 		a.error(w, e)
@@ -263,7 +267,7 @@ func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "skin_publish_limit")
 		return
 	}
-	_, e = tx.Exec(r.Context(), `INSERT INTO community_skins(id,owner_id,name,description,design) VALUES($1,$2,$3,$4,$5)`, input.ID, p.UserID, input.Name, input.Description, raw)
+	_, e = tx.Exec(r.Context(), `INSERT INTO community_skins(id,owner_id,name,description,design,moderation,moderation_reason) VALUES($1,$2,$3,$4,$5,'pending',$6)`, input.ID, p.UserID, input.Name, input.Description, raw, flag)
 	if e == nil {
 		e = tx.Commit(r.Context())
 	}
@@ -313,7 +317,7 @@ func (a *Service) communityDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var design json.RawMessage
-	e = tx.QueryRow(r.Context(), `SELECT design FROM community_skins WHERE id=$1 FOR SHARE`, r.PathValue("id")).Scan(&design)
+	e = tx.QueryRow(r.Context(), `SELECT design FROM community_skins WHERE id=$1 AND (moderation<>'removed' OR owner_id=$2) FOR SHARE`, r.PathValue("id"), p.UserID).Scan(&design)
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -348,7 +352,7 @@ func (a *Service) communityRate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, e := a.store.pool.Exec(r.Context(), `INSERT INTO community_skin_ratings(skin_id,user_id,stars)
- SELECT s.id,$2,$3 FROM community_skins s WHERE s.id=$1 AND s.owner_id<>$2 AND EXISTS(SELECT 1 FROM community_skin_downloads WHERE skin_id=s.id AND user_id=$2)
+ SELECT s.id,$2,$3 FROM community_skins s WHERE s.id=$1 AND s.owner_id<>$2 AND s.moderation<>'removed' AND EXISTS(SELECT 1 FROM community_skin_downloads WHERE skin_id=s.id AND user_id=$2)
  ON CONFLICT(skin_id,user_id) DO UPDATE SET stars=excluded.stars`, r.PathValue("id"), p.UserID, input.Stars)
 	if e != nil {
 		a.error(w, e)

@@ -14359,6 +14359,111 @@
         }
       }
     },
+    "/v1/community/reports": {
+      "post": {
+        "summary": "举报社区内容",
+        "tags": [
+          "创作社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "description": "登录用户举报一项社区内容，由管理后台复核。kind 取 skins、candidate-skins、plugins、dictionaries、replies；只能举报自己可见的内容（已下架内容与私有候选皮肤返回 404）。同一账号重复举报同一内容不会新增记录，返回 200；每个账号每小时最多 30 次。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "skins",
+                      "candidate-skins",
+                      "plugins",
+                      "dictionaries",
+                      "replies"
+                    ]
+                  },
+                  "item_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "举报原因，不含控制字符"
+                  },
+                  "detail": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "补充说明，可含换行"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已举报过，未新增记录",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reported": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "已记录举报",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reported": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "404": {
+            "description": "内容不存在或不可见"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用"
+          }
+        }
+      }
+    },
     "/v1/community/word-submissions": {
       "get": {
         "summary": "查询官网词条提交是否开放",
