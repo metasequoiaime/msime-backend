@@ -107,8 +107,8 @@ func LoadConfig(path string) (Config, error) {
 	return c, err
 }
 func (c *Config) Validate() error {
-	// word_submissions rows are keyed by pull request number alone, so the console reviews the repository the website submits to: a blank dictionary_repo follows it, and a different one is refused below.
-	if c.Admin.GitHub.DictionaryRepo == "" && c.WordSubmissions.enabled() {
+	// word_submissions rows are keyed by pull request number alone, so the console reviews the repository the website submits to: a blank dictionary_repo follows it (when it is well formed; otherwise word_submissions reports its own error), and a different one is refused below.
+	if c.Admin.GitHub.DictionaryRepo == "" && c.WordSubmissions.enabled() && githubRepositoryPattern.MatchString(c.WordSubmissions.GitHub.Repository) {
 		c.Admin.GitHub.DictionaryRepo = c.WordSubmissions.GitHub.Repository
 	}
 	if err := c.Admin.validate(c.Auth.Enabled, c.Clients); err != nil {

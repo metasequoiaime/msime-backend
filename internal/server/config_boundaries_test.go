@@ -255,6 +255,12 @@ func TestAdminDictionaryRepoFollowsWordSubmissions(t *testing.T) {
 	if c = base("metasequoiaime/msime-dictionary"); c.Validate() == nil {
 		t.Fatal("a console reviewing another repository than the website submits to was accepted")
 	}
+	// A malformed website repository is reported as the word_submissions setting it is, not as a dictionary_repo nobody wrote.
+	c = base("")
+	c.WordSubmissions.GitHub.Repository = "not-a-repo"
+	if err := c.Validate(); err == nil || !strings.HasPrefix(err.Error(), "word_submissions github repository") {
+		t.Fatal(err)
+	}
 	// Without the website form the console's own default still applies.
 	c = base("")
 	c.WordSubmissions = WordSubmissionsConfig{}
