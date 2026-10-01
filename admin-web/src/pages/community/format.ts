@@ -2,7 +2,7 @@ import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { z } from "zod";
 import type { Item, Section } from "../../api/community";
-import { pluginKindLabels } from "../../api/community";
+import { candidateCategoryLabel, pluginKindLabels } from "../../api/community";
 
 export function formatTime(value: string | null | undefined): string {
   if (!value) return "—";
@@ -24,6 +24,7 @@ export function itemMeta(section: Section, item: Item): string {
   if (section === "dictionaries" && item.entries != null) parts.push(`${count(item.entries)} 条`);
   if (item.downloads !== undefined) parts.push(`下载 ${count(item.downloads)}`);
   if (item.saves !== undefined) parts.push(`收藏 ${count(item.saves)}`);
+  if (section === "candidate-skins" && item.category) parts.push(candidateCategoryLabel(item.category));
   if (section === "candidate-skins" && item.visibility === "private") parts.push("私有");
   if (item.reports > 0) parts.push(`被举报 ${item.reports} 次`);
   return parts.join(" · ");
