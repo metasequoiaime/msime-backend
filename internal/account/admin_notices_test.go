@@ -303,3 +303,84 @@ func TestNoticeAuthor(t *testing.T) {
 		}
 	}
 }
+
+func TestNoticePublishOverwritesDraftAndDiscard(t *testing.T) {
+	a, db := noticeTestService(t)
+	owner := adminTestContext(context.Background(), "legacy-token")
+
+	status, out := noticeAction(t, a, owner, `{"action":"save_notice_draft","value":{"title":"旧标题","body":"旧正文","targets":["windows"],"channels":[]}}`)
+	if status != 200 {
+		t.Fatal(status, out)
+	}
+	draft := out["id"].(string)
+	// Publishing a draft with a value publishes the console's current form, not what was saved.
+	if status, out = noticeAction(t, a, owner, `{"action":"publish_notice","id":"`+draft+`","value":{"title":"新标题","body":"新正文","targets":["macos","linux"],"channels":["app"]}}`); status != 200 || out["id"] != draft {
+		t.Fatal(status, out)
+	}
+	items := publicNotices(t, a, "/v1/notices?platform=linux&channel=app")
+	if len(items) != 1 || items[0]["title"] != "新标题" || items[0]["body"] != "新正文" {
+		t.Fatal(items)
+	}
+	if items := publicNotices(t, a, "/v1/notices?platform=windows"); len(items) != 0 {
+		t.Fatal("the saved targets were published", items)
+	}
+
+	// Archiving a draft discards it and records where it came from.
+	status, out = noticeAction(t, a, owner, `{"action":"save_notice_draft","value":{"title":"不要了","targets":["all"]}}`)
+	if status != 200 {
+		t.Fatal(status, out)
+	}
+	discarded := out["id"].(string)
+	if status, out = noticeAction(t, a, owner, `{"action":"archive_notice","id":"`+discarded+`"}`); status != 200 {
+		t.Fatal(status, out)
+	}
+	if status, out = noticeAction(t, a, owner, `{"action":"publish_notice","id":"`+discarded+`"}`); status != 409 || errorCode(out) != "not_draft" {
+		t.Fatal(status, out)
+	}
+	var detail string
+	if err := db.pool.QueryRow(context.Background(), `SELECT detail::text FROM admin_audit WHERE action='archive_notice' AND target=$1`, discarded).Scan(&detail); err != nil || !strings.Contains(detail, `"from": "draft"`) {
+		t.Fatal(detail, err)
+	}
+
+	// A body over the column limit is rejected at the boundary.
+	value, _ := json.Marshal(map[string]any{"title": "t", "body": strings.Repeat("a", noticeBodyMax+1), "targets": []string{"all"}})
+	if _, err := parseNoticeInput(value, false); err == nil || err.Error() != "invalid_body" {
+		t.Fatal(err)
+	}
+}
+
+func TestAdminNoticesKeepsLiveNoticesAheadOfArchived(t *testing.T) {
+	a, db := noticeTestService(t)
+	owner := adminTestContext(context.Background(), "legacy-token")
+	ctx := context.Background()
+	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_notices(title,targets,channels,status,created_by,published_at,updated_at) VALUES('仍在展示','{all}','{site}','live','legacy-token',now()-interval '30 days',now()-interval '30 days')`); err != nil {
+		t.Fatal(err)
+	}
+	// More newer archived notices than one page holds must not push the live notice out of the console.
+	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_notices(title,targets,channels,status,created_by,published_at) SELECT 'archived '||g,'{all}','{site}','archived','legacy-token',now() FROM generate_series(1,$1) g`, noticeAdminLimit+5); err != nil {
+		t.Fatal(err)
+	}
+	r := jsonRequest("GET", "/api/notices", "", "")
+	w := httptest.NewRecorder()
+	a.AdminHTTP(w, r.WithContext(owner))
+	var list struct {
+		Items []struct {
+			Title  string `json:"title"`
+			Status string `json:"status"`
+		} `json:"items"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &list) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	archived, live := 0, 0
+	for _, n := range list.Items {
+		if n.Status == "archived" {
+			archived++
+		} else if n.Title == "仍在展示" {
+			live++
+		}
+	}
+	if archived != noticeAdminLimit || live != 1 || list.Items[len(list.Items)-1].Title != "仍在展示" {
+		t.Fatal(archived, live, len(list.Items))
+	}
+}

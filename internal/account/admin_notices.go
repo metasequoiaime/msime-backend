@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -46,7 +47,7 @@ const (
 
 	noticeTitleMax = 200
 	noticeBodyMax  = 20000
-	// noticeAdminLimit bounds GET /api/notices; the console shows the newest notices of every status.
+	// noticeAdminLimit bounds GET /api/notices per group: the newest drafts and live notices, and separately the newest archived ones.
 	noticeAdminLimit = 200
 	// noticePublicLimit bounds the public feed; clients only show the newest few.
 	noticePublicLimit = 20
@@ -180,7 +181,11 @@ func noticeAuthor(actor string) string {
 
 // adminNotices serves GET /api/notices.
 func (a *Service) adminNotices(w http.ResponseWriter, r *http.Request, _ string) {
-	rows, err := a.store.pool.Query(r.Context(), `SELECT id,title,body,targets,channels,status,created_by,created_at,published_at,updated_at FROM admin_notices ORDER BY COALESCE(published_at,updated_at) DESC,id DESC LIMIT $1`, noticeAdminLimit)
+	// Drafts and live notices are bounded separately from archived ones, so a pile of archived notices never pushes a live notice out of the console where it could no longer be archived.
+	rows, err := a.store.pool.Query(r.Context(), `SELECT * FROM ((SELECT id,title,body,targets,channels,status,created_by,created_at,published_at,updated_at FROM admin_notices WHERE status<>'archived' ORDER BY COALESCE(published_at,updated_at) DESC,id DESC LIMIT $1)
+UNION ALL
+(SELECT id,title,body,targets,channels,status,created_by,created_at,published_at,updated_at FROM admin_notices WHERE status='archived' ORDER BY COALESCE(published_at,updated_at) DESC,id DESC LIMIT $1)) n
+ORDER BY COALESCE(published_at,updated_at) DESC,id DESC`, noticeAdminLimit)
 	if err != nil {
 		a.error(w, err)
 		return
@@ -334,6 +339,7 @@ func actionPublishNotice(a *Service, ctx context.Context, tx pgx.Tx, v actionReq
 			return actionResult{}, actionFail(409, "telegram_disabled")
 		}
 		if err := a.broadcaster.BroadcastNotice(ctx, n); err != nil {
+			slog.Warn("notice telegram broadcast failed", "notice", n.ID, "error", err)
 			return actionResult{}, actionFail(502, "telegram_failed")
 		}
 	}

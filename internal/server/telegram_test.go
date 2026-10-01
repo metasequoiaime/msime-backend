@@ -18,11 +18,12 @@ const testTelegramToken = "123456:ABCdefGHIjklMNOpqrSTUvwxYZ012345"
 
 // fakeTelegram is a Bot API stand-in that records sendMessage bodies and answers with status and ok.
 type fakeTelegram struct {
-	mu       sync.Mutex
-	paths    []string
-	messages []map[string]any
-	status   int
-	ok       bool
+	mu          sync.Mutex
+	paths       []string
+	messages    []map[string]any
+	status      int
+	ok          bool
+	description string
 }
 
 func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +36,7 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.messages = append(f.messages, body)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(f.status)
-	json.NewEncoder(w).Encode(map[string]any{"ok": f.ok})
+	json.NewEncoder(w).Encode(map[string]any{"ok": f.ok, "description": f.description})
 }
 
 func TestTelegramNoticeBroadcaster(t *testing.T) {
@@ -63,8 +64,19 @@ func TestTelegramNoticeBroadcaster(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := fake.messages[1]["text"].(string)
-	if utf8.RuneCountInString(text) != telegramMessageMax || !strings.HasSuffix(text, "…") {
+	if telegramLength(text) != telegramMessageMax || utf8.RuneCountInString(text) != telegramMessageMax || !strings.HasSuffix(text, "…") {
 		t.Fatal(utf8.RuneCountInString(text))
+	}
+	// Telegram counts UTF-16 code units, so a body of emoji is cut at half as many characters and never splits a surrogate pair.
+	if err := b.BroadcastNotice(ctx, account.Notice{Title: "表情", Body: strings.Repeat("🎉", 3000)}); err != nil {
+		t.Fatal(err)
+	}
+	text = fake.messages[2]["text"].(string)
+	if n := telegramLength(text); n > telegramMessageMax || n < telegramMessageMax-1 || !utf8.ValidString(text) || !strings.HasSuffix(text, "🎉…") {
+		t.Fatal(n)
+	}
+	if exact := strings.Repeat("a", telegramMessageMax); telegramText(account.Notice{Title: exact}) != exact {
+		t.Fatal("a message at the limit was cut")
 	}
 
 	// Rejections and transport failures are errors that never carry the bot token.
@@ -72,6 +84,12 @@ func TestTelegramNoticeBroadcaster(t *testing.T) {
 	if err := b.BroadcastNotice(ctx, account.Notice{Title: "x"}); err == nil || strings.Contains(err.Error(), testTelegramToken) {
 		t.Fatal(err)
 	}
+	// The Bot API's description reaches the error for the operator, with the token redacted should it ever be echoed.
+	fake.status, fake.description = 403, "Forbidden: bot "+testTelegramToken+" is not a member of the channel chat"
+	if err := b.BroadcastNotice(ctx, account.Notice{Title: "x"}); err == nil || strings.Contains(err.Error(), testTelegramToken) || !strings.Contains(err.Error(), "not a member of the channel chat") {
+		t.Fatal(err)
+	}
+	fake.description = ""
 	fake.status = 403
 	if err := b.BroadcastNotice(ctx, account.Notice{Title: "x"}); err == nil || strings.Contains(err.Error(), testTelegramToken) {
 		t.Fatal(err)
