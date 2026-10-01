@@ -246,6 +246,10 @@ func TestEveryAccountJSONBodyRejectsMalformedInput(t *testing.T) {
 			}
 			count++
 			t.Run(method+" "+path, func(t *testing.T) {
+				// Every request comes from the same test address, and four per operation across all documented routes exceed the 120 per minute per-address limit, which this test does not exercise.
+				if _, err := db.pool.Exec(t.Context(), `DELETE FROM auth_rates WHERE key LIKE 'ip:%'`); err != nil {
+					t.Fatal(err)
+				}
 				for _, body := range []string{`{`, `{} {}`, `{"unexpected_contract_field":true}`} {
 					apiRequest(t, mux, strings.ToUpper(method), path, body, user.AccessToken, 400)
 				}
