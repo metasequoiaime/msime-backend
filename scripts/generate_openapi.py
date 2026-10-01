@@ -278,25 +278,27 @@ for path,method,title,body,response,status,description in [
     if path=='/v1/community/candidate-skins' and method=='post': operation['responses']['200']={'description':'同一发布请求的安全重试','content':{'application/json':{'schema':response}}}
     if (path,method) in (('/v1/community/candidate-skins','post'),('/v1/community/candidate-skins/{id}','put')): operation['responses'].update(screening_responses)
     paths.setdefault(path,{})[method]=operation
-# 插件社区：plugin.toml 加音频与说明文本的 zip 包，服务端只校验、存储和分发原始字节，从不执行。
-plugin_kind = string(enum=['sound','music','command_table','effect'])
+# 插件社区：plugin.toml 加音频或数据文件与说明文本的 zip 包，服务端只校验、存储和分发原始字节，从不执行。
+plugin_kinds = ['sound','music','command_table','effect','helpcode','symbol_set','phrase_table','wordbook']
+plugin_kind = string(enum=plugin_kinds)
+plugin_kinds_param = {'name':'kinds','in':'query','schema':string(),'description':'逗号分隔的、客户端能安装的类型。sound、music、command_table、effect 总是返回；其余类型只在这里声明（或由 kind 指定）后才返回，详情未声明时为 404 plugin_not_found。不认识的名字忽略，不报错。'}
 plugin_id = string(pattern='^[a-z0-9][a-z0-9._-]{0,63}$')
 community_plugin = obj({'id':string(format='uuid'),'kind':plugin_kind,'plugin_id':plugin_id,'name':string(),'description':string(),'author':string(),'version':string(),'license':string(),'size':{'type':'integer','description':'zip 包字节数'},'sha256':string(pattern='^[0-9a-f]{64}$',description='zip 包的 SHA-256'),'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'created_at':string(format='date-time'),'moderation':moderation_field})
 community_plugin_publish = obj({'id':string(format='uuid'),'name':string(minLength=1,maxLength=32),'description':string(maxLength=280),'kind':plugin_kind,'plugin_id':plugin_id,'version':string(minLength=1,maxLength=32),'archive':string(format='byte',description='zip 包的标准 base64，解码后不超过 8 MiB')},['id','name','description','kind','plugin_id','version','archive'],True)
 community_plugin_package = obj({'id':string(format='uuid'),'kind':plugin_kind,'plugin_id':plugin_id,'version':string(),'size':{'type':'integer'},'sha256':string(pattern='^[0-9a-f]{64}$'),'archive':string(format='byte')})
-plugin_rules='zip 包不超过 8 MiB、最多 64 个成员和 16 个文件，解压总量不超过 24 MiB 且不超过包体 100 倍加 1 MiB；拒绝绝对路径、..、反斜杠、符号链接、加密成员和嵌套压缩包。包内恰好一个 plugin.toml（schema_version = 1，严格解析，未知键拒绝），kind 与 plugin_id、version 须与请求一致，permissions 必须为空；引用的音频须存在且为 .wav/.ogg 并匹配文件头（sound 采样只能是 .wav），effect 只含 [effect] 参数表、不带任何音频；其余文件只能是 .txt/.md 说明。'
+plugin_rules='zip 包不超过 8 MiB、最多 64 个成员和 16 个文件，解压总量不超过 24 MiB 且不超过包体 100 倍加 1 MiB；拒绝绝对路径、..、反斜杠、符号链接、加密成员和嵌套压缩包。包内恰好一个 plugin.toml（schema_version = 1，严格解析，未知键拒绝），kind 与 plugin_id、version 须与请求一致，permissions 必须为空；引用的音频须存在且为 .wav/.ogg 并匹配文件头（sound 采样只能是 .wav），effect、phrase_table、symbol_set 只含清单里的参数或数据、不带任何音频；helpcode 点名一个不超过 1 MiB 的 .txt 辅助码表，wordbook 点名一个不超过 4 MiB 的 .tsv 单词表，内容按客户端的严格语法校验；其余文件只能是 .txt/.md 说明。'
 for path,method,title,body,response,status,description in [
- ('/v1/community/plugins','get','浏览社区插件',None,obj({'plugins':{'type':'array','maxItems':20,'items':community_plugin},'has_more':{'type':'boolean'}}),'200','按发布时间倒序每页 20 条，可按 kind 过滤、按名称搜索，不含 zip 包字节。scope=mine 只列出自己的作品（含已下架），需要用户会话。'),
+ ('/v1/community/plugins','get','浏览社区插件',None,obj({'plugins':{'type':'array','maxItems':20,'items':community_plugin},'has_more':{'type':'boolean'}}),'200','按发布时间倒序每页 20 条，可按 kind 过滤、按名称搜索，不含 zip 包字节。只返回旧客户端认识的类型和 kinds 声明的类型。scope=mine 只列出自己的作品（含已下架），需要用户会话。'),
  ('/v1/community/plugins','post','发布插件包',community_plugin_publish,community_plugin,'201','请求最多 11,300,000 字节。'+plugin_rules+'id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 个插件、包体合计不超过 32 MiB，每小时最多发布 10 次；同一账号的发布逐个处理，同一进程最多同时接收 4 个发布，排队超时返回 503 plugin_busy。'),
- ('/v1/community/plugins/{id}','get','插件详情',None,community_plugin,'200','公开详情；登录时额外返回自己的评分与是否为作者。'),
+ ('/v1/community/plugins/{id}','get','插件详情',None,community_plugin,'200','公开详情；登录时额外返回自己的评分与是否为作者。类型不在旧客户端认识的范围内且未在 kinds 中声明时返回 404。'),
  ('/v1/community/plugins/{id}','delete','作者下架插件',None,obj({'deleted':{'type':'boolean'}}),'200','仅作者可下架，连带删除下载和评分记录。'),
  ('/v1/community/plugins/{id}/download','post','下载插件包并去重计数',None,community_plugin_package,'200','返回原样 zip 包（标准 base64）与 SHA-256，客户端安装前应校验摘要；下载人数按账号去重。每个账号每小时最多 60 次下载，同一进程最多同时发送 8 个包，排队超时返回 503 plugin_busy。'),
  ('/v1/community/plugins/{id}/rating','put','为插件评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200','评分需先下载且不能自评，重复提交更新同一条评分。'),
 ]:
     parameters=[]
     if '{id}' in path: parameters.append({'name':'id','in':'path','required':True,'schema':string(format='uuid')})
-    elif method=='get': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'kind','in':'query','schema':string(enum=['','sound','music','command_table','effect'],default='')},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},{'name':'scope','in':'query','schema':string(enum=['','mine'],default=''),'description':'mine 只列出自己的作品（含已下架），需要用户会话，否则 401 user_session_required。'}]
-    if method=='get' and path in ('/v1/community/plugins','/v1/community/plugins/{id}'): parameters.append(moderation_param)
+    elif method=='get': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'kind','in':'query','schema':string(enum=['',*plugin_kinds],default='')},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},{'name':'scope','in':'query','schema':string(enum=['','mine'],default=''),'description':'mine 只列出自己的作品（含已下架），需要用户会话，否则 401 user_session_required。'}]
+    if method=='get' and path in ('/v1/community/plugins','/v1/community/plugins/{id}'): parameters += [moderation_param,plugin_kinds_param]
     operation={'summary':title,'tags':['插件社区'],'security':[] if method=='get' else [{'userSession':[]}],'parameters':parameters,
       'description':description+' 详见 docs/plugin-community.md。',
       'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数、清单或 zip 包无效'),('401','需要用户登录'),('403','尚未下载或正在评价自己的作品'),('404','插件不存在或非作者'),('409','配额已满或 UUID 冲突'),('415','需要 application/json'),('429','请求过多'),('503','服务不可用或校验繁忙')]}}}
