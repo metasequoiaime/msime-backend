@@ -153,29 +153,42 @@ func issueFail(w http.ResponseWriter, err error) {
 	fail(w, 502, "github_unavailable")
 }
 
-// issueTokenError classifies a failure to mint an installation token.
-func issueTokenError(repo string, err error) error {
-	slog.Error("issues: GitHub installation token", "repo", repo, "reason", err.Error())
+// issueCutShort 判断一次 GitHub 调用的失败是否只是因为请求的 ctx 到期或被取消：外壳角标在 5 秒预算内读不完属于预期内的降级，记 WARN；GitHub 返回 4xx/5xx、响应无法解码等真正的故障仍记 ERROR。githubapp 铸造令牌时会把原因转成字符串，所以除了 `errors.Is` 还要看 ctx 本身是否已结束。
+func issueCutShort(ctx context.Context, err error) bool {
+	return err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil)
+}
+
+// issueTokenError 归类铸造 installation token 的失败，日志带上仓库名。
+func issueTokenError(ctx context.Context, repo string, err error) error {
+	if issueCutShort(ctx, err) {
+		slog.Warn("issues: GitHub installation token", "repo", repo, "reason", err.Error())
+	} else {
+		slog.Error("issues: GitHub installation token", "repo", repo, "reason", err.Error())
+	}
 	if errors.Is(err, githubapp.ErrRejected) {
 		return &issueError{502, "github_rejected"}
 	}
 	return &issueError{502, "github_unavailable"}
 }
 
-// issueResponseError classifies a GitHub REST answer that is not a success. A missing issue is 404 not_found, any other refusal means the App lacks access (github_rejected), and server errors, transport failures and unreadable bodies mean GitHub is unavailable.
-func issueResponseError(what string, r githubapp.Response, err error) error {
+// issueResponseError 归类一次不成功的 GitHub REST 应答：issue 不存在为 404 not_found，其他拒绝说明 App 缺少权限（github_rejected），服务端错误、传输失败和无法解码的正文都算 GitHub 不可用。日志带上仓库名和调用名；只因 ctx 到期或取消而中断的调用记 WARN，其余记 ERROR。
+func issueResponseError(ctx context.Context, repo, what string, r githubapp.Response, err error) error {
 	if err != nil || r.Status >= 500 || r.OK() {
 		reason := ""
 		if err != nil {
 			reason = err.Error()
 		}
-		slog.Error("issues: GitHub unavailable", "call", what, "status", r.Status, "reason", reason)
+		level := slog.LevelError
+		if issueCutShort(ctx, err) {
+			level = slog.LevelWarn
+		}
+		slog.Log(ctx, level, "issues: GitHub unavailable", "repo", repo, "call", what, "status", r.Status, "reason", reason)
 		return &issueError{502, "github_unavailable"}
 	}
 	if r.Status == 404 || r.Status == 410 {
 		return &issueError{404, "not_found"}
 	}
-	slog.Error("issues: GitHub refused", "call", what, "status", r.Status)
+	slog.Error("issues: GitHub refused", "repo", repo, "call", what, "status", r.Status)
 	return &issueError{502, "github_rejected"}
 }
 
@@ -295,64 +308,105 @@ type issueComment struct {
 	CreatedAt         time.Time       `json:"created_at"`
 }
 
-// repoIssues reads one repository: up to issueOpenPages pages of open issues, the 100 most recently updated closed issues, and up to issueOpenPages pages of the comments of the response window, oldest first, for response times. Pull requests are dropped. Every read goes through the client's short cache, so the shell badge polling this costs GitHub at most one revalidation per path a minute.
-func (s *Server) repoIssues(ctx context.Context, gh *githubapp.Client, repo string) ([]issueRow, []issueComment, error) {
+// issueScope 决定一次快照读取每个仓库的哪些内容。
+type issueScope int
+
+const (
+	// issueScopeOpen 只读未关闭的 issue，供外壳角标计数和新 issue 通知使用。
+	issueScopeOpen issueScope = iota
+	// issueScopeListing 再加上最近更新的 100 个已关闭 issue，供相似 issue 使用。
+	issueScopeListing
+	// issueScopeFull 再加上响应窗口内的评论，用于计算首次响应时间，供 GET /api/issues 使用。
+	issueScopeFull
+)
+
+// repoIssues 读取一个仓库：最多 issueOpenPages 页未关闭的 issue；scope 不是 issueScopeOpen 时加上最近更新的 100 个已关闭 issue；scope 为 issueScopeFull 时再加上响应窗口内最多 issueOpenPages 页评论（按时间从旧到新），用于计算响应时间。三组读取互不依赖，在各自的 goroutine 中并发进行，每个仓库同时最多 3 个请求，所以一次快照的耗时约等于最慢的那一组，而不是三组之和；每组内部的分页仍按顺序读，因为是否读下一页取决于上一页是否读满。Pull request 会被去掉。每次读取都经过 client 的短期缓存，外壳角标每分钟轮询一次，每个路径最多让 GitHub 重新验证一次。
+func (s *Server) repoIssues(ctx context.Context, gh *githubapp.Client, repo string, scope issueScope) ([]issueRow, []issueComment, error) {
 	token, err := gh.Token(ctx, repo, issueTokenPerms)
 	if err != nil {
-		return nil, nil, issueTokenError(repo, err)
-	}
-	var rows []issueRow
-	read := func(path string) (int, error) {
-		r, err := gh.Get(ctx, token, path)
-		if err != nil || !r.OK() {
-			return 0, issueResponseError("list issues", r, err)
-		}
-		var page []issueGitHub
-		if err := r.Decode(&page); err != nil {
-			return 0, issueResponseError("list issues", r, err)
-		}
-		for _, v := range page {
-			if !v.isPullRequest() {
-				rows = append(rows, s.issueRow(repo, v))
-			}
-		}
-		return len(page), nil
+		return nil, nil, issueTokenError(ctx, repo, err)
 	}
 	base := "/repos/" + repo + "/issues"
-	for page := 1; page <= issueOpenPages; page++ {
-		n, err := read(base + "?state=open&sort=created&direction=desc&per_page=100&page=" + strconv.Itoa(page))
+	var (
+		wait                            sync.WaitGroup
+		open, closed                    []issueRow
+		comments                        []issueComment
+		openErr, closedErr, commentsErr error
+	)
+	wait.Go(func() {
+		for page := 1; page <= issueOpenPages; page++ {
+			rows, n, err := s.issuePage(ctx, gh, token, repo, base+"?state=open&sort=created&direction=desc&per_page=100&page="+strconv.Itoa(page))
+			if err != nil {
+				open, openErr = nil, err
+				return
+			}
+			open = append(open, rows...)
+			if n < 100 {
+				return
+			}
+		}
+	})
+	if scope >= issueScopeListing {
+		wait.Go(func() {
+			closed, _, closedErr = s.issuePage(ctx, gh, token, repo, base+"?state=closed&sort=updated&direction=desc&per_page=100")
+		})
+	}
+	if scope >= issueScopeFull {
+		wait.Go(func() {
+			comments, commentsErr = issueWindowComments(ctx, gh, token, repo)
+		})
+	}
+	wait.Wait()
+	for _, err := range []error{openErr, closedErr, commentsErr} {
 		if err != nil {
 			return nil, nil, err
 		}
-		if n < 100 {
-			break
+	}
+	return append(open, closed...), comments, nil
+}
+
+// issuePage 读取一页 issue 列表，返回去掉 pull request 后的行和这一页原始的条目数（用于判断是否还有下一页）。
+func (s *Server) issuePage(ctx context.Context, gh *githubapp.Client, token, repo, path string) ([]issueRow, int, error) {
+	r, err := gh.Get(ctx, token, path)
+	if err != nil || !r.OK() {
+		return nil, 0, issueResponseError(ctx, repo, "list issues", r, err)
+	}
+	var page []issueGitHub
+	if err := r.Decode(&page); err != nil {
+		return nil, 0, issueResponseError(ctx, repo, "list issues", r, err)
+	}
+	var rows []issueRow
+	for _, v := range page {
+		if !v.isPullRequest() {
+			rows = append(rows, s.issueRow(repo, v))
 		}
 	}
-	if _, err := read(base + "?state=closed&sort=updated&direction=desc&per_page=100"); err != nil {
-		return nil, nil, err
-	}
-	// Oldest first, so the first replies to the issues of the window come before any later ones; when the window has more comments than are read, the newest issues lose their sample instead of getting a later reply counted as the first. since is rounded to the day so the path, and with it the read cache, stays the same all day.
+	return rows, len(page), nil
+}
+
+// issueWindowComments 读取仓库在响应窗口内最多 issueOpenPages 页评论。按时间从旧到新读，窗口内各 issue 的首次回复会排在之后的回复前面；评论多于读取上限时，丢掉的是最新 issue 的样本，而不会把后来的回复误算成首次回复。since 取整到天，让路径（也就是读缓存的键）一整天保持不变。
+func issueWindowComments(ctx context.Context, gh *githubapp.Client, token, repo string) ([]issueComment, error) {
 	since := time.Now().UTC().Add(-issueResponseWindow).Truncate(24 * time.Hour).Format(time.RFC3339)
 	var comments []issueComment
 	for page := 1; page <= issueOpenPages; page++ {
-		r, err := gh.Get(ctx, token, base+"/comments?sort=created&direction=asc&per_page=100&since="+url.QueryEscape(since)+"&page="+strconv.Itoa(page))
+		r, err := gh.Get(ctx, token, "/repos/"+repo+"/issues/comments?sort=created&direction=asc&per_page=100&since="+url.QueryEscape(since)+"&page="+strconv.Itoa(page))
 		if err != nil || !r.OK() {
-			return nil, nil, issueResponseError("list comments", r, err)
+			return nil, issueResponseError(ctx, repo, "list comments", r, err)
 		}
 		var batch []issueComment
 		if err := r.Decode(&batch); err != nil {
-			return nil, nil, issueResponseError("list comments", r, err)
+			return nil, issueResponseError(ctx, repo, "list comments", r, err)
 		}
 		comments = append(comments, batch...)
 		if len(batch) < 100 {
 			break
 		}
 	}
-	return rows, comments, nil
+	return comments, nil
 }
 
-// issueSnapshot reads every configured repository in parallel. A repository that fails is listed in unavailable; the snapshot fails only when every repository failed. The result also refreshes the search index and announces issues created since the first snapshot.
-func (s *Server) issueSnapshot(ctx context.Context, gh *githubapp.Client) (issueSnapshot, error) {
+// issueSnapshot 并行读取每个配置的仓库，读取范围由 scope 决定。读取失败的仓库列入 unavailable；只有全部仓库都失败时快照才失败。结果还会刷新全局搜索的索引，并通知自第一次快照以来新建的 issue。
+func (s *Server) issueSnapshot(ctx context.Context, gh *githubapp.Client, scope issueScope) (issueSnapshot, error) {
 	repos := s.config.Admin.GitHub.IssueRepos
 	type result struct {
 		rows     []issueRow
@@ -368,7 +422,7 @@ func (s *Server) issueSnapshot(ctx context.Context, gh *githubapp.Client) (issue
 			defer wg.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			rows, comments, err := s.repoIssues(ctx, gh, repo)
+			rows, comments, err := s.repoIssues(ctx, gh, repo, scope)
 			results[i] = result{rows, comments, err}
 		}()
 	}
@@ -397,10 +451,12 @@ func (s *Server) issueSnapshot(ctx context.Context, gh *githubapp.Client) (issue
 		avg := totalHours / float64(snap.samples)
 		snap.responseHours = &avg
 	}
-	slices.SortStableFunc(snap.items, func(a, b issueRow) int { return b.CreatedAt.Compare(a.CreatedAt) })
-	s.rememberIssues(ctx, snap.items, len(snap.unavailable) == 0, now)
+	slices.SortStableFunc(snap.items, issueNewestFirst)
+	s.rememberIssues(ctx, snap.items, scope == issueScopeOpen, len(snap.unavailable) == 0, now)
 	return snap, nil
 }
+
+func issueNewestFirst(a, b issueRow) int { return b.CreatedAt.Compare(a.CreatedAt) }
 
 // issueFirstResponses sums, over the issues of one repository opened within issueResponseWindow, the hours until the first comment by a maintainer (owner, member or collaborator) who is neither the author nor a bot, and returns that sum with the number of issues it covers.
 func issueFirstResponses(rows []issueRow, comments []issueComment, now time.Time) (float64, int) {
@@ -443,10 +499,24 @@ func issueFirstResponses(rows []issueRow, comments []issueComment, now time.Time
 	return hours, samples
 }
 
-// rememberIssues keeps the listed issues for the global search and announces each untriaged issue created since the first snapshot once. The first snapshot only sets the baseline; complete is false when a repository failed, so the baseline waits for a full read.
-func (s *Server) rememberIssues(ctx context.Context, items []issueRow, complete bool, now time.Time) {
+// rememberIssues 保存列出的 issue 供全局搜索使用，并对第一次快照之后新建、尚未分诊的 issue 各通知一次。第一次快照只设定基线；有仓库读取失败时 complete 为 false，基线要等一次完整的读取。待通知的 issue 都处于 new 状态，也就是未关闭，所以只读未关闭 issue 的快照（openOnly）同样足以设定基线和发出通知。openOnly 时搜索索引保留上一次列出的已关闭 issue（同一 issue 以这次读到的为准），这样外壳角标的轮询不会把已关闭的 issue 从搜索中挤掉；在那之后才关闭的 issue 会从搜索中消失，直到下一次包含已关闭 issue 的快照。
+func (s *Server) rememberIssues(ctx context.Context, items []issueRow, openOnly, complete bool, now time.Time) {
 	m := s.issueMemory()
 	m.mu.Lock()
+	if openOnly {
+		fresh := make(map[string]bool, len(items))
+		for _, row := range items {
+			fresh[issueRef{Repo: row.Repo, N: row.Number}.key()] = true
+		}
+		merged := slices.Clone(items)
+		for _, row := range m.items {
+			if (row.State == "done" || row.State == "dup") && !fresh[issueRef{Repo: row.Repo, N: row.Number}.key()] {
+				merged = append(merged, row)
+			}
+		}
+		slices.SortStableFunc(merged, issueNewestFirst)
+		items = merged
+	}
 	m.items = items
 	var announce []issueRow
 	if m.baseline.IsZero() {
@@ -519,7 +589,7 @@ func (s *Server) listIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		page = n
 	}
-	snap, err := s.issueSnapshot(r.Context(), gh)
+	snap, err := s.issueSnapshot(r.Context(), gh, issueScopeFull)
 	if err != nil {
 		issueFail(w, err)
 		return
@@ -686,7 +756,7 @@ func (s *Server) issueDetail(w http.ResponseWriter, r *http.Request, rest string
 	ctx := r.Context()
 	token, err := gh.Token(ctx, ref.Repo, issueTokenPerms)
 	if err != nil {
-		issueFail(w, issueTokenError(ref.Repo, err))
+		issueFail(w, issueTokenError(ctx, ref.Repo, err))
 		return
 	}
 	issue, err := issueFetch(ctx, gh, token, ref, true)
@@ -705,12 +775,12 @@ func (s *Server) issueDetail(w http.ResponseWriter, r *http.Request, rest string
 		}
 	}
 	if err != nil || !resp.OK() {
-		issueFail(w, issueResponseError("timeline", resp, err))
+		issueFail(w, issueResponseError(ctx, ref.Repo, "timeline", resp, err))
 		return
 	}
 	var events []issueTimelineGitHub
 	if err := resp.Decode(&events); err != nil {
-		issueFail(w, issueResponseError("timeline", resp, err))
+		issueFail(w, issueResponseError(ctx, ref.Repo, "timeline", resp, err))
 		return
 	}
 	timeline := []issueEvent{{Kind: "created", Actor: issue.User.Login, At: issue.CreatedAt}}
@@ -756,10 +826,10 @@ func (s *Server) issueDetail(w http.ResponseWriter, r *http.Request, rest string
 	})
 }
 
-// similarIssues returns up to three listed issues whose titles share the most character bigrams with row's title. Bigrams work for Chinese titles, which have no spaces for a word search to split on, and the listing is already cached, so this spends none of GitHub's search quota. A listing failure only leaves the list empty.
+// similarIssues 返回标题与 row 共享字符二元组最多的至多三个已列出 issue。二元组适用于没有空格可供分词的中文标题；列表已经缓存，不消耗 GitHub 的搜索配额。这里只需要标题，所以不读评论（issueScopeListing），详情页不必等待只用于响应时间的评论分页。列表读取失败只会让结果为空。
 func (s *Server) similarIssues(ctx context.Context, gh *githubapp.Client, row issueRow) []issueSimilar {
 	out := []issueSimilar{}
-	snap, err := s.issueSnapshot(ctx, gh)
+	snap, err := s.issueSnapshot(ctx, gh, issueScopeListing)
 	if err != nil {
 		return out
 	}
@@ -834,11 +904,11 @@ func issueFetch(ctx context.Context, gh *githubapp.Client, token string, ref iss
 		resp, err = gh.Do(ctx, token, "GET", path, nil)
 	}
 	if err != nil || !resp.OK() {
-		return issueGitHub{}, issueResponseError("get issue", resp, err)
+		return issueGitHub{}, issueResponseError(ctx, ref.Repo, "get issue", resp, err)
 	}
 	var issue issueGitHub
 	if err := resp.Decode(&issue); err != nil || issue.Number != ref.N {
-		return issueGitHub{}, issueResponseError("get issue", resp, err)
+		return issueGitHub{}, issueResponseError(ctx, ref.Repo, "get issue", resp, err)
 	}
 	if issue.isPullRequest() {
 		return issueGitHub{}, &issueError{404, "not_found"}
@@ -959,7 +1029,7 @@ type issueStep struct {
 func (s *Server) issueAction(ctx context.Context, gh *githubapp.Client, action string, ref issueRef, body string) (map[string]any, error) {
 	token, err := gh.Token(ctx, ref.Repo, issueTokenPerms)
 	if err != nil {
-		return nil, issueTokenError(ref.Repo, err)
+		return nil, issueTokenError(ctx, ref.Repo, err)
 	}
 	issue, err := issueFetch(ctx, gh, token, ref, false)
 	if err != nil {
@@ -1046,7 +1116,7 @@ func (s *Server) issueAction(ctx context.Context, gh *githubapp.Client, action s
 		if err == nil && (resp.OK() || step.allowMissing && resp.Status == 404) {
 			return nil
 		}
-		return issueResponseError(step.what, resp, err)
+		return issueResponseError(ctx, ref.Repo, step.what, resp, err)
 	}
 	for i, step := range steps {
 		if err := call(step); err != nil {
@@ -1094,12 +1164,12 @@ func (s *Server) searchIssues(q string) []account.AdminSearchHit {
 	return hits
 }
 
-// pendingIssues counts open, untriaged issues for the shell badge.
+// pendingIssues 为外壳角标统计未关闭且未分诊的 issue。只读未关闭 issue 的分页（与 GET /api/issues 共用同一批缓存的读取），不读评论和已关闭 issue：评论只用于响应时间，而 msime-windows 30 天内的评论需要第二页，按顺序读完会超出 adminShellGitHubBudget。
 func (s *Server) pendingIssues(ctx context.Context) (int, error) {
 	if s.adminGitHub == nil || len(s.config.Admin.GitHub.IssueRepos) == 0 {
 		return 0, nil
 	}
-	snap, err := s.issueSnapshot(ctx, s.adminGitHub)
+	snap, err := s.issueSnapshot(ctx, s.adminGitHub, issueScopeOpen)
 	if err != nil {
 		return 0, err
 	}
