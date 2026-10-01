@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // usersTestStore is a migrated store with the console tables the users tests read reset as well.
@@ -433,6 +434,74 @@ func TestAdminUsersListStatsAndDetail(t *testing.T) {
 		t.Fatal("unmasked contact in detail")
 	}
 	if w := usersCall(a, readonly, "GET", "/api/users/"+reviewer.User.ID, ""); w.Code != 200 || strings.Contains(w.Body.String(), "google-subject") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// A login racing a ban waits for the ban to commit and is then refused, instead of reading the pre-ban row and creating a session the ban's revocation never saw.
+func TestLoginWaitsForConcurrentBan(t *testing.T) {
+	db, _ := usersTestStore(t)
+	ctx := t.Context()
+	user := complete(t, db, Identity{"email", "racer@example.test"})
+	ban, err := db.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ban.Rollback(ctx)
+	if _, err = ban.Exec(ctx, `UPDATE auth_users SET banned_at=now(),ban_reason='race' WHERE id=$1`, user.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ban.Exec(ctx, `UPDATE auth_sessions SET revoked=true WHERE user_id=$1`, user.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	challenge := Challenge{IDHash: hash(randomToken()), Provider: "email", Subject: "racer@example.test"}
+	if err = db.PutChallenge(ctx, challenge); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := db.Complete(context.Background(), challenge, Identity{"email", "racer@example.test"})
+		result <- err
+	}()
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		var waiting bool
+		if err = db.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT banned_at IS NOT NULL%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err := <-result:
+			t.Fatal("login finished before the ban committed", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("login never waited on the ban")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err = ban.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-result; !errors.Is(err, ErrBanned) {
+		t.Fatal("login racing a ban", err)
+	}
+	var sessions int
+	if err = db.pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE user_id=$1 AND NOT revoked`, user.User.ID).Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatal("session survived the ban", sessions, err)
+	}
+}
+
+// A short phone number keeps only two trailing digits, so the masked contact never reveals most of the number.
+func TestAdminUsersShortPhoneMasking(t *testing.T) {
+	db, a := usersTestStore(t)
+	short := complete(t, db, Identity{"phone", "+123456789"})
+	w := usersCall(a, usersOwner, "GET", "/api/users/"+short.User.ID, "")
+	var detail struct {
+		Contact string `json:"contact"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.Contact != "+12****89" {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }

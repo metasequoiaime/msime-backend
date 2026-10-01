@@ -29,8 +29,8 @@ const userVerifiedEmailsSQL = `SELECT lower(CASE WHEN i.provider='email' THEN i.
 const userRoleSQL = `COALESCE((SELECT m.role FROM admin_members m WHERE m.enabled AND m.email IN (` + userVerifiedEmailsSQL + `)
  ORDER BY CASE m.role WHEN 'maintainer' THEN 0 WHEN 'operator' THEN 1 WHEN 'reviewer' THEN 2 WHEN 'readonly' THEN 3 ELSE 4 END,m.role LIMIT 1),'user')`
 
-// userContactSQL picks the user's primary contact (an email-code address, then a provider email, then a phone number) and masks it in the database, so the console never receives a full address or number: "j***@gmail.com", "+86****2201".
-const userContactSQL = `LEFT JOIN LATERAL (SELECT CASE WHEN c.kind='phone' THEN left(c.value,3)||'****'||right(c.value,4) ELSE left(c.value,1)||'***@'||split_part(c.value,'@',2) END AS contact,c.kind AS contact_kind FROM (
+// userContactSQL picks the user's primary contact (an email-code address, then a provider email, then a phone number) and masks it in the database, so the console never receives a full address or number: "j***@gmail.com", "+86****2201"; a short phone number keeps only its last two digits, so most of it stays hidden.
+const userContactSQL = `LEFT JOIN LATERAL (SELECT CASE WHEN c.kind='phone' THEN left(c.value,3)||'****'||right(c.value,CASE WHEN length(c.value)>=12 THEN 4 ELSE 2 END) ELSE left(c.value,1)||'***@'||split_part(c.value,'@',2) END AS contact,c.kind AS contact_kind FROM (
  SELECT CASE WHEN i.provider='phone' THEN 'phone' ELSE 'email' END AS kind,CASE WHEN i.provider IN ('email','phone') THEN i.subject ELSE i.email END AS value,
  CASE i.provider WHEN 'email' THEN 0 WHEN 'phone' THEN 2 ELSE 1 END AS rank,i.created_at
  FROM auth_identities i WHERE i.user_id=u.id AND (i.provider IN ('email','phone') OR i.email LIKE '_%@_%')) c ORDER BY c.rank,c.created_at LIMIT 1) contact ON true`
