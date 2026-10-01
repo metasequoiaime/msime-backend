@@ -30,7 +30,7 @@ func adminJSONRequest(method, path, body string) *http.Request {
 func TestAdminRegistryCompleteness(t *testing.T) {
 	actions := []string{
 		"revoke_session", "revoke_sessions", "ban_user", "unban_user",
-		"delete_skin", "delete_candidate_skin", "delete_plugin", "delete_dictionary", "delete_reply", "approve_content", "remove_content", "restore_content",
+		"delete_skin", "delete_candidate_skin", "delete_plugin", "delete_dictionary", "delete_reply", "approve_content", "remove_content", "restore_content", "set_candidate_skin_category",
 		"add_sensitive_word", "set_sensitive_word_level", "delete_sensitive_word",
 		"save_notice_draft", "publish_notice", "archive_notice",
 		"resolve_crash", "reopen_crash", "crash_group_status",

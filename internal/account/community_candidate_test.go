@@ -1040,7 +1040,7 @@ func TestCommunityCandidateSkinSchemaUpgrade(t *testing.T) {
 	for _, statement := range []string{
 		`SELECT pg_advisory_xact_lock(8372419)`,
 		`ALTER TABLE community_candidate_skins DROP CONSTRAINT community_candidate_skins_license_check`,
-		`ALTER TABLE community_candidate_skins DROP COLUMN visibility, DROP COLUMN updated_at`,
+		`ALTER TABLE community_candidate_skins DROP COLUMN visibility, DROP COLUMN updated_at, DROP COLUMN category`,
 		`ALTER TABLE community_candidate_skins ADD CONSTRAINT community_candidate_skins_license_assets_check CHECK(length(btrim(license_assets)) BETWEEN 1 AND 120)`,
 	} {
 		if _, err = tx.Exec(t.Context(), statement); err != nil {
@@ -1067,15 +1067,263 @@ func TestCommunityCandidateSkinSchemaUpgrade(t *testing.T) {
 	if err = db.pool.QueryRow(t.Context(), `SELECT visibility,(SELECT count(*) FROM pg_constraint WHERE conrelid='community_candidate_skins'::regclass AND conname LIKE 'community_candidate_skins_license%'),updated_at=created_at FROM community_candidate_skins WHERE id=$1`, id).Scan(&visibility, &constraints, &sincePublish); err != nil || visibility != "public" || constraints != 1 || !sincePublish {
 		t.Fatal("upgrade", visibility, constraints, sincePublish, err)
 	}
+	// 已有行的分类迁移为 other；命名约束和按分类排序的索引各只有一份，Ready 探测随之通过。
+	var category string
+	var categoryChecks, categoryIndexes int
+	if err = db.pool.QueryRow(t.Context(), `SELECT category,(SELECT count(*) FROM pg_constraint WHERE conrelid='community_candidate_skins'::regclass AND contype='c' AND conname LIKE 'community_candidate_skins_category%'),(SELECT count(*) FROM pg_indexes WHERE tablename='community_candidate_skins' AND indexname='community_candidate_skins_category_newest') FROM community_candidate_skins WHERE id=$1`, id).Scan(&category, &categoryChecks, &categoryIndexes); err != nil || category != "other" || categoryChecks != 1 || categoryIndexes != 1 {
+		t.Fatal("category upgrade", category, categoryChecks, categoryIndexes, err)
+	}
+	if err = db.Ready(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	skin := func(id, assets, visibility string) string {
 		return `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,version,license_assets,manifest,preview_path,request_sha256,visibility) VALUES('` + id + `',$1,'shared','n','1','` + assets + `','m','p.png','` + strings.Repeat("a", 64) + `','` + visibility + `')`
 	}
-	for _, query := range []string{skin("dd334455-1234-4234-8234-000000000001", "", "public"), skin("dd334455-1234-4234-8234-000000000002", strings.Repeat("x", 121), "private"), skin("dd334455-1234-4234-8234-000000000003", "CC0", "unlisted")} {
+	unknownCategory := strings.Replace(skin("dd334455-1234-4234-8234-000000000005", "CC0", "public"), "visibility) VALUES(", "visibility,category) VALUES(", 1)
+	unknownCategory = strings.TrimSuffix(unknownCategory, ")") + ",'anime')"
+	for _, query := range []string{skin("dd334455-1234-4234-8234-000000000001", "", "public"), skin("dd334455-1234-4234-8234-000000000002", strings.Repeat("x", 121), "private"), skin("dd334455-1234-4234-8234-000000000003", "CC0", "unlisted"), unknownCategory} {
 		if _, err = db.pool.Exec(t.Context(), query, owner.User.ID); err == nil {
 			t.Fatal("unsafe row accepted:", query)
 		}
 	}
 	if _, err = db.pool.Exec(t.Context(), skin("dd334455-1234-4234-8234-000000000004", "", "private"), owner.User.ID); err != nil {
 		t.Fatal("a private row without asset license refused", err)
+	}
+}
+
+// 分类只在 include=category 时出现：没有声明的列表、详情、发布、替换和 PATCH 响应都不带 category 键，已发布客户端按拒绝未知字段解析条目。
+func TestCommunityCandidateSkinCategory(t *testing.T) {
+	db := testStore(t)
+	a := &Service{store: db}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	owner := complete(t, db, Identity{"email", "candidate-category-owner@example.test"})
+	other := complete(t, db, Identity{"email", "candidate-category-other@example.test"})
+	manifest, files := candidateFixture(t, "categorised")
+	decodeRaw := func(w *httptest.ResponseRecorder) map[string]json.RawMessage {
+		t.Helper()
+		var v map[string]json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+			t.Fatal(w.Body.String(), err)
+		}
+		return v
+	}
+	category := func(w *httptest.ResponseRecorder) string {
+		t.Helper()
+		raw, present := decodeRaw(w)["category"]
+		if !present {
+			return ""
+		}
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil || v == "" {
+			t.Fatal("category", string(raw), err)
+		}
+		return v
+	}
+	publish := func(id, name, extra string) string {
+		body := candidatePublishBody(t, id, name, manifest, files)
+		if extra != "" {
+			body = strings.TrimSuffix(body, "}") + "," + extra + "}"
+		}
+		return body
+	}
+	listCategories := func(path string) map[string]string {
+		t.Helper()
+		var page struct {
+			Skins []map[string]json.RawMessage `json:"skins"`
+		}
+		w := apiRequest(t, mux, "GET", path, "", owner.AccessToken, 200)
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+			t.Fatal(w.Body.String(), err)
+		}
+		items := map[string]string{}
+		for _, item := range page.Skins {
+			var id, value string
+			_ = json.Unmarshal(item["id"], &id)
+			raw, present := item["category"]
+			if present != strings.Contains(path, "include=category") {
+				t.Fatal(path, "category does not follow the opt-in", w.Body.String())
+			}
+			_ = json.Unmarshal(raw, &value)
+			items[id] = value
+		}
+		return items
+	}
+
+	// 不带 category 的发布是 other，响应与之前逐字节相同。
+	plain := "ca334455-1234-4234-8234-000000000001"
+	w := apiRequest(t, mux, "POST", "/v1/community/candidate-skins", publish(plain, "Plain", ""), owner.AccessToken, 201)
+	if category(w) != "" {
+		t.Fatal("released clients would reject category", w.Body.String())
+	}
+	var stored CommunityCandidateSkin
+	if err := json.Unmarshal(w.Body.Bytes(), &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Category = ""
+	legacy, _ := json.Marshal(stored)
+	if strings.TrimSpace(w.Body.String()) != string(legacy) {
+		t.Fatal("released shape changed", w.Body.String())
+	}
+	if w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+plain+"?include=category", "", "", 200); category(w) != "other" {
+		t.Fatal("default category", w.Body.String())
+	}
+	food := "ca334455-1234-4234-8234-000000000002"
+	w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins?include=category", publish(food, "Food", `"category":"food"`), owner.AccessToken, 201)
+	if category(w) != "food" {
+		t.Fatal("published category", w.Body.String())
+	}
+	// 同一内容换一个分类重试仍是同一请求：分类不计入 request_sha256，返回已存的分类。
+	if w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins?include=category", publish(food, "Food", `"category":"acg"`), owner.AccessToken, 200); category(w) != "food" {
+		t.Fatal("retry", w.Body.String())
+	}
+	for _, body := range []string{publish("ca334455-1234-4234-8234-000000000003", "Bad", `"category":"anime"`), publish("ca334455-1234-4234-8234-000000000003", "Bad", `"category":""`)} {
+		if w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins", body, owner.AccessToken, 400); !strings.Contains(w.Body.String(), `"invalid_category"`) {
+			t.Fatal(w.Body.String())
+		}
+	}
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins?include=all", publish("ca334455-1234-4234-8234-000000000003", "Bad", ""), owner.AccessToken, 400)
+	if w = apiRequest(t, mux, "POST", "/v1/community/candidate-skins?include=category", publish("ca334455-1234-4234-8234-000000000004", "Null", `"category":null`), owner.AccessToken, 201); category(w) != "other" {
+		t.Fatal("null category", w.Body.String())
+	}
+
+	// 列表与详情：category 筛选沿用发布时间倒序，未知分类和未知 include 是 400。
+	if got := listCategories("/v1/community/candidate-skins"); len(got) != 3 {
+		t.Fatal(got)
+	}
+	if got := listCategories("/v1/community/candidate-skins?include=category"); len(got) != 3 || got[food] != "food" || got[plain] != "other" {
+		t.Fatal(got)
+	}
+	if got := listCategories("/v1/community/candidate-skins?category=food&include=category"); len(got) != 1 || got[food] != "food" {
+		t.Fatal(got)
+	}
+	if got := listCategories("/v1/community/candidate-skins?category=food"); len(got) != 1 {
+		t.Fatal(got)
+	}
+	if got := listCategories("/v1/community/candidate-skins?category=other&scope=mine&fields=sync&include=category"); len(got) != 2 || got[plain] != "other" {
+		t.Fatal(got)
+	}
+	if got := listCategories("/v1/community/candidate-skins?category=nature"); len(got) != 0 {
+		t.Fatal(got)
+	}
+	for path, code := range map[string]string{"/v1/community/candidate-skins?category=Food": "invalid_category", "/v1/community/candidate-skins?include=categories": "invalid_include", "/v1/community/candidate-skins/" + food + "?include=x": "invalid_include"} {
+		if w = apiRequest(t, mux, "GET", path, "", "", 400); !strings.Contains(w.Body.String(), `"`+code+`"`) {
+			t.Fatal(path, w.Body.String())
+		}
+	}
+	if w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+food, "", other.AccessToken, 200); category(w) != "" {
+		t.Fatal("detail without opt-in", w.Body.String())
+	}
+	if w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+food+"?fields=sync&include=category", "", owner.AccessToken, 200); category(w) != "food" || decodeRaw(w)["visibility"] == nil {
+		t.Fatal("detail with both opt-ins", w.Body.String())
+	}
+
+	// PATCH 只改分类：不动 updated_at、request_sha256 和审核状态，实际改变时计入私有库额度。
+	before := decodeRaw(apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+plain+"?fields=sync", "", owner.AccessToken, 200))
+	if _, err := db.pool.Exec(t.Context(), `UPDATE community_candidate_skins SET moderation='approved' WHERE id=$1`, plain); err != nil {
+		t.Fatal(err)
+	}
+	if w = apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+plain, `{"category":"guofeng"}`, owner.AccessToken, 200); category(w) != "" {
+		t.Fatal("PATCH without opt-in", w.Body.String())
+	}
+	after := decodeRaw(apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+plain+"?fields=sync&include=category", "", owner.AccessToken, 200))
+	if string(after["category"]) != `"guofeng"` || string(after["updated_at"]) != string(before["updated_at"]) || string(after["request_sha256"]) != string(before["request_sha256"]) || string(after["visibility"]) != `"public"` {
+		t.Fatal(before, after)
+	}
+	if state, _, _, _ := moderationState(t, db, "community_candidate_skins", plain); state != "approved" {
+		t.Fatal("category change sent the item back to review", state)
+	}
+	// 两个键一起改，客户端同时带 fields=sync 与 include=category。
+	if w = apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+plain+"?fields=sync&include=category", `{"visibility":"private","category":"minimal"}`, owner.AccessToken, 200); category(w) != "minimal" || string(decodeRaw(w)["visibility"]) != `"private"` {
+		t.Fatal(w.Body.String())
+	}
+	for body, code := range map[string]string{`{}`: "invalid_visibility", `{"category":"anime"}`: "invalid_category", `{"category":"tech","visibility":"unlisted"}`: "invalid_visibility", `{"category":null}`: "invalid_visibility"} {
+		if w = apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+plain, body, owner.AccessToken, 400); !strings.Contains(w.Body.String(), `"`+code+`"`) {
+			t.Fatal(body, w.Body.String())
+		}
+	}
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+plain+"?include=1", `{"category":"tech"}`, owner.AccessToken, 400)
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+food, `{"category":"tech"}`, other.AccessToken, 404)
+	if _, err := db.pool.Exec(t.Context(), `UPDATE auth_rates SET count=60 WHERE key=$1`, "candidate-library:"+hash(owner.User.ID)); err != nil {
+		t.Fatal(err)
+	}
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+plain, `{"category":"tech"}`, owner.AccessToken, 429)
+	// 设为当前分类不写入，也不计限流。
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+plain, `{"category":"minimal"}`, owner.AccessToken, 200)
+
+	// PUT 替换保留分类，并同样只在 include=category 时返回它。
+	if _, err := db.pool.Exec(t.Context(), `DELETE FROM auth_rates`); err != nil {
+		t.Fatal(err)
+	}
+	replacedManifest := strings.Replace(manifest, "version = '1.0'", "version = '1.1'", 1)
+	if w = apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+food, candidateReplaceBody(t, "Food v2", replacedManifest, files), owner.AccessToken, 200); category(w) != "" {
+		t.Fatal("PUT without opt-in", w.Body.String())
+	}
+	if w = apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+food+"?include=category", candidateReplaceBody(t, "Food v2", replacedManifest, files), owner.AccessToken, 200); category(w) != "food" {
+		t.Fatal("PUT with opt-in", w.Body.String())
+	}
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+food+"?include=x", candidateReplaceBody(t, "Food v2", replacedManifest, files), owner.AccessToken, 400)
+
+	// 数据库约束兜底拒绝未知分类。
+	if _, err := db.pool.Exec(t.Context(), `UPDATE community_candidate_skins SET category='anime' WHERE id=$1`, food); err == nil {
+		t.Fatal("unknown category stored")
+	}
+}
+
+// 管理后台按分类筛选候选皮肤，并用审计过的 set_candidate_skin_category 修改分类。
+func TestAdminCandidateSkinCategory(t *testing.T) {
+	db, _, owner, _, call := moderationFixture(t)
+	ctx := context.Background()
+	first, second := "cb334455-1234-4234-8234-000000000001", "cb334455-1234-4234-8234-000000000002"
+	insertCandidateSkin(t, db, first, owner.User.ID, "First")
+	insertCandidateSkin(t, db, second, owner.User.ID, "Second")
+	updatedAt := func(id string) time.Time {
+		var v time.Time
+		if err := db.pool.QueryRow(ctx, `SELECT updated_at FROM community_candidate_skins WHERE id=$1`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	before := updatedAt(first)
+	if w := call("POST", "/api/actions", `{"action":"set_candidate_skin_category","id":"`+first+`","value":{"category":"cute"}}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"affected":1`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if !updatedAt(first).Equal(before) {
+		t.Fatal("category change moved updated_at")
+	}
+	var action, target, detail string
+	if err := db.pool.QueryRow(ctx, `SELECT action,target,detail::text FROM admin_audit ORDER BY id DESC LIMIT 1`).Scan(&action, &target, &detail); err != nil {
+		t.Fatal(err)
+	}
+	var audited map[string]any
+	if err := json.Unmarshal([]byte(detail), &audited); err != nil || action != "set_candidate_skin_category" || target != "candidate-skins" || audited["category"] != "cute" || audited["from"] != "other" || audited["name"] != "First" || audited["section"] != "candidate-skins" {
+		t.Fatal(action, target, detail, err)
+	}
+	if w := call("POST", "/api/actions", `{"action":"set_candidate_skin_category","section":"candidate-skins","ids":["`+first+`","`+second+`","missing"],"value":{"category":"tech"}}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"affected":2`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for body, want := range map[string]string{
+		`{"action":"set_candidate_skin_category","id":"` + first + `","value":{"category":"anime"}}`:                  "invalid_category",
+		`{"action":"set_candidate_skin_category","id":"` + first + `"}`:                                               "invalid_category",
+		`{"action":"set_candidate_skin_category","id":"` + first + `","value":{"category":"tech","x":1}}`:             "invalid_category",
+		`{"action":"set_candidate_skin_category","section":"skins","id":"` + first + `","value":{"category":"tech"}}`: "invalid_section",
+		`{"action":"set_candidate_skin_category","value":{"category":"tech"}}`:                                        "invalid_id",
+		`{"action":"set_candidate_skin_category","id":"missing","value":{"category":"tech"}}`:                         "not_found",
+	} {
+		if w := call("POST", "/api/actions", body); !strings.Contains(w.Body.String(), `"`+want+`"`) {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+	if w := call("GET", "/api/candidate-skins?category=tech", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"total": 2`) && !strings.Contains(w.Body.String(), `"total":2`) || !strings.Contains(w.Body.String(), `"category":`) {
+		t.Fatal(w.Body.String())
+	}
+	if w := call("GET", "/api/candidate-skins?category=anime", ""); w.Code != 400 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := call("GET", "/api/skins?category=tech", ""); w.Code != 400 {
+		t.Fatal("category is a candidate-skin filter only", w.Code)
+	}
+	if w := call("GET", "/api/candidate-skins/"+first, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"category":"tech"`) {
+		t.Fatal(w.Body.String())
 	}
 }

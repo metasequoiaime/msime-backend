@@ -95,6 +95,39 @@ type CommunityCandidateSkin struct {
 	Visibility    string               `json:"visibility,omitempty"`
 	UpdatedAt     time.Time            `json:"updated_at,omitzero"`
 	RequestSHA256 string               `json:"request_sha256,omitempty"`
+	// Category 是图库分类，同样只在客户端用 include=category 声明支持时出现（见 candidateItem）。
+	Category string `json:"category,omitempty"`
+}
+
+// candidateSkinCategories 是图库分类的全部取值，与 community_candidate_skin_schema.sql 的 community_candidate_skins_category_check 一致。分类只是发布元数据，不属于 skin.toml；缺省为 other。
+var candidateSkinCategories = []string{"nature", "guofeng", "acg", "cute", "food", "tech", "minimal", "other"}
+
+const defaultCandidateSkinCategory = "other"
+
+func validCandidateSkinCategory(category string) bool {
+	return slices.Contains(candidateSkinCategories, category)
+}
+
+// candidateIncludeCategory 读取 include=category；ok 为 false 表示 include 带了其他非空值。
+func candidateIncludeCategory(r *http.Request) (category bool, ok bool) {
+	switch r.URL.Query().Get("include") {
+	case "":
+		return false, true
+	case "category":
+		return true, true
+	}
+	return false, false
+}
+
+// candidateItem 按客户端的声明裁剪条目：没有 sync 时去掉同步字段，没有 include=category 时去掉分类，未声明的响应因此与加入这些字段之前逐字节相同。
+func candidateItem(v CommunityCandidateSkin, sync, category bool) CommunityCandidateSkin {
+	if !sync {
+		v = candidateLegacy(v)
+	}
+	if !category {
+		v.Category = ""
+	}
+	return v
 }
 
 // candidateLegacy strips the sync fields, so a client that did not opt in gets the item exactly as before private rows existed.
@@ -121,13 +154,13 @@ const candidateSelect = `SELECT s.id,s.package_id,s.name,s.description,
  (SELECT count(*) FROM community_candidate_skin_ratings WHERE skin_id=s.id),
  COALESCE((SELECT avg(stars) FROM community_candidate_skin_ratings WHERE skin_id=s.id),0),
  s.owner_id=$1,COALESCE((SELECT stars FROM community_candidate_skin_ratings WHERE skin_id=s.id AND user_id=$1),0),s.created_at,
- s.visibility,s.updated_at,CASE WHEN s.owner_id=$1 THEN s.request_sha256 ELSE '' END
+ s.visibility,s.updated_at,CASE WHEN s.owner_id=$1 THEN s.request_sha256 ELSE '' END,s.category
  FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id
  CROSS JOIN LATERAL (SELECT COALESCE(sum(size),0) AS size,count(*) AS files FROM community_candidate_skin_files WHERE skin_id=s.id) f `
 
 func scanCandidateSkin(row interface{ Scan(...any) error }) (CommunityCandidateSkin, error) {
 	var s CommunityCandidateSkin
-	err := row.Scan(&s.ID, &s.PackageID, &s.Name, &s.Description, &s.Author, &s.Version, &s.License.Code, &s.License.Assets, &s.License.Source, &s.Size, &s.FileCount, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.CreatedAt, &s.Visibility, &s.UpdatedAt, &s.RequestSHA256)
+	err := row.Scan(&s.ID, &s.PackageID, &s.Name, &s.Description, &s.Author, &s.Version, &s.License.Code, &s.License.Assets, &s.License.Source, &s.Size, &s.FileCount, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.CreatedAt, &s.Visibility, &s.UpdatedAt, &s.RequestSHA256, &s.Category)
 	return s, err
 }
 
@@ -372,13 +405,23 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, "invalid_fields")
 		return
 	}
+	category := r.URL.Query().Get("category")
+	if category != "" && !validCandidateSkinCategory(category) {
+		writeError(w, 400, "invalid_category")
+		return
+	}
+	withCategory, ok := candidateIncludeCategory(r)
+	if !ok {
+		writeError(w, 400, "invalid_include")
+		return
+	}
 	viewer := a.communityViewer(r)
 	if scope == "mine" && viewer == "" {
 		writeError(w, 401, "user_session_required")
 		return
 	}
 	// Private rows appear only in the author's own opted-in list: released clients reject an item whose license assets are empty, which a private row may have, and one such item would fail the whole page.
-	rows, e := a.store.pool.Query(r.Context(), candidateSelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($3='' OR s.owner_id=$1) AND (s.visibility='public' OR ($3<>'' AND $5)) AND (s.moderation<>'removed' OR s.owner_id=$1) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $4`, viewer, search, scope, offset, sync)
+	rows, e := a.store.pool.Query(r.Context(), candidateSelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($3='' OR s.owner_id=$1) AND (s.visibility='public' OR ($3<>'' AND $5)) AND (s.moderation<>'removed' OR s.owner_id=$1) AND ($6='' OR s.category=$6) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $4`, viewer, search, scope, offset, sync, category)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -391,10 +434,7 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 			a.error(w, e)
 			return
 		}
-		if !sync {
-			v = candidateLegacy(v)
-		}
-		items = append(items, v)
+		items = append(items, candidateItem(v, sync, withCategory))
 	}
 	if e = rows.Err(); e != nil {
 		a.error(w, e)
@@ -412,6 +452,11 @@ func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Reques
 		writeError(w, 400, "invalid_fields")
 		return
 	}
+	withCategory, ok := candidateIncludeCategory(r)
+	if !ok {
+		writeError(w, 400, "invalid_include")
+		return
+	}
 	// A private row is the owner's alone, and only an opted-in client can decode it; everyone else gets the same 404 as for a missing id.
 	v, e := scanCandidateSkin(a.store.pool.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2 AND (s.visibility='public' OR ($3 AND s.owner_id=$1)) AND (s.moderation<>'removed' OR s.owner_id=$1)`, a.communityViewer(r), r.PathValue("id"), sync))
 	if errors.Is(e, pgx.ErrNoRows) {
@@ -422,10 +467,7 @@ func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Reques
 		a.error(w, e)
 		return
 	}
-	if !sync {
-		v = candidateLegacy(v)
-	}
-	write(w, 200, v)
+	write(w, 200, candidateItem(v, sync, withCategory))
 }
 func (a *Service) communityCandidatePreview(w http.ResponseWriter, r *http.Request) {
 	var path string
@@ -458,6 +500,13 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		Files       map[string][]byte `json:"files"`
 		// Absent means public. Sending it is also the client's opt-in to the sync fields in the response.
 		Visibility *string `json:"visibility"`
+		// 缺省为 other。分类不计入 request_sha256：同一内容的重试无论带什么分类都返回已存的作品，之后改分类走 PATCH。
+		Category *string `json:"category"`
+	}
+	withCategory, ok := candidateIncludeCategory(r)
+	if !ok {
+		writeError(w, 400, "invalid_include")
+		return
 	}
 	if !readSized(w, r, &input, maxCandidatePublishBytes) {
 		return
@@ -470,11 +519,16 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		writeError(w, 400, "invalid_visibility")
 		return
 	}
+	category := defaultCandidateSkinCategory
+	if input.Category != nil {
+		category = *input.Category
+	}
+	if !validCandidateSkinCategory(category) {
+		writeError(w, 400, "invalid_category")
+		return
+	}
 	respond := func(status int, v CommunityCandidateSkin) {
-		if !sync {
-			v = candidateLegacy(v)
-		}
-		write(w, status, v)
+		write(w, status, candidateItem(v, sync, withCategory))
 	}
 	input.ID = strings.ToLower(input.ID)
 	if len(input.ID) != 36 || !validCommunityID(input.ID) {
@@ -575,8 +629,8 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 	}
 	license := candidatePackageLicense(pkg)
 	// The row lock covers only this account, so another account can commit the same id between the probe and this insert; ON CONFLICT waits for that commit and then reports it as a conflict instead of a unique violation.
-	inserted, e := tx.Exec(r.Context(), `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,description,version,license_code,license_assets,license_source,manifest,preview_path,request_sha256,visibility,moderation,moderation_reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14) ON CONFLICT(id) DO NOTHING`,
-		input.ID, p.UserID, pkg.ID, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest, visibility, flag)
+	inserted, e := tx.Exec(r.Context(), `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,description,version,license_code,license_assets,license_source,manifest,preview_path,request_sha256,visibility,moderation,moderation_reason,category) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14,$15) ON CONFLICT(id) DO NOTHING`,
+		input.ID, p.UserID, pkg.ID, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest, visibility, flag, category)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -780,6 +834,11 @@ func (a *Service) communityCandidateReplace(w http.ResponseWriter, r *http.Reque
 		Manifest    string            `json:"manifest"`
 		Files       map[string][]byte `json:"files"`
 	}
+	withCategory, ok := candidateIncludeCategory(r)
+	if !ok {
+		writeError(w, 400, "invalid_include")
+		return
+	}
 	if !readSized(w, r, &input, maxCandidatePublishBytes) {
 		return
 	}
@@ -818,7 +877,7 @@ func (a *Service) communityCandidateReplace(w http.ResponseWriter, r *http.Reque
 			if e != nil {
 				a.error(w, e)
 			} else {
-				write(w, 200, v)
+				write(w, 200, candidateItem(v, true, withCategory))
 			}
 		case visibility == "public" && strings.TrimSpace(candidatePackageLicense(pkg).Assets) == "":
 			writeError(w, 400, "candidate_skin_license_required")
@@ -879,23 +938,34 @@ func (a *Service) communityCandidateReplace(w http.ResponseWriter, r *http.Reque
 		a.error(w, e)
 		return
 	}
-	write(w, 200, v)
+	write(w, 200, candidateItem(v, true, withCategory))
 }
 
-// communityCandidateVisibility moves a row the caller owns between the private library and the public gallery. Going public needs a declared asset license and a free public slot, and is charged to the gallery's hourly budget; setting the current visibility again changes nothing.
+// communityCandidateVisibility 是作者修改自己作品发布元数据的接口，请求体 {"visibility"?, "category"?} 至少带一个键。visibility 在私有库与公开图库之间切换：转为公开需要已声明的 asset license 和空余的公开名额，并计入图库的每小时额度；设为当前值不做修改。category 修改图库分类，实际改变时计入私有库的每小时额度；分类不属于包内容，所以不更新 updated_at、不改 request_sha256，也不重新进入审核。
 func (a *Service) communityCandidateVisibility(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.principal(w, r, false)
 	if !ok {
 		return
 	}
 	var input struct {
-		Visibility string `json:"visibility"`
+		Visibility *string `json:"visibility"`
+		Category   *string `json:"category"`
+	}
+	withCategory, ok := candidateIncludeCategory(r)
+	if !ok {
+		writeError(w, 400, "invalid_include")
+		return
 	}
 	if !read(w, r, &input) {
 		return
 	}
-	if input.Visibility != "public" && input.Visibility != "private" {
+	// 两个键都缺省时与只认 visibility 的旧版本一样返回 invalid_visibility。
+	if input.Visibility == nil && input.Category == nil || input.Visibility != nil && *input.Visibility != "public" && *input.Visibility != "private" {
 		writeError(w, 400, "invalid_visibility")
+		return
+	}
+	if input.Category != nil && !validCandidateSkinCategory(*input.Category) {
+		writeError(w, 400, "invalid_category")
 		return
 	}
 	id := r.PathValue("id")
@@ -905,8 +975,8 @@ func (a *Service) communityCandidateVisibility(w http.ResponseWriter, r *http.Re
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var visibility, assets string
-	e = tx.QueryRow(r.Context(), `SELECT visibility,license_assets FROM community_candidate_skins WHERE id=$1 AND owner_id=$2 FOR UPDATE`, id, p.UserID).Scan(&visibility, &assets)
+	var visibility, assets, category string
+	e = tx.QueryRow(r.Context(), `SELECT visibility,license_assets,category FROM community_candidate_skins WHERE id=$1 AND owner_id=$2 FOR UPDATE`, id, p.UserID).Scan(&visibility, &assets, &category)
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -915,8 +985,8 @@ func (a *Service) communityCandidateVisibility(w http.ResponseWriter, r *http.Re
 		a.error(w, e)
 		return
 	}
-	if visibility != input.Visibility {
-		if input.Visibility == "public" {
+	if input.Visibility != nil && visibility != *input.Visibility {
+		if *input.Visibility == "public" {
 			if strings.TrimSpace(assets) == "" {
 				writeError(w, 400, "candidate_skin_license_required")
 				return
@@ -935,7 +1005,17 @@ func (a *Service) communityCandidateVisibility(w http.ResponseWriter, r *http.Re
 				return
 			}
 		}
-		if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET visibility=$2,updated_at=now(),moderation=CASE WHEN $2='public' AND moderation='approved' THEN 'pending' ELSE moderation END WHERE id=$1`, id, input.Visibility); e != nil {
+		if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET visibility=$2,updated_at=now(),moderation=CASE WHEN $2='public' AND moderation='approved' THEN 'pending' ELSE moderation END WHERE id=$1`, id, *input.Visibility); e != nil {
+			a.error(w, e)
+			return
+		}
+	}
+	if input.Category != nil && category != *input.Category {
+		if e = a.candidateWriteRate(r.Context(), p.UserID, "private"); e != nil {
+			a.error(w, e)
+			return
+		}
+		if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET category=$2 WHERE id=$1`, id, *input.Category); e != nil {
 			a.error(w, e)
 			return
 		}
@@ -948,5 +1028,5 @@ func (a *Service) communityCandidateVisibility(w http.ResponseWriter, r *http.Re
 		a.error(w, e)
 		return
 	}
-	write(w, 200, v)
+	write(w, 200, candidateItem(v, true, withCategory))
 }

@@ -20,12 +20,15 @@ CREATE TABLE IF NOT EXISTS community_candidate_skins (
 );
 -- Databases created before private rows existed: every existing row stays public, and the column-level license check that required assets on every row is replaced by the named one below.
 ALTER TABLE community_candidate_skins ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'public';
+-- 社区图库的分类，只是发布元数据，不属于 skin.toml。已有行迁移后为 other。取值与 Go 中的 candidateSkinCategories 一致，约束在下面的循环里以命名约束单独添加。
+ALTER TABLE community_candidate_skins ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'other';
 -- The CHECK constraints of the columns added above, by the names PostgreSQL gives a column constraint. They are added separately because PostgreSQL 12 adds an inline CHECK again on every rerun of ADD COLUMN IF NOT EXISTS even when the column exists; copies an earlier rerun left (name1, name2, ...) are dropped.
 DO $$
 DECLARE c record; d record;
 BEGIN
  FOR c IN SELECT * FROM (VALUES
-  ('community_candidate_skins','community_candidate_skins_visibility_check','visibility IN (''private'',''public'')')
+  ('community_candidate_skins','community_candidate_skins_visibility_check','visibility IN (''private'',''public'')'),
+  ('community_candidate_skins','community_candidate_skins_category_check','category IN (''nature'',''guofeng'',''acg'',''cute'',''food'',''tech'',''minimal'',''other'')')
  ) v(tbl,name,expr) LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=c.tbl::regclass AND conname=c.name) THEN
    EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I CHECK(%s)',c.tbl,c.name,c.expr);
@@ -52,6 +55,8 @@ BEGIN
 END $$;
 CREATE INDEX IF NOT EXISTS community_candidate_skins_newest ON community_candidate_skins(created_at DESC,id);
 CREATE INDEX IF NOT EXISTS community_candidate_skins_owner ON community_candidate_skins(owner_id,created_at DESC);
+-- 按分类筛选的公开目录沿用 community_candidate_skins_newest 的排序（created_at DESC,id）。
+CREATE INDEX IF NOT EXISTS community_candidate_skins_category_newest ON community_candidate_skins(category,created_at DESC,id);
 -- One row per re-encoded image. size and sha256 are generated, so they cannot disagree with the bytes download serves.
 CREATE TABLE IF NOT EXISTS community_candidate_skin_files (
  skin_id text NOT NULL REFERENCES community_candidate_skins(id) ON DELETE CASCADE,

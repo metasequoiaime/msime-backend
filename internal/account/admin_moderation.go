@@ -38,10 +38,10 @@ var (
 		filters:    []listFilter{statusFilter},
 		unsearched: []string{"design"},
 	}
-	// Candidate skins hold both the public gallery and each account's private library, so moderation can list either one.
+	// Candidate skins hold both the public gallery and each account's private library, so moderation can list either one. 也可以按图库分类筛选。
 	candidateSkinsList = adminList{
-		query:   `SELECT s.id,s.package_id,s.name,s.description,s.owner_id,` + authorColumn + `,s.version,(SELECT COALESCE(sum(size),0) FROM community_candidate_skin_files WHERE skin_id=s.id) AS size,(SELECT count(*) FROM community_candidate_skin_files WHERE skin_id=s.id) AS file_count,(SELECT count(*) FROM community_candidate_skin_downloads WHERE skin_id=s.id) AS downloads,s.visibility,s.created_at,s.updated_at,` + moderationColumns("s", "candidate-skins") + ` FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id`,
-		filters: []listFilter{{param: "visibility", field: "visibility", max: 7, values: map[string]string{"public": "public", "private": "private"}}, statusFilter},
+		query:   `SELECT s.id,s.package_id,s.name,s.description,s.owner_id,` + authorColumn + `,s.version,(SELECT COALESCE(sum(size),0) FROM community_candidate_skin_files WHERE skin_id=s.id) AS size,(SELECT count(*) FROM community_candidate_skin_files WHERE skin_id=s.id) AS file_count,(SELECT count(*) FROM community_candidate_skin_downloads WHERE skin_id=s.id) AS downloads,s.visibility,s.category,s.created_at,s.updated_at,` + moderationColumns("s", "candidate-skins") + ` FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id`,
+		filters: []listFilter{{param: "visibility", field: "visibility", max: 7, values: map[string]string{"public": "public", "private": "private"}}, candidateCategoryFilter(), statusFilter},
 	}
 	pluginsList = adminList{
 		query:   `SELECT p.id,p.kind,p.plugin_id,p.name,p.description,p.version,` + authorColumn + `,p.owner_id,p.size,p.sha256,(SELECT count(*) FROM community_plugin_downloads WHERE pack_id=p.id) AS downloads,p.created_at,` + moderationColumns("p", "plugins") + ` FROM community_plugins p JOIN auth_users u ON u.id=p.owner_id`,
@@ -82,6 +82,63 @@ var (
 	actionDeleteDictionary    = deleteContent(`DELETE FROM community_resources WHERE id=$1 AND kind='dictionary'`)
 	actionDeleteReply         = deleteContent(`DELETE FROM community_resources WHERE id=$1 AND kind='reply'`)
 )
+
+// candidateCategoryFilter 让候选皮肤列表按图库分类筛选，取值即 candidateSkinCategories。
+func candidateCategoryFilter() listFilter {
+	values := make(map[string]string, len(candidateSkinCategories))
+	longest := 0
+	for _, category := range candidateSkinCategories {
+		values[category] = category
+		longest = max(longest, len(category))
+	}
+	return listFilter{param: "category", field: "category", max: longest, values: values}
+}
+
+// actionSetCandidateSkinCategory 修改候选皮肤 ids（或 id）的图库分类，value 为 {"category":"<分类>"}。section 可省略，给出时必须是 candidate-skins。分类只是发布元数据，所以不改 updated_at（审核时固定的版本不受影响），也不改变审核状态；设为当前值同样算作命中。审计记录分类、数量、ids，单项时还有名称和原分类 from。
+func actionSetCandidateSkinCategory(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
+	if v.Section != "" && v.Section != "candidate-skins" {
+		return actionResult{}, actionFail(400, "invalid_section")
+	}
+	v.Section = "candidate-skins"
+	_, ids, err := moderationRequest(v)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var value struct {
+		Category string `json:"category"`
+	}
+	d := json.NewDecoder(bytes.NewReader(v.Value))
+	d.DisallowUnknownFields()
+	if len(v.Value) == 0 || d.Decode(&value) != nil || !validCandidateSkinCategory(value.Category) {
+		return actionResult{}, actionFail(400, "invalid_category")
+	}
+	rows, err := tx.Query(ctx, `UPDATE community_candidate_skins s SET category=$2 FROM (SELECT id,category FROM community_candidate_skins WHERE id=ANY($1) FOR UPDATE) o WHERE s.id=o.id RETURNING s.id,s.name,o.category`, ids, value.Category)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var changed []moderatedItem
+	var from string
+	for rows.Next() {
+		var item moderatedItem
+		if err = rows.Scan(&item.ID, &item.Name, &from); err != nil {
+			rows.Close()
+			return actionResult{}, err
+		}
+		changed = append(changed, item)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return actionResult{}, err
+	}
+	if len(changed) == 0 {
+		return actionResult{}, actionFail(404, "not_found")
+	}
+	extra := map[string]any{"category": value.Category}
+	if len(changed) == 1 {
+		extra["from"] = from
+	}
+	return moderationResult(v, changed, extra), nil
+}
 
 // moderationTable is where one admin section's rows live; kind narrows the shared resources table and label names the content kind in notifications. editable marks tables whose rows the author can change in place, which moves updated_at, so an approval can be pinned to the version the moderator reviewed.
 type moderationTable struct {
