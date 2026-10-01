@@ -306,3 +306,36 @@ func TestConfigExampleDecodesStrictly(t *testing.T) {
 		t.Fatalf("admin console keys missing from the example: %+v", c.Admin)
 	}
 }
+
+// 顶层 `client_ip_header` 是所有按地址限额共用的配置；旧的 word_submissions 写法仍然有效，两个不同的头会被拒绝。
+func TestClientIPHeaderConfig(t *testing.T) {
+	t.Setenv("CONFIG_TEST_TOKEN", strings.Repeat("a", 32))
+	base := func() Config {
+		return Config{Clients: []Client{{ID: "local", TokenEnv: "CONFIG_TEST_TOKEN", RequestsPerMinute: 1}}}
+	}
+	for name, tc := range map[string]struct {
+		top, words, want string
+	}{
+		"unset":         {"", "", ""},
+		"top level":     {"CF-Connecting-IP", "", "CF-Connecting-IP"},
+		"legacy alias":  {"", "X-Real-IP", "X-Real-IP"},
+		"both the same": {"CF-Connecting-IP", "cf-connecting-ip", "CF-Connecting-IP"},
+	} {
+		c := base()
+		c.ClientIPHeader, c.WordSubmissions.ClientIPHeader = tc.top, tc.words
+		if err := c.Validate(); err != nil || c.ClientIPHeader != tc.want || c.WordSubmissions.ClientIPHeader != tc.want {
+			t.Errorf("%s: %v %q %q", name, err, c.ClientIPHeader, c.WordSubmissions.ClientIPHeader)
+		}
+	}
+	for name, tc := range map[string]struct{ top, words string }{
+		"invalid top":    {"CF Connecting IP", ""},
+		"invalid legacy": {"", "X-Real-IP:"},
+		"conflict":       {"CF-Connecting-IP", "X-Real-IP"},
+	} {
+		c := base()
+		c.ClientIPHeader, c.WordSubmissions.ClientIPHeader = tc.top, tc.words
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

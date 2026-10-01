@@ -27,7 +27,7 @@ curl -G -H "Authorization: Bearer $MSIME_CLIENT_TOKEN" \
 
 ## 接口
 
-业务接口除 `GET /healthz` 和官网词条提交（见下文）外均需 Bearer 鉴权；Swagger 和 OpenAPI 文档可匿名访问。响应禁用缓存，输入正文、音频和凭据不写日志或磁盘。
+业务接口除 `GET /healthz`、官网词条提交（见下文）、公告、社区浏览和匿名遥测上报（见 [管理后台文档](docs/admin.md#公开客户端接口)）外均需 Bearer 鉴权；Swagger 和 OpenAPI 文档可匿名访问。响应禁用缓存，输入正文、音频和凭据不写日志或磁盘。
 
 | 方法与路径 | 请求 | 响应 |
 |---|---|---|
@@ -67,6 +67,7 @@ curl -G -H "Authorization: Bearer $MSIME_CLIENT_TOKEN" \
 
 - 经 PostgreSQL 共享：账号、会话和社区数据；`auth_rates` 上的数据库限流（登录、社区接口、官网词条投稿、管理后台的 `admin`/`admin-auth`/`admin-login` 三项限额等，固定一分钟窗口）；共享译文缓存；遥测和管理后台数据；AI 插画任务存在 `skin_jobs` 表，任何副本都能轮询和取消，每主体与全局上限按整个部署计算（见[皮肤社区](docs/skin-community.md)）；官网词条投稿写 GitHub 前取跨副本的 advisory lock，同一时刻只有一个副本改滚动分支；系统状态由持有 advisory lock 的一个主副本汇总所有副本的分钟计数后统一判定（见[管理后台](docs/admin.md)「系统状态的多副本行为」）；数据库迁移在 advisory lock 下串行执行，多个副本同时启动也只会建一次表。
 - 滚动升级时新旧版本短暂并存：旧版本副本仍在本进程内保存 AI 插画任务（新旧副本互相看不到对方的任务，客户端可能收到 404 后重新生成）、不取词条投稿锁、按旧逻辑各自判定系统状态（当天可用分钟数可能多计）。所有副本升级完成后恢复。旧版本不认识顶层 `replicas`，而配置中的未知字段会让服务拒绝启动：先让所有副本都运行新版本，再在配置里加入 `replicas` 并滚动重启；回退到旧版本（如 `kubectl rollout undo`，它不会回退单独管理的 ConfigMap）之前，先从配置中删除 `replicas`，否则重启的旧版本副本会反复启动失败。按最小权限部署时，先用有 DDL 权限的账号执行 `-migrate-users`，再给运行角色授予新表 `skin_jobs`、`admin_service_minutes`、`admin_service_verdicts` 的 `SELECT, INSERT, UPDATE, DELETE`。
+- 顶层 `client_ip_header` 同理：旧版本不认识它。上线顺序是先让所有副本运行新版本，再在配置里加入 `"client_ip_header": "CF-Connecting-IP"` 并滚动重启；回退到旧版本之前先删除它。过渡期也可以继续只写旧的 `word_submissions.client_ip_header`，新旧版本都接受，新版本会把它用于所有按地址的限额。生产经 Cloudflare Tunnel 和 traefik 转发，TCP 对端始终是 traefik，不设置这一项时匿名遥测、匿名开户和账号接口的按地址限额由全体用户共用一份。
 - 按副本计算：主接口 token bucket（设备令牌和登录用户），每个副本执行 ⌈额度 / `replicas`⌉；`max_concurrent` 并发槽（实时语音会话也各占所在副本的一个）；插件发布 4 个、下载 8 个名额，原生 Engine 查询 4 路，候选皮肤图片解码 2 路，词库快照恢复 1 路。这些上限的总量随副本数增加，设置时按单个副本的资源计算。
 - 可容忍的短暂不一致：敏感词改动最多 30 秒后在所有副本生效；管理后台的全局搜索索引在各副本内存里分别建立，可能短时不同；一个副本写 GitHub 后，其他副本的 GitHub 读缓存最多 60 秒后才看到变化；上游调用指标先在内存中累积、每分钟写回数据库，副本被强制终止时最多丢失最近约 1 分钟的计数。
 
@@ -259,10 +260,10 @@ EveryAPI 合作服务实时语音配置：
 需要用户体系（PostgreSQL）和包含官网的 `allowed_origins`（例如 `https://msime.app`）。`turnstile.site_key` 为空时功能关闭；填写后其余字段缺一不可，否则服务拒绝启动：
 
 ```json
-{"word_submissions":{"client_ip_header":"CF-Connecting-IP","turnstile":{"site_key":"0x4AAAA...","secret_env":"MSIME_TURNSTILE_SECRET"},"github":{"app_id":123456,"installation_id":7890123,"private_key_env":"MSIME_WORDS_GITHUB_APP_KEY","repository":"metasequoiaime/msime-dictionary","branch":"main"}}}
+{"client_ip_header":"CF-Connecting-IP","word_submissions":{"turnstile":{"site_key":"0x4AAAA...","secret_env":"MSIME_TURNSTILE_SECRET"},"github":{"app_id":123456,"installation_id":7890123,"private_key_env":"MSIME_WORDS_GITHUB_APP_KEY","repository":"metasequoiaime/msime-dictionary","branch":"main"}}}
 ```
 
-GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and write 与 Pull requests: Read and write（Metadata 只读为默认）；服务端签发的安装令牌再次限定到该仓库和这两项权限。私钥（PEM，PKCS#1 或 PKCS#8，可用 `\n` 表示换行）通过 `private_key_env` 注入。`client_ip_header` 为空时只信任 TCP 对端；部署在反向代理后必须填写由代理覆盖写入的头（`CF-Connecting-IP`、`X-Real-IP`，或取最后一段的 `X-Forwarded-For`），否则所有访客共享同一份额度。客户端能自带的头不要填。
+GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and write 与 Pull requests: Read and write（Metadata 只读为默认）；服务端签发的安装令牌再次限定到该仓库和这两项权限。私钥（PEM，PKCS#1 或 PKCS#8，可用 `\n` 表示换行）通过 `private_key_env` 注入。顶层 `client_ip_header` 为空时只信任 TCP 对端；部署在反向代理后必须填写由代理覆盖写入的头（`CF-Connecting-IP`、`X-Real-IP`，或取最后一段的 `X-Forwarded-For`），否则所有访客共享同一份额度。客户端能自带的头不要填。这个设置同时用于账号和社区接口、匿名开户、遥测、后台登录和词条投稿的按地址限额；旧的 `word_submissions.client_ip_header` 写法仍然有效。
 
 ## 用户皮肤社区
 

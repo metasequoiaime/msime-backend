@@ -7,7 +7,6 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
-	"net"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -242,10 +241,8 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 	if !strings.HasPrefix(r.URL.Path, "/api/auth/") {
 		return false
 	}
-	peer, _, peerErr := net.SplitHostPort(r.RemoteAddr)
-	if peerErr != nil {
-		peer = r.RemoteAddr
-	}
+	// 在代理之后所有人的 TCP 对端都是代理，`client_ip_header` 指定携带真实地址的头。
+	peer := account.ClientAddress(r, s.config.ClientIPHeader)
 	if !s.adminLimit(r.Context(), w, "admin-auth", peer, 120) {
 		return true
 	}
@@ -289,10 +286,8 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 			fail(w, 404, "google_disabled")
 			return true
 		}
-		peer, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			peer = r.RemoteAddr
-		}
+		// 在代理之后所有人的 TCP 对端都是代理，`client_ip_header` 指定携带真实地址的头。
+		peer := account.ClientAddress(r, s.config.ClientIPHeader)
 		if !s.adminLimit(r.Context(), w, "admin-login", peer, 10) {
 			return true
 		}
