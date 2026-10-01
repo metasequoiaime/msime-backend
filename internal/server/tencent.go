@@ -53,7 +53,7 @@ func (s *Server) translateTencent(w http.ResponseWriter, r *http.Request, v tran
 	var fresh []string
 	if len(missing) > 0 {
 		var ok bool
-		if fresh, ok = s.translateTencentUpstream(w, metered(r, "translation", textChars(missing)), source, target, missing, e); !ok {
+		if fresh, ok = s.translateTencentUpstream(w, r, source, target, missing, e); !ok {
 			return
 		}
 		s.storeTranslations(r.Context(), source, target, missing, fresh)
@@ -75,6 +75,8 @@ func (s *Server) translateTencentUpstream(w http.ResponseWriter, r *http.Request
 		return nil, false
 	}
 	signTencent(req, payload, e, time.Now())
+	// Only the cache misses sent here are metered; translate settles the call from the response it writes.
+	meterUsage(r, textChars(texts))
 	body, err := s.doUpstream(req)
 	var result struct {
 		Response struct {

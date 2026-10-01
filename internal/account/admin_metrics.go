@@ -123,7 +123,7 @@ type ServiceProbe struct {
 	P95MS *int
 }
 
-// RecordServiceProbes rolls one probe minute into admin_service_daily for the UTC day of at. Minutes are capped at a day's 1440 so several server instances cannot push a day past full.
+// RecordServiceProbes rolls one probe minute into admin_service_daily for the UTC day of at. Minutes are capped at a day's 1440 so several server instances cannot push a day past full; once a day is full, an unavailable minute still takes one available minute away, so an outage late in the day is not lost to the cap.
 func (a *Service) RecordServiceProbes(ctx context.Context, at time.Time, probes []ServiceProbe) error {
 	if len(probes) == 0 {
 		return nil
@@ -139,7 +139,8 @@ func (a *Service) RecordServiceProbes(ctx context.Context, at time.Time, probes 
 			ok = 1
 		}
 		batch.Queue(`INSERT INTO admin_service_daily AS d(service,day,ok_minutes,total_minutes,degraded,p95_ms) VALUES($1,$2::date,$3,1,$4,$5)
-ON CONFLICT(service,day) DO UPDATE SET total_minutes=LEAST(d.total_minutes+1,1440), ok_minutes=LEAST(d.ok_minutes+EXCLUDED.ok_minutes,d.total_minutes+1,1440),
+ON CONFLICT(service,day) DO UPDATE SET total_minutes=LEAST(d.total_minutes+1,1440),
+ ok_minutes=CASE WHEN d.total_minutes>=1440 THEN GREATEST(LEAST(d.ok_minutes,1440)+EXCLUDED.ok_minutes-1,0) ELSE LEAST(d.ok_minutes+EXCLUDED.ok_minutes,d.total_minutes+1) END,
  degraded=d.degraded OR EXCLUDED.degraded, p95_ms=COALESCE(EXCLUDED.p95_ms,d.p95_ms)`, p.Service, day, ok, p.Degraded, p.P95MS)
 	}
 	return a.store.pool.SendBatch(ctx, batch).Close()

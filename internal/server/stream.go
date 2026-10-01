@@ -87,10 +87,10 @@ func (s *Server) streamTranscription(w http.ResponseWriter, r *http.Request) {
 		upstreamError(w, r, err)
 		return
 	}
-	// A session is one call: its latency is the upstream handshake, its usage the session's length in seconds, and it failed when the relay broke with a read or write error (a client's oversized or non-binary message is not an upstream failure).
-	sessionStatus := websocket.StatusNormalClosure
+	// A session is one call: its latency is the upstream handshake, its usage the session's length in seconds, and it failed when the session ended because reading from or writing to the upstream broke. A client that drops its connection, or sends an oversized or non-binary message, is not an upstream failure.
+	upstreamFailed := false
 	defer func() {
-		s.observeCall("streaming", time.Now(), handshake, sessionStatus == websocket.StatusInternalError, time.Since(dialStarted).Seconds())
+		s.observeCall("streaming", time.Now(), handshake, upstreamFailed, time.Since(dialStarted).Seconds())
 	}()
 	defer upstream.CloseNow()
 	// 中间件已按管理员配置的精确来源白名单验证 Origin。
@@ -101,38 +101,45 @@ func (s *Server) streamTranscription(w http.ResponseWriter, r *http.Request) {
 	defer downstream.CloseNow()
 	upstream.SetReadLimit(contract.StreamMessageBytes)
 	downstream.SetReadLimit(contract.StreamMessageBytes)
-	results := make(chan websocket.StatusCode, 2)
+	// relayEnd is why one direction of the relay stopped; upstream marks a read or write error on the upstream connection.
+	type relayEnd struct {
+		status   websocket.StatusCode
+		upstream bool
+	}
+	results := make(chan relayEnd, 2)
 	relay := func(dst, src *websocket.Conn) {
 		total := 0
 		for {
 			kind, data, err := src.Read(ctx)
 			if err != nil {
 				if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
-					results <- websocket.StatusNormalClosure
+					results <- relayEnd{status: websocket.StatusNormalClosure}
 				} else {
-					results <- websocket.StatusInternalError
+					results <- relayEnd{status: websocket.StatusInternalError, upstream: src == upstream}
 				}
 				return
 			}
 			total += len(data)
 			if kind != websocket.MessageBinary {
-				results <- websocket.StatusUnsupportedData
+				results <- relayEnd{status: websocket.StatusUnsupportedData}
 				return
 			}
 			if total > contract.StreamSessionBytes {
-				results <- websocket.StatusMessageTooBig
+				results <- relayEnd{status: websocket.StatusMessageTooBig}
 				return
 			}
 			if err := dst.Write(ctx, kind, data); err != nil {
-				results <- websocket.StatusInternalError
+				results <- relayEnd{status: websocket.StatusInternalError, upstream: dst == upstream}
 				return
 			}
 		}
 	}
 	go relay(upstream, downstream)
 	go relay(downstream, upstream)
-	status := <-results
-	sessionStatus = status
+	// Only the first end says why the session stopped; the other direction then fails because its connection is being closed.
+	end := <-results
+	status := end.status
+	upstreamFailed = end.upstream
 	// 不向客户端透传供应商关闭说明、HTTP 错误正文或凭据。
 	_ = downstream.Close(status, "stream ended")
 	cancel()

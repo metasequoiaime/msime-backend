@@ -109,6 +109,13 @@ func TestServiceProbesRollUpDaily(t *testing.T) {
 	if err = db.pool.QueryRow(ctx, `SELECT ok_minutes,total_minutes FROM admin_service_daily WHERE service='database'`).Scan(&ok, &total); err != nil || ok != 1440 || total != 1440 {
 		t.Fatalf("capped day = %d/%d, %v", ok, total, err)
 	}
+	// An outage minute after the cap still shows on the full day.
+	if err = a.RecordServiceProbes(ctx, now, []ServiceProbe{{Service: "database", Available: false, Degraded: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.pool.QueryRow(ctx, `SELECT ok_minutes,total_minutes FROM admin_service_daily WHERE service='database'`).Scan(&ok, &total); err != nil || ok != 1439 || total != 1440 {
+		t.Fatalf("outage on a full day = %d/%d, %v", ok, total, err)
+	}
 }
 
 // Retention keeps 60 days of daily rows and 90 days of hourly metrics.

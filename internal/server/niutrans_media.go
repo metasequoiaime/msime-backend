@@ -139,7 +139,9 @@ func (s *Server) niuTransUpload(w http.ResponseWriter, r *http.Request, e NiuTra
 	}
 	_ = mw.WriteField("authStr", params["authStr"])
 	_ = mw.Close()
-	b, err := s.niuTransRequest(metered(r, "niutrans_"+kind, 0), e.URL, http.MethodPost, mw.FormDataContentType(), &body)
+	mr, call := metered(r, "niutrans_"+kind, 0)
+	b, err := s.niuTransRequest(mr, e.URL, http.MethodPost, mw.FormDataContentType(), &body)
+	s.settleMeter(call, json.Valid(b))
 	if err != nil {
 		upstreamError(w, r, err)
 		return
@@ -191,7 +193,9 @@ func (s *Server) niuTransFileRequest(w http.ResponseWriter, r *http.Request, e N
 		query.Set(key, value)
 	}
 	base.RawQuery = query.Encode()
-	b, contentType, err := s.niuTransRequestWithType(metered(r, service, 0), base.String(), r.Method, "", nil)
+	mr, call := metered(r, service, 0)
+	b, contentType, err := s.niuTransRequestWithType(mr, base.String(), r.Method, "", nil)
+	s.settleMeter(call, operation == "download" || json.Valid(b))
 	if err != nil {
 		upstreamError(w, r, err)
 		return
@@ -278,11 +282,11 @@ func (s *Server) niuTransRequest(r *http.Request, target, method, contentType st
 	return b, err
 }
 
-// niuTransRequestWithType sends one NiuTrans call; a request tagged by metered is recorded in the console's service metrics.
+// niuTransRequestWithType sends one NiuTrans call; for a request tagged by metered the exchange is captured for the console's service metrics.
 func (s *Server) niuTransRequestWithType(r *http.Request, target, method, contentType string, body io.Reader) ([]byte, string, error) {
 	started := time.Now()
 	b, contentType, err := s.sendNiuTrans(r, target, method, contentType, body)
-	s.observeTagged(r.Context(), started, err)
+	captureMeter(r.Context(), started, err)
 	return b, contentType, err
 }
 

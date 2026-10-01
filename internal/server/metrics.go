@@ -256,33 +256,66 @@ func (s *Server) flushMetrics(ctx context.Context) error {
 	return nil
 }
 
-// meterKey tags a request context with the service its upstream calls are recorded under.
+// meterKey tags a request context with the metered call its upstream request is recorded as.
 type meterKey struct{}
 
-type meterTag struct {
+// meterCall is one metered upstream call. doUpstream and niuTransRequestWithType fill in the exchange; the handler that tagged the request then settles it once it has validated the response, so an upstream that answers 2xx with an error body (Tencent's Response.Error, NiuTrans' errorCode, a non-SUCCESS cloud reply) still counts as a failure. A handler's request goroutine owns its meterCall, so it needs no lock.
+type meterCall struct {
 	service string
+	// usage is the metered quantity a successful call consumes: characters or seconds, or 0 for services metered by calls.
 	usage   float64
+	sent    bool
+	latency time.Duration
+	err     error
 }
 
-// metered tags r so that the upstream calls made for it through doUpstream or niuTransRequestWithType are recorded under service; usage is the metered quantity a successful call consumes (characters or seconds; 0 for services metered by calls).
-func metered(r *http.Request, service string, usage float64) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), meterKey{}, meterTag{service, usage}))
+// metered tags r so that the upstream call made for it through doUpstream or niuTransRequestWithType is captured in the returned meterCall, which the caller passes to settleMeter after validating the response.
+func metered(r *http.Request, service string, usage float64) (*http.Request, *meterCall) {
+	call := &meterCall{service: service, usage: usage}
+	return r.WithContext(context.WithValue(r.Context(), meterKey{}, call)), call
 }
 
-// observeTagged records a call made for a request tagged by metered; untagged requests are not recorded.
-func (s *Server) observeTagged(ctx context.Context, started time.Time, err error) {
-	if tag, ok := ctx.Value(meterKey{}).(meterTag); ok {
-		s.observe(tag.service, started, err, tag.usage)
+// meterUsage replaces the usage of the call r is tagged with, for a handler that learns its metered quantity only later (Tencent meters only its cache misses); untagged requests are ignored.
+func meterUsage(r *http.Request, usage float64) {
+	if call, ok := r.Context().Value(meterKey{}).(*meterCall); ok {
+		call.usage = usage
 	}
 }
+
+// captureMeter stores the outcome of the upstream exchange that started at started in the call ctx is tagged with; untagged contexts are ignored.
+func captureMeter(ctx context.Context, started time.Time, err error) {
+	if call, ok := ctx.Value(meterKey{}).(*meterCall); ok {
+		call.sent, call.latency, call.err = true, time.Since(started), err
+	}
+}
+
+// settleMeter records call once its handler has judged the response: it failed when the exchange failed or the response was not accepted. Nothing is recorded when no upstream request was sent (a fully cached translation, a request rejected before the call).
+func (s *Server) settleMeter(call *meterCall, accepted bool) {
+	if !call.sent || errors.Is(call.err, context.Canceled) {
+		return
+	}
+	err := call.err
+	if err == nil && !accepted {
+		err = errUpstreamRejected
+	}
+	s.recordCall(call.service, time.Now(), call.latency, err, call.usage)
+}
+
+// errUpstreamRejected marks a call whose 2xx response the handler rejected.
+var errUpstreamRejected = errors.New("upstream response rejected")
 
 // observe records one upstream call that started at started and ended now with err. A call the client abandoned is not recorded, because its latency and outcome say nothing about the upstream.
 func (s *Server) observe(service string, started time.Time, err error, usage float64) {
+	now := time.Now()
+	s.recordCall(service, now, now.Sub(started), err, usage)
+}
+
+// recordCall records one finished upstream call unless the client abandoned it.
+func (s *Server) recordCall(service string, at time.Time, latency time.Duration, err error, usage float64) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
-	now := time.Now()
-	s.observeCall(service, now, now.Sub(started), err != nil, usage)
+	s.observeCall(service, at, latency, err != nil, usage)
 }
 
 // observeCall records one upstream call with an explicit latency, for calls whose latency is not their duration (a streaming session's handshake).
@@ -360,6 +393,9 @@ var defaultServiceNames = map[string]string{
 	"images": "皮肤生成", "niutrans_document": "文档翻译", "niutrans_image": "图片翻译", "niutrans_voice": "语音翻译",
 }
 
+// derivedSlowMS is the slow threshold of a derived service whose calls normally take longer than admin.services' 3000ms default: generating an image or transcribing a whole recording or file routinely takes many seconds, and judging them by 3s would keep them degraded and open incidents for normal traffic.
+var derivedSlowMS = map[string]int{"images": 60000, "transcription": 10000, "niutrans_document": 10000, "niutrans_image": 10000, "niutrans_voice": 10000}
+
 var translationProviders = map[string]string{"tencent": "腾讯 TMT", "deepl": "DeepL", "niutrans": "小牛翻译", "openai": "OpenAI 兼容接口"}
 
 // monitoredServices is admin.services when configured, otherwise every upstream this deployment has configured, under its default name, with the upstream host as provider.
@@ -378,7 +414,11 @@ func (s *Server) monitoredServices() []monitoredService {
 	c := s.config
 	var services []monitoredService
 	add := func(key, provider string) {
-		services = append(services, monitoredService{Key: key, Name: defaultServiceNames[key], Provider: provider, SlowMS: defaultServiceSlowMS})
+		slow := derivedSlowMS[key]
+		if slow == 0 {
+			slow = defaultServiceSlowMS
+		}
+		services = append(services, monitoredService{Key: key, Name: defaultServiceNames[key], Provider: provider, SlowMS: slow})
 	}
 	if c.Cloud.URL != "" {
 		add("cloud", urlHost(c.Cloud.URL))

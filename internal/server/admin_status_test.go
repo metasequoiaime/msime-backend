@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 )
 
@@ -151,19 +152,31 @@ func TestQuotaUnits(t *testing.T) {
 
 // Calls made for a tagged request are recorded with their outcome and metered usage, never their content; nothing is recorded while the console is disabled.
 func TestUpstreamCallsAreMetered(t *testing.T) {
-	failing := false
+	failing, rejecting := false, false
 	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if failing {
 			w.WriteHeader(500)
 			return
 		}
 		if r.URL.Path == "/" && r.Method == "GET" {
+			if rejecting {
+				_, _ = io.WriteString(w, `["FAILED_TO_PARSE_REQUEST_BODY"]`)
+				return
+			}
 			_, _ = io.WriteString(w, `["SUCCESS",[["q",["你好"]]]]`)
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(body), "messages") {
+			if rejecting {
+				_, _ = io.WriteString(w, `{"error":{"message":"quota exceeded"}}`)
+				return
+			}
 			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"测试"}}]}`)
+			return
+		}
+		if rejecting {
+			_, _ = io.WriteString(w, `{"code":500,"data":""}`)
 			return
 		}
 		_, _ = io.WriteString(w, `{"code":200,"data":"test"}`)
@@ -188,17 +201,32 @@ func TestUpstreamCallsAreMetered(t *testing.T) {
 	if w := call(s, "POST", "/v1/chat/completions", `{"messages":[{"role":"user","content":"secret prompt"}]}`); w.Code != 502 {
 		t.Fatal(w.Code, w.Body)
 	}
+	// An upstream that answers 200 with an error body failed too, and a failed translation meters no characters.
+	failing, rejecting = false, true
+	if w := call(s, "POST", "/v1/translate", `{"text":"测试一下","source_lang":"auto","target_lang":"en"}`); w.Code != 502 {
+		t.Fatal(w.Code, w.Body)
+	}
+	if w := call(s, "GET", "/v1/cloud/candidates?text=nihao", ""); w.Code != 502 {
+		t.Fatal(w.Code, w.Body)
+	}
+	if w := call(s, "POST", "/v1/chat/completions", `{"messages":[{"role":"user","content":"secret prompt"}]}`); w.Code != 502 {
+		t.Fatal(w.Code, w.Body)
+	}
+	// A request refused before any upstream call is not a call.
+	if w := call(s, "POST", "/v1/translate", `{"text":"x","source_lang":"??","target_lang":"en"}`); w.Code != 400 {
+		t.Fatal(w.Code, w.Body)
+	}
 	got := map[string]account.ServiceMetric{}
 	for _, row := range s.metrics.pending() {
 		got[row.Service] = row
 	}
-	if got["translation"].Calls != 1 || got["translation"].Usage != 4 || got["translation"].Errors != 0 {
+	if got["translation"].Calls != 2 || got["translation"].Usage != 4 || got["translation"].Errors != 1 {
 		t.Fatalf("translation = %+v", got["translation"])
 	}
-	if got["chat"].Calls != 2 || got["chat"].Errors != 1 || got["chat"].Usage != 0 {
+	if got["chat"].Calls != 3 || got["chat"].Errors != 2 || got["chat"].Usage != 0 {
 		t.Fatalf("chat = %+v", got["chat"])
 	}
-	if got["cloud"].Calls != 1 || len(got) != 3 {
+	if got["cloud"].Calls != 2 || got["cloud"].Errors != 1 || len(got) != 3 {
 		t.Fatalf("services = %+v", got)
 	}
 	encoded, _ := json.Marshal(s.metrics.pending())
@@ -208,7 +236,7 @@ func TestUpstreamCallsAreMetered(t *testing.T) {
 	// A call the client abandoned says nothing about the upstream.
 	s.observe("chat", time.Now(), context.Canceled, 0)
 	s.observe("chat", time.Now(), errors.Join(errors.New("dial"), context.Canceled), 0)
-	if w := s.metrics.recent("chat", time.Now(), 5); w.calls != 2 {
+	if w := s.metrics.recent("chat", time.Now(), 5); w.calls != 3 {
 		t.Fatalf("cancelled calls were recorded: %+v", w)
 	}
 }
@@ -219,7 +247,12 @@ func TestMonitoredServices(t *testing.T) {
 	var keys []string
 	for _, svc := range s.monitoredServices() {
 		keys = append(keys, svc.Key)
-		if svc.Name == "" || svc.Provider != "127.0.0.1" || svc.SlowMS != defaultServiceSlowMS {
+		// Transcribing a whole recording is judged by a longer threshold than the 3s default.
+		wantSlow := defaultServiceSlowMS
+		if svc.Key == "transcription" {
+			wantSlow = 10000
+		}
+		if svc.Name == "" || svc.Provider != "127.0.0.1" || svc.SlowMS != wantSlow {
 			t.Fatalf("derived service = %+v", svc)
 		}
 	}
@@ -435,5 +468,89 @@ func TestStatusProbeAndPages(t *testing.T) {
 	}
 	if got := s.adminHealth(ctx); got != stateOK {
 		t.Fatalf("health after recovery = %s", got)
+	}
+}
+
+// Tencent answers its errors with HTTP 200: the call counts as failed and meters no characters, while a good batch meters only the characters it sent.
+func TestTencentCallsAreMetered(t *testing.T) {
+	reply := `{"Response":{"Error":{"Code":"FailedOperation.NoFreeAmount","Message":"quota"}}}`
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, reply)
+	})
+	s.config.Admin.Enabled = true
+	s.config.Translation.Provider = "tencent"
+	s.config.Translation.secretID = "test-id"
+	s.config.Translation.Region = "ap-guangzhou"
+	if w := call(s, "POST", "/v1/translate", `{"text":"测试","source_lang":"auto","target_lang":"en"}`); w.Code != 502 {
+		t.Fatal(w.Code, w.Body)
+	}
+	reply = `{"Response":{"TargetTextList":["test"]}}`
+	if w := call(s, "POST", "/v1/translate", `{"text":"测试","source_lang":"auto","target_lang":"en"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	rows := s.metrics.pending()
+	if len(rows) != 1 || rows[0].Service != "translation" || rows[0].Calls != 2 || rows[0].Errors != 1 || rows[0].Usage != 2 {
+		t.Fatalf("translation = %+v", rows)
+	}
+}
+
+// A streaming session is failed only when the upstream side broke: a client that drops its connection without a close frame is not an upstream failure.
+func TestStreamingSessionsAreMetered(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		upstreamDrop bool
+	}{{"client drops", false}, {"upstream drops", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+				c, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer c.CloseNow()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				kind, data, err := c.Read(ctx)
+				if err != nil || tc.upstreamDrop {
+					return
+				}
+				_ = c.Write(ctx, kind, data)
+				_, _, _ = c.Read(ctx)
+			})
+			s.config.Admin.Enabled = true
+			s.config.Streaming = StreamingEndpoint{URL: strings.Replace(s.config.Cloud.URL, "https:", "wss:", 1), token: "provider-secret", ResourceID: "synthetic-resource", MaxSeconds: 5}
+			live := httptest.NewTLSServer(s)
+			t.Cleanup(func() { s.Close(); live.Close() })
+			c := dialStream(t, live)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := c.Write(ctx, websocket.MessageBinary, []byte{1, 2, 3}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.upstreamDrop {
+				if _, _, err := c.Read(ctx); err == nil {
+					t.Fatal("stream stayed open after the upstream dropped")
+				}
+			} else {
+				if _, _, err := c.Read(ctx); err != nil {
+					t.Fatal(err)
+				}
+				_ = c.CloseNow()
+			}
+			deadline := time.Now().Add(3 * time.Second)
+			var window metricCounts
+			for time.Now().Before(deadline) {
+				if window = s.metrics.recent("streaming", time.Now(), 5); window.calls > 0 {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			wantErrors := int64(0)
+			if tc.upstreamDrop {
+				wantErrors = 1
+			}
+			if window.calls != 1 || window.errors != wantErrors {
+				t.Fatalf("streaming = %+v", window)
+			}
+		})
 	}
 }

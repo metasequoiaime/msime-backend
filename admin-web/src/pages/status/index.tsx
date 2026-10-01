@@ -15,7 +15,9 @@ import { Empty, ErrorState, Skeleton, SkeletonRows } from "../../ui/states";
 // summary phrases the banner from the latest probe: how many services are fine and which ones are degraded or down.
 function summary(status: Status): { tone: "ok" | "warn" | "bad" | "mute"; title: string } {
   const services = status.services;
-  if (status.state === "unknown" || !status.checked_at) return { tone: "mute", title: "状态检查尚未运行，等待第一次探测" };
+  if (!status.checked_at) return { tone: "mute", title: "状态检查尚未运行，等待第一次探测" };
+  // The server reports unknown once the last probe is more than three minutes old: the per-service states below are stale, so they are not summarised as current.
+  if (status.state === "unknown") return { tone: "warn", title: `状态检查已停止，最近一次在${ago(status.checked_at)}` };
   const degraded = services.filter(s => s.state === "degraded").map(s => s.name);
   const down = services.filter(s => s.state === "down").map(s => s.name);
   const healthy = services.length - degraded.length - down.length;
