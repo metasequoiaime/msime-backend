@@ -358,8 +358,16 @@ func TestNotifyCrashSpikes(t *testing.T) {
 	if count, err := a.NotifyCrashSpikes(ctx); err != nil || count != 3 {
 		t.Fatal(count, err)
 	}
+	var notified int
+	if err = db.pool.QueryRow(ctx, `SELECT count(*) FROM admin_notifications WHERE kind='crash_spike' AND target_id=ANY($1)`, []string{rising, fresh, small}).Scan(&notified); err != nil || notified != 3 {
+		t.Fatal(notified, err)
+	}
 	// A spike already notified within the quiet period is not notified again.
-	if _, err = db.pool.Exec(ctx, `INSERT INTO admin_notifications(kind,title,target_page,target_id) VALUES('crash_spike','x','crash',$1)`, rising); err != nil {
+	if count, err := a.NotifyCrashSpikes(ctx); err != nil || count != 0 {
+		t.Fatal(count, err)
+	}
+	// Once the quiet period has passed for rising's notification, only rising alerts again.
+	if _, err = db.pool.Exec(ctx, `UPDATE admin_notifications SET created_at=now()-interval '8 days' WHERE kind='crash_spike' AND target_id=$1`, rising); err != nil {
 		t.Fatal(err)
 	}
 	tx, err = db.pool.Begin(ctx)
@@ -367,7 +375,7 @@ func TestNotifyCrashSpikes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if spikes, err = crashSpikes(ctx, tx); err != nil || len(spikes) != 2 || spikes[0].Signature != fresh || spikes[1].Signature != small {
+	if spikes, err = crashSpikes(ctx, tx); err != nil || len(spikes) != 1 || spikes[0].Signature != rising {
 		t.Fatalf("%+v %v", spikes, err)
 	}
 }
