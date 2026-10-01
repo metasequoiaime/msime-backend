@@ -12712,7 +12712,8 @@
                 "",
                 "sound",
                 "music",
-                "command_table"
+                "command_table",
+                "effect"
               ],
               "default": ""
             }
@@ -12752,7 +12753,8 @@
                             "enum": [
                               "sound",
                               "music",
-                              "command_table"
+                              "command_table",
+                              "effect"
                             ]
                           },
                           "plugin_id": {
@@ -12850,7 +12852,7 @@
           }
         ],
         "parameters": [],
-        "description": "请求最多 11,300,000 字节。zip 包不超过 8 MiB、最多 64 个成员和 16 个文件，解压总量不超过 24 MiB 且不超过包体 100 倍加 1 MiB；拒绝绝对路径、..、反斜杠、符号链接、加密成员和嵌套压缩包。包内恰好一个 plugin.toml（schema_version = 1，严格解析，未知键拒绝），kind 与 plugin_id、version 须与请求一致，permissions 必须为空；引用的音频须存在且为 .wav/.ogg 并匹配文件头（sound 采样只能是 .wav），其余文件只能是 .txt/.md 说明。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 个插件、包体合计不超过 32 MiB，每小时最多发布 10 次；同一账号的发布逐个处理，同一进程最多同时接收 4 个发布，排队超时返回 503 plugin_busy。 详见 docs/plugin-community.md。",
+        "description": "请求最多 11,300,000 字节。zip 包不超过 8 MiB、最多 64 个成员和 16 个文件，解压总量不超过 24 MiB 且不超过包体 100 倍加 1 MiB；拒绝绝对路径、..、反斜杠、符号链接、加密成员和嵌套压缩包。包内恰好一个 plugin.toml（schema_version = 1，严格解析，未知键拒绝），kind 与 plugin_id、version 须与请求一致，permissions 必须为空；引用的音频须存在且为 .wav/.ogg 并匹配文件头（sound 采样只能是 .wav），effect 只含 [effect] 参数表、不带任何音频；其余文件只能是 .txt/.md 说明。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 个插件、包体合计不超过 32 MiB，每小时最多发布 10 次；同一账号的发布逐个处理，同一进程最多同时接收 4 个发布，排队超时返回 503 plugin_busy。 详见 docs/plugin-community.md。",
         "responses": {
           "201": {
             "description": "成功",
@@ -12868,7 +12870,8 @@
                       "enum": [
                         "sound",
                         "music",
-                        "command_table"
+                        "command_table",
+                        "effect"
                       ]
                     },
                     "plugin_id": {
@@ -12963,7 +12966,8 @@
                       "enum": [
                         "sound",
                         "music",
-                        "command_table"
+                        "command_table",
+                        "effect"
                       ]
                     },
                     "plugin_id": {
@@ -13044,7 +13048,8 @@
                     "enum": [
                       "sound",
                       "music",
-                      "command_table"
+                      "command_table",
+                      "effect"
                     ]
                   },
                   "plugin_id": {
@@ -13114,7 +13119,8 @@
                       "enum": [
                         "sound",
                         "music",
-                        "command_table"
+                        "command_table",
+                        "effect"
                       ]
                     },
                     "plugin_id": {
@@ -13300,7 +13306,8 @@
                       "enum": [
                         "sound",
                         "music",
-                        "command_table"
+                        "command_table",
+                        "effect"
                       ]
                     },
                     "plugin_id": {

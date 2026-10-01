@@ -1,6 +1,6 @@
 # 插件社区
 
-社区插件接口位于 `/v1/community/plugins`，分发客户端插件包：按键音（`sound`）、背景音乐（`music`）和命令表（`command_table`），与客户端的 `PluginKind` 一致。插件包是一个 zip，内含 `plugin.toml`、被引用的音频和可选的说明文本。服务器只校验、存储和原样分发字节，从不解码音频、执行脚本或加载包内任何内容；客户端安装前仍按自己的规则再校验一次。
+社区插件接口位于 `/v1/community/plugins`，分发客户端插件包：按键音（`sound`）、背景音乐（`music`）、命令表（`command_table`）和打字特效参数（`effect`），与客户端的 `PluginKind` 一致。插件包是一个 zip，内含 `plugin.toml`、被引用的音频和可选的说明文本（`effect` 包没有音频）。服务器只校验、存储和原样分发字节，从不解码音频、执行脚本或加载包内任何内容；客户端安装前仍按自己的规则再校验一次。
 
 ## 接口
 
@@ -36,6 +36,7 @@
 - `sound`：`mode = "keys"`（默认）需要 `[sounds]` 且含 `default`，其余可选键为 `space`、`enter`、`backspace`、`commit`、`achievement`；`mode = "sequence"` 需要 `[sequence]`，`sample` 加 1 到 128 个 -24..24 的 `semitones`，可选 `advance = "key" | "commit"`。最多 8 个不同样本，单个不超过 512 KiB，合计不超过 4 MiB。
 - `music`：`[music]` 的 `tracks` 为 1 到 8 个不重复文件，单个不超过 16 MiB。
 - `command_table`：1 到 256 个 `[[commands]]`，每行 `trigger`（1 到 32 个小写字母，不重复）、`title`（≤ 48 字节）、`template`（≤ 199 个 UTF-16 单元）。模板的花括号必须成对且不嵌套，占位符只能是 `{date}`、`{time}`、`{weekday}`、`{date:FMT}`、`{time:FMT}`。FMT 按客户端所用 time crate 的 strftime 规则解析，不认识的说明符（如 `%Q`、`%E`、`%O`、`%Z`）以及需要时区偏移的 `%s`、`%z` 均拒绝。模板在 2026-09-30 和 2026-12-30 的 23:59:59 各展开一次（`{weekday}` 为“星期三”，月份和星期用英文名），展开结果不能含控制字符（`%n`、`%t` 会产生换行和制表符），也不能超过 199 个 UTF-16 单元。
+- `effect`：只有 `[effect]` 表，键限 `style`（必填，`flash`、`sparks` 或 `power_mode`）、`intensity`（0 到 100 的整数）、`colors`（1 到 4 个 `#RRGGBB`，不接受缩写、透明度或颜色名）、`duration_ms`（60 到 1500 的整数）和 `particles`（0 到 64 的整数），后四项可省略。特效由各端内置绘制，包只选择样式并在这些范围内调参，所以不能带任何音频或其他文件，只能附 `.txt`/`.md` 说明。
 - 引用的音频必须存在、非空、扩展名为 `.wav` 或 `.ogg` 且文件头分别为 `RIFF....WAVE` 或 `OggS`；`sound` 的采样只能是 `.wav`（各端播放前整段解码，只有 WAV 能事先核实时长，鸿蒙端会静音 Ogg 采样），`.ogg` 只用于 `music`；其余文件只能是 `plugin.toml` 或不超过 64 KiB 的 `.txt`/`.md` 说明。
 
 zip 层面的错误返回 400 `invalid_plugin_archive`，清单与文件规则不符返回 400 `invalid_plugin_manifest`，任何大小上限返回 400 `plugin_too_large`。
