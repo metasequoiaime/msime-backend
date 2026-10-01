@@ -367,6 +367,11 @@
       "internal/server/word_submissions_test.go::TestWordSubmissionWeightMedians",
       "internal/server/word_submissions_test.go::TestWordSubmissionRejectsShippedWords",
       "internal/server/word_submissions_test.go::TestWordSubmissionRejectsShippedEnglish"
+    ],
+    "GET /v1/notices": [
+      "internal/server/telegram_test.go::TestPublicNoticesFeedAndTelegramPublish",
+      "internal/account/admin_notices_test.go::TestNoticeDraftPublishArchiveLifecycle",
+      "internal/account/admin_notices_test.go::TestNoticeValidationAndPermissions"
     ]
   },
   "admin_and_docs": {

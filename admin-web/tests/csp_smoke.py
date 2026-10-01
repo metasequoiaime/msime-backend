@@ -69,6 +69,10 @@ FIXTURES = {
         {"source": "telemetry", "platform": "windows", "version": "v0.5.4", "artifact": "x64 安装包", "channel": "cn-mirror", "today": 388, "week": 2410},
         {"source": "telemetry", "platform": "android", "version": "0.1.0", "artifact": None, "channel": None, "today": 0, "week": 3},
     ], "totals": {"today": 1200, "week": 7533, "github_today": 812, "github_week": 5120, "mirror_week": 2410}, "mirror_share": 0.32, "channel_reported": True, "snapshot_day": "2026-10-01", "truncated": False},
+    "/api/notices": {"telegram": False, "items": [
+        {"id": "2", "title": "词库共建上线：打不出来的词直接提交", "body": "官网新增词条提交入口。", "targets": ["all"], "channels": ["site"], "status": "live", "created_by": "google:1:owner@example.com", "author": "owner@example.com", "created_at": "2026-09-27T01:30:00Z", "published_at": "2026-09-27T01:30:00Z", "updated_at": "2026-09-27T01:30:00Z"},
+        {"id": "3", "title": "Windows 10 工具栏图标方框的临时处理办法", "body": "", "targets": ["windows"], "channels": ["app"], "status": "draft", "created_by": "legacy-token", "author": "legacy-token", "created_at": "2026-09-30T08:00:00Z", "published_at": None, "updated_at": "2026-09-30T08:00:00Z"},
+    ]},
 }
 
 # Issue triage (U3): one open issue on the list and its detail, shaped like internal/server/admin_issues.go.
@@ -346,6 +350,14 @@ def main() -> int:
                 expect(page.get_by_role("dialog", name=re.compile("#12"))).to_be_visible()
                 page.keyboard.press("Escape")
                 violations("issues")
+
+                page.goto(base + "/notice")
+                expect(page.get_by_text("词库共建上线：打不出来的词直接提交")).to_be_visible()
+                expect(page.get_by_role("button", name=re.compile("Telegram"))).to_be_disabled()
+                page.get_by_text("Windows 10 工具栏图标方框的临时处理办法").click()
+                page.get_by_role("button", name="编辑").click()
+                expect(page.get_by_label("标题")).to_have_value("Windows 10 工具栏图标方框的临时处理办法")
+                violations("notice")
 
                 page.goto(base + "/me")
                 page.get_by_role("button", name="退出登录").click()
