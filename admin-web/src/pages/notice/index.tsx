@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { errorMessage, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
-import { noticeChannels, noticePlatforms, noticesSchema, noticeValueMaxBytes } from "../../api/notice";
+import { noticeChannels, noticePlatforms, noticeBodyMax, noticesSchema } from "../../api/notice";
 import type { Notice, NoticeStatus, NoticeValue } from "../../api/notice";
 import { PageIntro } from "../../shell/page-intro";
 import { usePageSearch } from "../../shell/page-search";
@@ -47,8 +47,8 @@ function noticeMeta(n: Notice): string {
   return `${head} · ${published} · 触达 —`;
 }
 
-function valueTooLarge(value: NoticeValue): boolean {
-  return new TextEncoder().encode(JSON.stringify(value)).length > noticeValueMaxBytes;
+function bodyTooLong(value: NoticeValue): boolean {
+  return [...value.body].length > noticeBodyMax;
 }
 
 export default function NoticePage() {
@@ -112,7 +112,7 @@ export default function NoticePage() {
     if (!value.title) problem = "请先填写标题";
     else if (value.targets.length === 0) problem = "请选择投放范围";
     else if (publishing && value.channels.length === 0) problem = "请至少选择一个渠道";
-    else if (valueTooLarge(value)) problem = "公告内容过长，请缩短正文。";
+    else if (bodyTooLong(value)) problem = `正文最多 ${noticeBodyMax.toLocaleString("zh-CN")} 字，请缩短正文。`;
     if (problem) {
       toast(problem);
       return null;

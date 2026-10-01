@@ -45,6 +45,6 @@ export type Notice = z.infer<typeof noticeSchema>;
 // NoticeValue is the value of the save_notice_draft and publish_notice actions.
 export type NoticeValue = { title: string; body: string; targets: string[]; channels: string[] };
 
-// noticeValueMaxBytes is the server's limit for an action value; long bodies are rejected before they are sent.
-export const noticeValueMaxBytes = 8192;
+// noticeBodyMax is the server's limit on a notice body, in characters (Unicode code points); longer bodies are rejected before they are sent.
+export const noticeBodyMax = 20000;
 

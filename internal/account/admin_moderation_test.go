@@ -676,7 +676,9 @@ func TestRestoredPendingItemsAreScreenedAgain(t *testing.T) {
 	if _, err := db.pool.Exec(ctx, `TRUNCATE admin_sensitive_words,admin_sensitive_hits`); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = db.pool.Exec(context.Background(), `TRUNCATE admin_sensitive_words,admin_sensitive_hits`) })
+	t.Cleanup(func() {
+		_, _ = db.pool.Exec(context.Background(), `TRUNCATE admin_sensitive_words,admin_sensitive_hits`)
+	})
 	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_sensitive_words(pattern,category,level,created_by) VALUES('春日','ad','review','test'),('墨竹','ad','review','test'),('加班','ad','review','test')`); err != nil {
 		t.Fatal(err)
 	}
