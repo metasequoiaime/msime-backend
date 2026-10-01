@@ -341,6 +341,12 @@ func (a *Service) AcquireStatusLeader(ctx context.Context) (*StatusLeader, error
 	}
 	var locked bool
 	if err = pooled.QueryRow(ctx, `SELECT pg_try_advisory_lock($1,hashtext(current_schema()))`, statusLeaderLockSpace).Scan(&locked); err != nil || !locked {
+		if err != nil {
+			// The statement may have taken the lock before the error reached us; returned to the pool, that connection would hold the leadership with nobody judging until the pool recycled it, so end its session instead.
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = pooled.Conn().Close(closeCtx)
+			cancel()
+		}
 		pooled.Release()
 		return nil, err
 	}
