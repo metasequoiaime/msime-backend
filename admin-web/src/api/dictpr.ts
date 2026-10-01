@@ -78,6 +78,7 @@ const reviewMessages: Record<string, string> = {
   github_rejected: "GitHub App 凭据被拒绝，请检查 admin.github 配置。",
   github_error: "GitHub 拒绝了这次操作，请在 GitHub 上查看 PR 状态。",
   invalid_keep: "勾选的词条无效，请刷新后重试。",
+  invalid_head_sha: "缺少 PR 版本信息，请刷新后重试。",
   invalid_reason: "驳回原因不能为空，且不超过 500 字。",
 };
 

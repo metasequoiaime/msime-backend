@@ -468,7 +468,7 @@ func TestDictPRDetailFlags(t *testing.T) {
 
 func TestDictPRTrim(t *testing.T) {
 	s, f, conn, schema := dictPRServer(t)
-	for _, body := range []string{`{}`, `{"keep":[]}`, `{"keep":[99]}`, `{"keep":[0,0]}`, `{"keep":[-1]}`, `{"keep":[0],"extra":1}`} {
+	for _, body := range []string{`{}`, `{"keep":[0]}`, `{"keep":[],"head_sha":"head12"}`, `{"keep":[99],"head_sha":"head12"}`, `{"keep":[0,0],"head_sha":"head12"}`, `{"keep":[-1],"head_sha":"head12"}`, `{"keep":[0],"head_sha":"head12","extra":1}`} {
 		if w := dictCall(s, "POST", "/api/dict-prs/12/trim", body); w.Code != 400 {
 			t.Fatal(body, w.Code, w.Body.String())
 		}
@@ -522,7 +522,10 @@ func TestDictPRApprove(t *testing.T) {
 	}
 	// A merge GitHub refuses leaves the trimmed branch and its audit row, but no approval.
 	f.status["PUT /repos/"+dictTestRepo+"/pulls/12/merge"] = 405
-	if w := dictCall(s, "POST", "/api/dict-prs/12/approve", `{"keep":[0,1,4,5,6]}`); w.Code != 409 || !strings.Contains(w.Body.String(), "not_mergeable") {
+	if w := dictCall(s, "POST", "/api/dict-prs/12/approve", `{"keep":[0,1,4,5,6]}`); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_head_sha") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := dictCall(s, "POST", "/api/dict-prs/12/approve", `{"keep":[0,1,4,5,6],"head_sha":"head12"}`); w.Code != 409 || !strings.Contains(w.Body.String(), "not_mergeable") {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if rows := dictAudit(t, conn, schema); len(rows) != 1 || rows[0].action != "dict_pr_trim" || rows[0].removed != "2" {
@@ -590,5 +593,24 @@ func TestDictPRReject(t *testing.T) {
 	}
 	if w := dictCall(s, "POST", "/api/dict-prs/12/reject", `{"reason":"x"}`); w.Code != 409 {
 		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// Website titles only count entries, so the global search also matches the submitter's note and names the pull request by it.
+func TestDictPRSearchNotes(t *testing.T) {
+	s, _, _, _ := dictPRServer(t)
+	st := s.dictPRState()
+	st.mu.Lock()
+	st.notes[12] = "湖北潜江本地地名"
+	st.mu.Unlock()
+	if w := dictCall(s, "GET", "/api/dict-prs", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	hits := s.searchDictPRs("潜江")
+	if len(hits) != 1 || hits[0].ID != "12" || hits[0].Title != "#12 词库：湖北潜江本地地名" {
+		t.Fatalf("%+v", hits)
+	}
+	if hits = s.searchDictPRs("#11"); len(hits) != 1 || hits[0].Title != "#11 feat(custom): add 1 word" {
+		t.Fatalf("%+v", hits)
 	}
 }

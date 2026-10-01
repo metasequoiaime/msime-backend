@@ -44,10 +44,11 @@ var dictPRPermissions = map[string]string{"contents": "write", "pull_requests": 
 
 var errDictPRConflict = errors.New("dictionary pull request changed concurrently")
 
-// dictPRState is the per-server memory of the review page: the last pull request list for the global search, the pull requests already announced as notifications, and the lock that serialises review writes within this process.
+// dictPRState is the per-server memory of the review page: the last pull request list and the submitter notes last read for the global search, the pull requests already announced as notifications, and the lock that serialises review writes within this process.
 type dictPRState struct {
 	mu       sync.Mutex
 	index    []dictPRSummary
+	notes    map[int]string
 	notified map[int]bool
 	writes   sync.Mutex
 }
@@ -56,7 +57,7 @@ type dictPRState struct {
 var dictPRStates sync.Map
 
 func (s *Server) dictPRState() *dictPRState {
-	v, _ := dictPRStates.LoadOrStore(s, &dictPRState{notified: map[int]bool{}})
+	v, _ := dictPRStates.LoadOrStore(s, &dictPRState{notes: map[int]string{}, notified: map[int]bool{}})
 	return v.(*dictPRState)
 }
 
@@ -248,7 +249,10 @@ func (s *Server) fetchDictPulls(ctx context.Context, gh *githubapp.Client) ([]di
 	st.mu.Lock()
 	for i, p := range pulls {
 		index[i] = summarizeDictPull(p)
+		index[i].Note = st.notes[p.Number]
+		// Claimed under the lock, so concurrent list reads (the page and the shell poll) announce a pull request once.
 		if p.status() == "open" && !st.notified[p.Number] {
+			st.notified[p.Number] = true
 			fresh = append(fresh, p)
 		}
 	}
@@ -258,11 +262,11 @@ func (s *Server) fetchDictPulls(ctx context.Context, gh *githubapp.Client) ([]di
 		err := s.accounts.NotifyNow(ctx, account.Notification{Kind: account.NotifyDictPR, Title: "词库 PR #" + strconv.Itoa(p.Number) + " 等待审核", TargetPage: "dictpr", TargetID: strconv.Itoa(p.Number)})
 		if err != nil {
 			slog.Warn("dictionary pull requests: notification not recorded", "pull", p.Number, "reason", err.Error())
-			continue
+			// Released so a later read tries again.
+			st.mu.Lock()
+			delete(st.notified, p.Number)
+			st.mu.Unlock()
 		}
-		st.mu.Lock()
-		st.notified[p.Number] = true
-		st.mu.Unlock()
 	}
 	return pulls, 200, nil
 }
@@ -284,6 +288,18 @@ func (s *Server) submissionNotes(ctx context.Context, numbers []int) (map[int]st
 			notes[sub.PRNumber], latest[sub.PRNumber] = sub.Note, sub.Created
 		}
 	}
+	// The global search matches notes too, so it remembers the latest ones it was given.
+	st := s.dictPRState()
+	st.mu.Lock()
+	for n, note := range notes {
+		st.notes[n] = note
+	}
+	for i := range st.index {
+		if note, ok := notes[st.index[i].Number]; ok {
+			st.index[i].Note = note
+		}
+	}
+	st.mu.Unlock()
 	return notes, subs
 }
 
@@ -571,7 +587,7 @@ func (s *Server) dictPRDetail(w http.ResponseWriter, r *http.Request, gh *github
 	respond(w, 200, map[string]any{"repo": s.dictRepo(), "pull": summary, "head_sha": p.Head.SHA, "mergeable": p.Mergeable, "entries": entries, "submissions": submissions})
 }
 
-// dictKeepRequest is the body of approve and trim. Keep lists the entry indexes to keep (approve without it keeps every entry); HeadSHA, when sent, is the head the reviewer saw, and a pull request that moved since answers 409 pr_changed so indexes never apply to entries the reviewer has not seen.
+// dictKeepRequest is the body of approve and trim. Keep lists the entry indexes to keep (approve without it keeps every entry); HeadSHA is the head the reviewer saw, required with Keep and optional for an approval of every entry, and a pull request that moved since answers 409 pr_changed so indexes never apply to entries the reviewer has not seen.
 type dictKeepRequest struct {
 	Keep    *[]int `json:"keep"`
 	HeadSHA string `json:"head_sha"`
@@ -710,8 +726,12 @@ func (s *Server) auditDictPR(ctx context.Context, action string, number int, det
 	}
 }
 
-// prepareKeep reads the open pull request and its files and resolves the keep list; it answers every failure itself.
+// prepareKeep reads the open pull request and its files and resolves the keep list; it answers every failure itself. Entry indexes only mean something for the head they were read from, so a keep list must come with that head.
 func (s *Server) prepareKeep(w http.ResponseWriter, ctx context.Context, gh *githubapp.Client, number int, body dictKeepRequest, required bool) (string, dictPull, []dictFile, map[int]bool, int, bool) {
+	if body.Keep != nil && (body.HeadSHA == "" || len(body.HeadSHA) > 64) {
+		fail(w, 400, "invalid_head_sha")
+		return "", dictPull{}, nil, nil, 0, false
+	}
 	token, p, ok := s.openDictPull(w, ctx, gh, number, body.HeadSHA)
 	if !ok {
 		return "", p, nil, nil, 0, false
@@ -845,7 +865,7 @@ func (s *Server) rejectDictPR(w http.ResponseWriter, r *http.Request, gh *github
 	respond(w, 200, map[string]any{"ok": true})
 }
 
-// searchDictPRs matches q against the cached dictionary pull requests for the global search; it never calls GitHub.
+// searchDictPRs matches q against the cached dictionary pull requests (number, title and submitter note) for the global search; it never calls GitHub.
 func (s *Server) searchDictPRs(q string) []account.AdminSearchHit {
 	q = strings.ToLower(strings.TrimSpace(q))
 	if q == "" {
@@ -857,9 +877,14 @@ func (s *Server) searchDictPRs(q string) []account.AdminSearchHit {
 	var hits []account.AdminSearchHit
 	for _, p := range st.index {
 		title := "#" + strconv.Itoa(p.Number) + " " + p.Title
-		if strings.Contains(strings.ToLower(title), q) {
-			hits = append(hits, account.AdminSearchHit{Kind: "dict_pr", ID: strconv.Itoa(p.Number), Title: title, Where: "词库审核", Target: "dictpr"})
+		if !strings.Contains(strings.ToLower(title), q) && !strings.Contains(strings.ToLower(p.Note), q) {
+			continue
 		}
+		// Website pull request titles only count entries, so the submitter's note names the pull request when there is one.
+		if p.Note != "" {
+			title = "#" + strconv.Itoa(p.Number) + " 词库：" + p.Note
+		}
+		hits = append(hits, account.AdminSearchHit{Kind: "dict_pr", ID: strconv.Itoa(p.Number), Title: title, Where: "词库审核", Target: "dictpr"})
 	}
 	return hits
 }
