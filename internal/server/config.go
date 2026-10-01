@@ -66,6 +66,10 @@ type Client struct {
 	RequestsPerMinute int    `json:"requests_per_minute"`
 	token             string
 }
+
+// maxReplicas bounds the replicas setting so a mistyped count cannot silently shrink every per-replica limit to one request per minute.
+const maxReplicas = 64
+
 type Config struct {
 	Admin                AdminConfig           `json:"admin"`
 	Images               Endpoint              `json:"images"`
@@ -86,6 +90,8 @@ type Config struct {
 	TimeoutSeconds       int                   `json:"timeout_seconds"`
 	AllowedOrigins       []string              `json:"allowed_origins"`
 	WordSubmissions      WordSubmissionsConfig `json:"word_submissions"`
+	// Replicas is how many server processes share the fleet-wide request budget; the main token bucket lives in each process's memory, so every replica enforces its share of each limit.
+	Replicas int `json:"replicas"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -138,6 +144,12 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxConcurrent < 1 || c.MaxConcurrent > 1024 {
 		return errors.New("invalid max_concurrent")
+	}
+	if c.Replicas == 0 {
+		c.Replicas = 1
+	}
+	if c.Replicas < 1 || c.Replicas > maxReplicas {
+		return errors.New("replicas must be 1..64")
 	}
 	if c.TimeoutSeconds == 0 {
 		c.TimeoutSeconds = 30

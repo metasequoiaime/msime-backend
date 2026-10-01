@@ -56,6 +56,42 @@ func TestAuthenticationAndQuota(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+// With replicas=2 every process enforces ceil(limit/2), so round-robin across two replicas keeps the fleet close to the configured limit.
+func TestReplicasDivideMainBucketPerProcess(t *testing.T) {
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) { t.Error("unexpected upstream") })
+	s.config.Replicas = 2
+	s.config.Clients[0].RequestsPerMinute = 5
+	for i := 0; i < 3; i++ {
+		if w := call(s, "GET", "/v1/capabilities", ""); w.Code != 200 {
+			t.Fatal(i, w.Code)
+		}
+	}
+	if w := call(s, "GET", "/v1/capabilities", ""); w.Code != 429 || w.Header().Get("Retry-After") != "60" {
+		t.Fatal(w.Code)
+	}
+	for _, c := range []struct{ limit, replicas, want int }{{120, 1, 120}, {120, 2, 60}, {100, 3, 34}, {5, 2, 3}, {1, 2, 1}, {1, 64, 1}, {7, 0, 7}} {
+		if got := replicaShare(c.limit, c.replicas); got != c.want {
+			t.Fatalf("replicaShare(%d, %d) = %d, want %d", c.limit, c.replicas, got, c.want)
+		}
+	}
+	// The signed-in principal's 120/min is divided the same way.
+	now := time.Now()
+	for i := 0; i < 60; i++ {
+		if !s.allowPrincipal(Client{ID: "user:synthetic", RequestsPerMinute: 120}, now) {
+			t.Fatal("signed-in share exhausted early", i)
+		}
+	}
+	if s.allowPrincipal(Client{ID: "user:synthetic", RequestsPerMinute: 120}, now) {
+		t.Fatal("signed-in principal exceeded its per-replica share")
+	}
+	// Admin and word-submission keys keep their own limits: they call allow directly and are not divided.
+	for i := 0; i < 10; i++ {
+		if !s.allow(Client{ID: "word-submissions:synthetic", RequestsPerMinute: 10}, now) {
+			t.Fatal("non-principal key was divided by replicas", i)
+		}
+	}
+}
 func TestChatOverridesModelAndIsolatesCredentials(t *testing.T) {
 	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer provider-secret" {
@@ -182,6 +218,12 @@ func TestBucketRefillsAndSeparatesClients(t *testing.T) {
 	b := Client{ID: "b", RequestsPerMinute: 1}
 	if !s.allow(a, now) || s.allow(a, now) || !s.allow(b, now) || !s.allow(a, now.Add(time.Minute)) {
 		t.Fatal("quota isolation/refill failed")
+	}
+	// A replica's share refills at the divided rate: 2/min over two replicas is 1/min here, so half a minute is not enough for another request.
+	s.config.Replicas = 2
+	c := Client{ID: "c", RequestsPerMinute: 2}
+	if !s.allowPrincipal(c, now) || s.allowPrincipal(c, now) || s.allowPrincipal(c, now.Add(30*time.Second)) || !s.allowPrincipal(c, now.Add(time.Minute)) {
+		t.Fatal("per-replica share refill failed")
 	}
 }
 func TestConfigRejectsUnsafeEndpointsAndMissingTokens(t *testing.T) {

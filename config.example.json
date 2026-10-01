@@ -45,6 +45,7 @@
   "docs_enabled": false,
   "listen": "127.0.0.1:8080",
   "max_concurrent": 32,
+  "replicas": 1,
   "timeout_seconds": 30,
   "clients": [
     {

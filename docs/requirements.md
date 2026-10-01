@@ -15,7 +15,7 @@
 | 需求 | 当前证据 | 状态 |
 |---|---|---|
 | Go 共通服务与配置、启动、优雅关闭 | cmd/msime-server、internal/server；本地编译，真实二进制 health/鉴权 capabilities/SIGTERM 冒烟通过 | 已实现并完成本地启动验收 |
-| 统一服务商凭据、客户端认证、限流、并发、超时、大小上限 | server.go/config.go；竞态测试通过 | 单进程实现完成 |
+| 统一服务商凭据、客户端认证、限流、并发、超时、大小上限 | server.go/config.go；竞态测试通过 | 实现完成；限流按 `replicas` 在各副本间分摊，并发上限按副本计算 |
 | 云候选，拼音与日语 | cloud handler、Google 模拟响应测试 | 后端与 Windows/Linux/macOS/iOS 接入已实现；Windows/Linux TLS 联合测试通过 |
 | AI 联想 | chat handler；模型固定及鉴权测试 | 已按 Windows/Linux 实际 JSON 请求补齐 response_format，兼容回归通过；保留各客户端既有提示词与候选格式；Linux 实际 AI 客户端 TLS 验证通过 |
 | 候选翻译 | DeepLX handler 与测试 | DeepLX 与腾讯 TMT 适配已实现；TC3 固定向量和合成 HTTPS 上游通过，真实腾讯账户未验收 |

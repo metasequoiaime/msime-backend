@@ -24,6 +24,8 @@ func TestConfigurationBoundaries(t *testing.T) {
 		"relative engine":      func(c *Config) { c.Engine.Binary = "relative" },
 		"concurrency low":      func(c *Config) { c.MaxConcurrent = -1 },
 		"concurrency high":     func(c *Config) { c.MaxConcurrent = 1025 },
+		"replicas low":         func(c *Config) { c.Replicas = -1 },
+		"replicas high":        func(c *Config) { c.Replicas = 65 },
 		"timeout low":          func(c *Config) { c.TimeoutSeconds = -1 },
 		"timeout high":         func(c *Config) { c.TimeoutSeconds = 121 },
 		"no clients":           func(c *Config) { c.Clients = nil },
@@ -86,6 +88,15 @@ func TestConfigurationBoundaries(t *testing.T) {
 		})
 	}
 	c := base()
+	if err := c.Validate(); err != nil || c.Replicas != 1 {
+		t.Fatal("replicas should default to 1", err, c.Replicas)
+	}
+	c = base()
+	c.Replicas = 64
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c = base()
 	c.Translation = TranslationEndpoint{Provider: "tencent", SecretIDEnv: "CONFIG_TEST_TOKEN", Endpoint: Endpoint{TokenEnv: "CONFIG_TEST_TOKEN"}}
 	c.Streaming = StreamingEndpoint{Provider: "doubao", URL: "wss://example.com", TokenEnv: "CONFIG_TEST_TOKEN", AppKeyEnv: "CONFIG_TEST_TOKEN", ResourceID: "resource"}
 	c.AllowedOrigins = []string{"https://example.com"}
@@ -283,6 +294,9 @@ func TestConfigExampleDecodesStrictly(t *testing.T) {
 	var c Config
 	if err = d.Decode(&c); err != nil {
 		t.Fatal(err)
+	}
+	if c.Replicas != 1 {
+		t.Fatalf("replicas missing from the example: %d", c.Replicas)
 	}
 	if c.Admin.Environment == "" || c.Admin.GitHub.DictionaryRepo == "" || len(c.Admin.GitHub.Platforms) == 0 || len(c.Admin.Services) == 0 || c.Admin.Telegram.BotTokenEnv == "" {
 		t.Fatalf("admin console keys missing from the example: %+v", c.Admin)

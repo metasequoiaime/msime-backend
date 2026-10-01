@@ -56,6 +56,17 @@ func TestRateBucketCapacityAndRecovery(t *testing.T) {
 	if !s.allow(Client{ID: "new", RequestsPerMinute: 10}, now.Add(11*time.Minute)) || len(s.buckets) != 1 {
 		t.Fatal("expired clients were not pruned")
 	}
+	// Capacity is per replica as well: a divided share of 10 over 4 replicas holds ceil(10/4)=3 tokens and recovers at 3 per minute.
+	s.config.Replicas = 4
+	c := Client{ID: "divided", RequestsPerMinute: 10}
+	for i := 0; i < 3; i++ {
+		if !s.allowPrincipal(c, now) {
+			t.Fatal("per-replica capacity too small", i)
+		}
+	}
+	if s.allowPrincipal(c, now) || !s.allowPrincipal(c, now.Add(20*time.Second)) {
+		t.Fatal("per-replica capacity or recovery wrong")
+	}
 }
 
 func TestTranscriptionMultipartBoundariesAndProviderFormats(t *testing.T) {
