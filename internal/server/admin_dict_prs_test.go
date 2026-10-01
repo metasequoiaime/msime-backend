@@ -165,6 +165,22 @@ func (f *fakeDictRepo) serve(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && len(rest) == 1:
 			f.reply(w, 200, f.pullJSON(p))
+		case r.Method == "GET" && len(rest) == 2 && rest[1] == "files":
+			// The files the head commit changes relative to the base commit, the way GitHub lists a pull request's files.
+			out := []map[string]any{}
+			names := map[string]bool{}
+			for name := range f.commits[p.base] {
+				names[name] = true
+			}
+			for name := range f.commits[p.head] {
+				names[name] = true
+			}
+			for name := range names {
+				if f.commits[p.base][name] != f.commits[p.head][name] {
+					out = append(out, map[string]any{"filename": name})
+				}
+			}
+			f.reply(w, 200, out)
 		case r.Method == "PATCH" && len(rest) == 1:
 			if t := str("title"); t != "" {
 				p.title = t
@@ -552,6 +568,21 @@ func TestDictPRApprove(t *testing.T) {
 	rows := dictAudit(t, conn, schema)
 	if len(rows) != 3 || rows[1].action != "dict_pr_trim" || rows[2] != (dictAuditRow{"dict_pr_approve", "12", "3", "2", "", "legacy-token"}) {
 		t.Fatalf("%+v", rows)
+	}
+	// A branch that also changes a file outside the submission files is never merged or trimmed, however clean its entries look.
+	f.commits["head14"] = map[string]string{"custom/words.txt": dictTestBaseWords + "江汉\tjiang'han\t5000\n", "custom/english.txt": dictTestBaseEnglish, "custom/translations.txt": dictTestBaseTranslations, ".github/workflows/release.yml": "on: push\n"}
+	f.pulls = append(f.pulls, &fakeDictPull{number: 14, title: "feat(custom): add 1 word", state: "open", ref: "community-words/20261001-010000", head: "head14", base: "base1", user: "msime-words[bot]"})
+	for _, path := range []string{"/api/dict-prs/14/approve", "/api/dict-prs/14/trim"} {
+		body := `{}`
+		if strings.HasSuffix(path, "trim") {
+			body = `{"keep":[],"head_sha":"head14"}`
+		}
+		if w := dictCall(s, "POST", path, body); w.Code != 409 || !strings.Contains(w.Body.String(), "unexpected_files") {
+			t.Fatal(path, w.Code, w.Body.String())
+		}
+	}
+	if p := f.pull(14); p.merged || p.head != "head14" {
+		t.Fatalf("%+v", p)
 	}
 	// Approving without keep merges every entry as it is.
 	f.pulls = append(f.pulls, &fakeDictPull{number: 13, title: "feat(custom): add 1 word", state: "open", ref: "community-words/20261001-000000", head: "head11", base: "base1", user: "msime-words[bot]"})

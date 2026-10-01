@@ -729,6 +729,44 @@ func (s *Server) auditDictPR(ctx context.Context, action string, number int, det
 	}
 }
 
+// onlySubmissionFiles makes sure the pull request changes nothing but the submission files, since review only shows their entries while a merge takes every file on the branch. It answers 409 unexpected_files (or the GitHub failure) itself and returns false. The merge is a compare-and-swap on the head read just before, so a file pushed after this check cannot slip into the merge.
+func (s *Server) onlySubmissionFiles(w http.ResponseWriter, ctx context.Context, gh *githubapp.Client, token string, p dictPull) bool {
+	res, err := gh.Do(ctx, token, "GET", "/repos/"+s.dictRepo()+"/pulls/"+strconv.Itoa(p.Number)+"/files?per_page=100", nil)
+	if err != nil {
+		dictGitHubError(w, errors.Join(githubapp.ErrUnavailable, err))
+		return false
+	}
+	if !res.OK() {
+		dictGitHubStatus(w, "list pull request files", res.Status)
+		return false
+	}
+	var changed []struct {
+		Filename         string `json:"filename"`
+		PreviousFilename string `json:"previous_filename"`
+	}
+	if res.Decode(&changed) != nil {
+		dictGitHubError(w, errors.Join(githubapp.ErrUnavailable, errors.New("list pull request files: invalid response")))
+		return false
+	}
+	allowed := map[string]bool{}
+	for _, kind := range submissionKinds {
+		allowed[kind.file] = true
+	}
+	for _, f := range changed {
+		if !allowed[f.Filename] || (f.PreviousFilename != "" && !allowed[f.PreviousFilename]) {
+			slog.Warn("dictionary pull requests: review refused, the branch changes other files", "pull", p.Number, "file", f.Filename)
+			fail(w, 409, "unexpected_files")
+			return false
+		}
+	}
+	// A page can hold at most one entry per submission file; more means GitHub listed files beyond them.
+	if len(changed) > len(submissionKinds) {
+		fail(w, 409, "unexpected_files")
+		return false
+	}
+	return true
+}
+
 // prepareKeep reads the open pull request and its files and resolves the keep list; it answers every failure itself. Entry indexes only mean something for the head they were read from, so a keep list must come with that head.
 func (s *Server) prepareKeep(w http.ResponseWriter, ctx context.Context, gh *githubapp.Client, number int, body dictKeepRequest, required bool) (string, dictPull, []dictFile, map[int]bool, int, bool) {
 	if body.Keep != nil && (body.HeadSHA == "" || len(body.HeadSHA) > 64) {
@@ -737,6 +775,9 @@ func (s *Server) prepareKeep(w http.ResponseWriter, ctx context.Context, gh *git
 	}
 	token, p, ok := s.openDictPull(w, ctx, gh, number, body.HeadSHA)
 	if !ok {
+		return "", p, nil, nil, 0, false
+	}
+	if !s.onlySubmissionFiles(w, ctx, gh, token, p) {
 		return "", p, nil, nil, 0, false
 	}
 	files, err := s.readDictFiles(ctx, gh, p)

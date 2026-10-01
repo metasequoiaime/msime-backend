@@ -75,6 +75,7 @@ const codeMessages: Record<string, string> = {
   // Dictionary pull requests.
   pr_changed: "PR 有了新的提交，请刷新后重新核对词条。",
   not_open: "这个 PR 已经不是待审核状态，请刷新列表。",
+  unexpected_files: "这个 PR 还改动了词库投稿文件之外的文件，不能在后台精简或通过，请在 GitHub 上处理。",
   not_mergeable: "GitHub 暂时无法合并这个 PR（可能有冲突或检查未通过）。",
   invalid_keep: "勾选的词条无效，请刷新后重试。",
   invalid_head_sha: "缺少 PR 版本信息，请刷新后重试。",
