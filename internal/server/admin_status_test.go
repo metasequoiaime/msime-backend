@@ -417,6 +417,15 @@ type statusResponse struct {
 	} `json:"incidents"`
 }
 
+// sameUTCDay returns now, unless probes at the next ticks minutes after it would cross UTC midnight, in which case it returns a time just early enough that they all land on now's UTC day. Verdicts roll into the daily table by their minute's UTC date while the status page's today is the real clock's, so a test run in the last minutes of a day would otherwise find its verdicts on tomorrow's row. The last probe still lies within statusStale of the real clock, so the page reports it as current.
+func sameUTCDay(now time.Time, ticks int) time.Time {
+	end := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+	if now.Add(time.Duration(ticks) * time.Minute).Before(end) {
+		return now
+	}
+	return end.Add(-time.Duration(ticks)*time.Minute - time.Second)
+}
+
 // End to end against PostgreSQL: slow upstream calls degrade the service, three bad probes open one automatic incident, the pages report the minute rollup and the month's quota, and five good probes resolve the incident.
 func TestStatusProbeAndPages(t *testing.T) {
 	s := monitoringServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -428,7 +437,7 @@ func TestStatusProbeAndPages(t *testing.T) {
 	if w := call(s, "POST", "/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`); w.Code != 200 {
 		t.Fatal(w.Code, w.Body)
 	}
-	now := time.Now()
+	now := sameUTCDay(time.Now(), incidentOpenAfter)
 	for range 4 {
 		s.metrics.record("chat", now, 4*time.Second, false, 0)
 	}
@@ -615,9 +624,9 @@ func TestStatusProbeJudgesAllReplicasOnce(t *testing.T) {
 			t.Fatalf("status = %+v", status)
 		}
 	}
-	// Every judged minute counts once in the daily table, however many replicas probed it.
+	// Every judged minute counts once in the daily table, however many replicas probed it. The schema is this test's own, so every row is compared; summing over all days keeps the check true when the probes cross UTC midnight.
 	var minutes, total int
-	if err := admin.QueryRow(ctx, `SELECT (SELECT count(*) FROM admin_service_verdicts WHERE service='chat' AND minute>=$1::date),(SELECT total_minutes FROM admin_service_daily WHERE service='chat' AND day=$1::date)`, now.UTC().Format(time.DateOnly)).Scan(&minutes, &total); err != nil {
+	if err := admin.QueryRow(ctx, `SELECT (SELECT count(*) FROM admin_service_verdicts WHERE service='chat'),(SELECT coalesce(sum(total_minutes),0) FROM admin_service_daily WHERE service='chat')`).Scan(&minutes, &total); err != nil {
 		t.Fatal(err)
 	}
 	if minutes < incidentOpenAfter || total != minutes {
