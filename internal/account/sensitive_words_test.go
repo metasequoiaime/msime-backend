@@ -85,6 +85,10 @@ func TestSensitiveWordConsole(t *testing.T) {
 
 	// Duplicates, bad values and invalid regexes are rejected before anything is written.
 	addSensitive(t, a, `{"pattern":"加V","category":"abuse","level":"review"}`, 409)
+	// A plain word the matcher cannot tell apart from a stored one (case, full width, spacing) is a duplicate too.
+	for _, same := range []string{"加v", "加ｖ", "加 V"} {
+		addSensitive(t, a, `{"pattern":"`+same+`","category":"abuse","level":"review"}`, 409)
+	}
 	for _, bad := range []string{
 		`{"pattern":"","category":"ad","level":"block"}`,
 		`{"pattern":"   ","category":"ad","level":"block"}`,

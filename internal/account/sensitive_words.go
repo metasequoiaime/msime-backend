@@ -338,6 +338,26 @@ func sensitiveCreator(ctx context.Context) string {
 	return adminActor(ctx)
 }
 
+// sensitiveAddLock serializes plain word additions across replicas, so two spellings of one word (加V and 加v) added at the same moment cannot both pass the duplicate check.
+const sensitiveAddLock int64 = 0x6d73696d65737764
+
+// plainSensitiveWordExists reports whether a plain word that the matcher treats as the same as pattern (equal after folding case, width and white space) is already stored. The UNIQUE constraint only covers the exact spelling.
+func plainSensitiveWordExists(ctx context.Context, tx pgx.Tx, pattern string) (bool, error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, sensitiveAddLock); err != nil {
+		return false, err
+	}
+	rows, err := tx.Query(ctx, `SELECT pattern FROM admin_sensitive_words WHERE NOT is_regex`)
+	if err != nil {
+		return false, err
+	}
+	existing, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return false, err
+	}
+	folded := foldSensitive(pattern, true)
+	return slices.ContainsFunc(existing, func(p string) bool { return foldSensitive(p, true) == folded }), nil
+}
+
 // actionAddSensitiveWord adds value {pattern, is_regex?, category, level}.
 func actionAddSensitiveWord(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
 	var in sensitiveWordInput
@@ -366,6 +386,15 @@ func actionAddSensitiveWord(a *Service, ctx context.Context, tx pgx.Tx, v action
 	}
 	if in.Level != SensitiveBlock && in.Level != SensitiveReview {
 		return actionResult{}, actionFail(400, "invalid_level")
+	}
+	if !isRegex {
+		duplicate, err := plainSensitiveWordExists(ctx, tx, pattern)
+		if err != nil {
+			return actionResult{}, err
+		}
+		if duplicate {
+			return actionResult{}, actionFail(409, "exists")
+		}
 	}
 	var id int64
 	err := tx.QueryRow(ctx, `INSERT INTO admin_sensitive_words(pattern,is_regex,category,level,created_by) VALUES($1,$2,$3,$4,$5) ON CONFLICT (pattern) DO NOTHING RETURNING id`, pattern, isRegex, in.Category, in.Level, sensitiveCreator(ctx)).Scan(&id)
