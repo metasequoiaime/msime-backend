@@ -259,6 +259,10 @@ func TestMonitoredServices(t *testing.T) {
 	if strings.Join(keys, ",") != "cloud,chat,translation,transcription" {
 		t.Fatalf("derived keys = %v", keys)
 	}
+	// The account side receives the derived list for the overview, without it counting as configured.
+	if settings := s.adminAccountSettings(); len(settings.Services) != 0 || len(settings.DerivedServices) != 4 || settings.DerivedServices[1].Key != "chat" || settings.DerivedServices[1].Name != "AI 联想" || settings.DerivedServices[1].Provider != "127.0.0.1" {
+		t.Fatalf("account settings = %+v", settings)
+	}
 	s.config.Translation.Provider = "tencent"
 	if svc := s.monitoredServices()[2]; svc.Provider != "腾讯 TMT" {
 		t.Fatalf("translation provider = %+v", svc)
@@ -267,6 +271,9 @@ func TestMonitoredServices(t *testing.T) {
 	services := s.monitoredServices()
 	if len(services) != 1 || services[0] != (monitoredService{Key: "chat", Name: "AI 联想", Provider: "账号通道", SlowMS: 2000, QuotaLimit: 2000, QuotaUnit: "cny", UnitPrice: 0.05}) {
 		t.Fatalf("configured services = %+v", services)
+	}
+	if settings := s.adminAccountSettings(); len(settings.Services) != 1 || len(settings.DerivedServices) != 0 {
+		t.Fatalf("configured account settings = %+v", settings)
 	}
 	// "database" is the status probe's own key: a configured service under it would mix its metrics with the probe's pings.
 	s.config.Admin.Services = append(s.config.Admin.Services, AdminServiceConfig{Key: databaseService, Name: "数据库", Provider: "x"})

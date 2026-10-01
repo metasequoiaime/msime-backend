@@ -91,7 +91,7 @@ func New(c Config) (*Server, error) {
 	s.initAdminGoogle()
 	s.accounts.ConfigureEngine(c.Engine)
 	if c.Admin.Enabled {
-		s.accounts.ConfigureAdmin(s.config.Admin.accountSettings())
+		s.accounts.ConfigureAdmin(s.adminAccountSettings())
 		s.accounts.ConfigureNoticeBroadcaster(s.noticeBroadcaster())
 		s.adminGitHub = s.config.Admin.adminGitHubClient()
 		s.startAdminJobs()

@@ -232,6 +232,17 @@ func (c *AdminConfig) accountSettings() account.AdminSettings {
 	return account.AdminSettings{Owners: append([]string(nil), c.Google.AllowedEmails...), Environment: c.Environment, Services: services}
 }
 
+// adminAccountSettings is accountSettings plus, when admin.services is empty, the upstreams the status probe monitors, so the overview can name them.
+func (s *Server) adminAccountSettings() account.AdminSettings {
+	settings := s.config.Admin.accountSettings()
+	if len(settings.Services) == 0 {
+		for _, v := range s.monitoredServices() {
+			settings.DerivedServices = append(settings.DerivedServices, account.AdminService{Key: v.Key, Name: v.Name, Provider: v.Provider, QuotaLimit: v.QuotaLimit, QuotaUnit: v.QuotaUnit, UnitPrice: v.UnitPrice, SlowMS: v.SlowMS})
+		}
+	}
+	return settings
+}
+
 // adminGitHubClient builds the console's GitHub App client, or nil when admin.github is not configured.
 func (c *AdminConfig) adminGitHubClient() *githubapp.Client {
 	if !c.GitHub.enabled() {

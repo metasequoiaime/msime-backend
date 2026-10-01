@@ -172,10 +172,50 @@ INSERT INTO admin_incidents(service,title) VALUES('translation','翻译超时'),
 	if stt := body.Services[3]; stt.State != "down" || stt.Uptime60d == nil || *stt.Uptime60d != 0 || stt.P95MS != nil {
 		t.Fatalf("stt %+v", stt)
 	}
-	// Without configured services the overview lists the services the status probe recorded.
+	// Services derived from the deployment are listed under their names, in their order, without counting as configured.
+	a.ConfigureAdmin(AdminSettings{DerivedServices: []AdminService{{Key: "chat", Name: "AI 联想", Provider: "api.example.com"}, {Key: "images", Name: "皮肤生成"}}})
+	named := getOverview(t, a, "?days=7")
+	if named.ServicesConfigured || len(named.Services) != 2 || named.Services[0].Key != "chat" || named.Services[0].Name != "AI 联想" || named.Services[0].Provider != "api.example.com" || named.Services[0].State != "degraded" || named.Services[1].Key != "images" || named.Services[1].State != "unknown" {
+		t.Fatalf("named %+v", named.Services)
+	}
+	// Without configured or derived services the overview lists the services the status probe recorded.
 	a.ConfigureAdmin(AdminSettings{})
 	derived := getOverview(t, a, "?days=7")
 	if derived.ServicesConfigured || len(derived.Services) != 4 || derived.Services[0].Key != "chat" || derived.Services[3].Key != "stt" || derived.Services[2].Key != "stale" || derived.Services[2].Name != "stale" {
 		t.Fatalf("derived %+v", derived.Services)
+	}
+}
+
+// The overview's community counters leave out removed content, so they agree with the public community statistics.
+func TestOverviewCommunityCountersSkipRemoved(t *testing.T) {
+	a := overviewTestService(t)
+	ctx := context.Background()
+	user := complete(t, a.store, Identity{"email", "overview-owner@example.test"})
+	for _, statement := range []string{
+		`INSERT INTO community_skins(id,owner_id,name,design,moderation) VALUES('overview-skin-1',$1,'A','{}','approved'),('overview-skin-2',$1,'B','{}','removed')`,
+		`INSERT INTO community_resources(id,owner_id,kind,name,content,moderation) VALUES('overview-dict-1',$1,'dictionary','D','{"entries":[]}','approved'),('overview-reply-1',$1,'reply','R','{"prompt":"hi"}','removed')`,
+	} {
+		if _, err := a.store.pool.Exec(ctx, statement, user.User.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var counts struct {
+		Skins        int `json:"skins"`
+		Dictionaries int `json:"dictionaries"`
+		Replies      int `json:"replies"`
+	}
+	r := httptest.NewRequest("GET", "/api/overview", nil)
+	r = r.WithContext(adminTestContext(r.Context(), "legacy-token"))
+	w := httptest.NewRecorder()
+	a.AdminHTTP(w, r)
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &counts) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var stats CommunityStats
+	if err := a.store.pool.QueryRow(ctx, communityStatsQuery).Scan(&stats.Skins, &stats.SkinDownloads, &stats.Dictionaries, &stats.Replies, &stats.ResourceSaves, &stats.GeneratedAt); err != nil {
+		t.Fatal(err)
+	}
+	if counts.Skins != int(stats.Skins) || counts.Dictionaries != int(stats.Dictionaries) || counts.Replies != int(stats.Replies) || counts.Skins != 1 || counts.Dictionaries != 1 || counts.Replies != 0 {
+		t.Fatalf("overview %+v stats %+v", counts, stats)
 	}
 }

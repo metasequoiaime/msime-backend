@@ -164,6 +164,8 @@ type AdminSettings struct {
 	// Environment is the label the console shows next to the version, for example "生产环境".
 	Environment string
 	Services    []AdminService
+	// DerivedServices are the upstreams the status probe monitors when Services is empty, under their default names; the overview lists them so a deployment without admin.services still sees named services.
+	DerivedServices []AdminService
 }
 
 // ConfigureAdmin is called once during server construction, before serving requests, when the admin host is enabled.

@@ -14,6 +14,8 @@ func overviewPlatform(column string) string {
 // adminOverview serves GET /api/overview?days=7|30 (default 30): totals plus a daily series ending today in UTC, and the console overview additions: active devices (from anonymous `active` telemetry), the crash-free session rate (from `session`/`session_crash` telemetry), pending work kept in the database, and the monitored services' state.
 //
 // Active devices count distinct install_id values of `active` events. A `session` event is one session that ended normally and a `session_crash` event one that ended in a crash, so the crash-free rate is session/(session+session_crash) over the last 7 days, null without sessions. crash_top is the platform and version with the most crashed sessions in those 7 days (null without any), the 拖累 line under the rate; crash_group_latest is the newest open crash group first seen in the last 7 days (null without any). The telemetry flags say whether any client reported those kinds in the last 60 days, so the console can show 客户端未上报 instead of zeros.
+//
+// The community counters leave out removed content, like GET /v1/community/stats. services lists admin.services; without them the upstreams the status probe derives from the deployment (DerivedServices), and without those the services the probe has recorded. services_configured says only whether admin.services is set.
 func (a *Service) adminOverview(w http.ResponseWriter, r *http.Request, _ string) {
 	days := 30
 	if raw := r.URL.Query().Get("days"); raw != "" {
@@ -30,7 +32,11 @@ func (a *Service) adminOverview(w http.ResponseWriter, r *http.Request, _ string
 		return
 	}
 	keys, names, providers := []string{}, []string{}, []string{}
-	for _, service := range a.admin.Services {
+	services := a.admin.Services
+	if len(services) == 0 {
+		services = a.admin.DerivedServices
+	}
+	for _, service := range services {
 		keys = append(keys, service.Key)
 		names = append(names, service.Name)
 		providers = append(providers, service.Provider)
@@ -43,12 +49,12 @@ func (a *Service) adminOverview(w http.ResponseWriter, r *http.Request, _ string
    'downloads',(SELECT count(*) FROM admin_events WHERE kind='download'),
    'crashes',(SELECT count(*) FROM admin_events WHERE kind='crash'),
    'open_crashes',(SELECT count(*) FROM admin_events WHERE kind='crash' AND NOT resolved),
-   'skins',(SELECT count(*) FROM community_skins),
+   'skins',(SELECT count(*) FROM community_skins WHERE moderation<>'removed'),
    'skin_downloads',(SELECT count(*) FROM community_skin_downloads),
-   'plugins',(SELECT count(*) FROM community_plugins),
+   'plugins',(SELECT count(*) FROM community_plugins WHERE moderation<>'removed'),
    'plugin_downloads',(SELECT count(*) FROM community_plugin_downloads),
-   'dictionaries',(SELECT count(*) FROM community_resources WHERE kind='dictionary'),
-   'replies',(SELECT count(*) FROM community_resources WHERE kind='reply'),
+   'dictionaries',(SELECT count(*) FROM community_resources WHERE kind='dictionary' AND moderation<>'removed'),
+   'replies',(SELECT count(*) FROM community_resources WHERE kind='reply' AND moderation<>'removed'),
    'resource_saves',(SELECT count(*) FROM community_resource_saves),
    'daily',(SELECT json_agg(x ORDER BY day) FROM (
      SELECT to_char(d AT TIME ZONE 'UTC','YYYY-MM-DD') AS day,
@@ -86,7 +92,7 @@ func (a *Service) adminOverview(w http.ResponseWriter, r *http.Request, _ string
      'community',$2::int,
      'reports_7d',(SELECT count(*) FROM community_reports WHERE created_at>=now()-interval '7 days'),
      'crash_groups',(SELECT count(*) FROM admin_crash_groups WHERE status='open' AND first_seen>=now()-interval '7 days')),
-   'services_configured',cardinality($3::text[])>0,
+   'services_configured',$6::bool,
    'services',(SELECT COALESCE(json_agg(json_build_object('key',s.key,'name',s.name,'provider',s.provider,
        'state',CASE WHEN today.total_minutes>0 AND today.ok_minutes=0 THEN 'down'
          WHEN EXISTS(SELECT 1 FROM admin_incidents i WHERE i.service=s.key AND i.state='open') THEN 'degraded'
@@ -100,7 +106,7 @@ func (a *Service) adminOverview(w http.ResponseWriter, r *http.Request, _ string
        SELECT service,service,'',1000+row_number() OVER (ORDER BY service) FROM (SELECT DISTINCT service FROM admin_service_daily WHERE day>=current_date-59) d WHERE cardinality($3::text[])=0
      ) s
      LEFT JOIN LATERAL (SELECT ok_minutes,total_minutes,degraded,p95_ms FROM admin_service_daily WHERE service=s.key AND day>=current_date-1 ORDER BY day DESC LIMIT 1) today ON true))`,
-		days, community, keys, names, providers).Scan(&result)
+		days, community, keys, names, providers, len(a.admin.Services) > 0).Scan(&result)
 	if err != nil {
 		a.error(w, err)
 		return
