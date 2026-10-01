@@ -36,6 +36,9 @@ type CommunityResource struct {
 	RatingCount   int             `json:"rating_count"`
 	RatingAverage float64         `json:"rating_average"`
 	MyRating      int             `json:"my_rating"`
+	// Moderation 是审核状态，只出现在作者自己的作品上，且只在带 `fields=moderation` 时出现（见 communityFields）。
+	Moderation string `json:"moderation,omitempty"`
+	moderation string
 }
 
 func resourceText(s string, min, max int, multiline bool) bool {
@@ -98,12 +101,13 @@ const resourceSelect = `SELECT s.id,s.kind,s.name,s.description,
  EXISTS(SELECT 1 FROM community_resource_saves WHERE resource_id=s.id AND user_id=$1),s.owner_id=$1,
  (SELECT count(*) FROM community_resource_ratings WHERE resource_id=s.id),
  COALESCE((SELECT avg(stars) FROM community_resource_ratings WHERE resource_id=s.id),0),
- COALESCE((SELECT stars FROM community_resource_ratings WHERE resource_id=s.id AND user_id=$1),0)
+ COALESCE((SELECT stars FROM community_resource_ratings WHERE resource_id=s.id AND user_id=$1),0),
+ CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END
  FROM community_resources s JOIN auth_users u ON u.id=s.owner_id `
 
 func scanResource(row interface{ Scan(...any) error }) (CommunityResource, error) {
 	var v CommunityResource
-	err := row.Scan(&v.ID, &v.Kind, &v.Name, &v.Description, &v.Author, &v.Content, &v.Revision, &v.Saves, &v.Saved, &v.Owned, &v.RatingCount, &v.RatingAverage, &v.MyRating)
+	err := row.Scan(&v.ID, &v.Kind, &v.Name, &v.Description, &v.Author, &v.Content, &v.Revision, &v.Saves, &v.Saved, &v.Owned, &v.RatingCount, &v.RatingAverage, &v.MyRating, &v.moderation)
 	return v, err
 }
 func (a *Service) resourceList(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +115,11 @@ func (a *Service) resourceList(w http.ResponseWriter, r *http.Request) {
 	kind, scope, q := r.URL.Query().Get("kind"), r.URL.Query().Get("scope"), r.URL.Query().Get("q")
 	if !ok || (kind != "dictionary" && kind != "reply") || (scope != "" && scope != "mine" && scope != "saved") || !resourceText(q, 0, 128, false) {
 		writeError(w, 400, "invalid_resource_query")
+		return
+	}
+	fields, ok := communityFields(r, "moderation")
+	if !ok {
+		writeError(w, 400, "invalid_fields")
 		return
 	}
 	viewer := a.communityViewer(r)
@@ -133,6 +142,7 @@ func (a *Service) resourceList(w http.ResponseWriter, r *http.Request) {
 			a.error(w, e)
 			return
 		}
+		v.Moderation = ownerModeration(fields, v.moderation)
 		items = append(items, v)
 	}
 	if err = rows.Err(); err != nil {
@@ -146,6 +156,11 @@ func (a *Service) resourceList(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"items": items, "has_more": more})
 }
 func (a *Service) resourceDetail(w http.ResponseWriter, r *http.Request) {
+	fields, ok := communityFields(r, "moderation")
+	if !ok {
+		writeError(w, 400, "invalid_fields")
+		return
+	}
 	v, err := scanResource(a.store.pool.QueryRow(r.Context(), resourceSelect+`WHERE s.id=$2 AND (s.moderation<>'removed' OR s.owner_id=$1)`, a.communityViewer(r), r.PathValue("id")))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "resource_not_found")
@@ -155,6 +170,7 @@ func (a *Service) resourceDetail(w http.ResponseWriter, r *http.Request) {
 		a.error(w, err)
 		return
 	}
+	v.Moderation = ownerModeration(fields, v.moderation)
 	write(w, 200, v)
 }
 func (a *Service) resourcePublish(w http.ResponseWriter, r *http.Request) {

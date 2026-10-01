@@ -975,3 +975,154 @@ func TestPublishRetryIsAnsweredBeforeScreening(t *testing.T) {
 	// A changed upload is still screened.
 	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"晚霞模板","description":"","content":{"prompt":"新内容"},"revision":1}`, owner.AccessToken, 422)
 }
+
+// 作者只有在客户端用 `fields=moderation` 显式请求时才能看到自己作品的审核状态，其他人永远看不到；不带该参数的请求响应与以前完全相同，因为已发布的客户端拒绝未知字段。
+func TestAuthorSeesModerationStateOnlyWhenAsked(t *testing.T) {
+	db, _, owner, reader, call := moderationFixture(t)
+	a := &Service{store: db}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","id":"skin-a","reason":"内容低俗"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	candidate, plugin, readerPlugin := "c1334455-1234-4234-8234-123456789abc", "c2334455-1234-4234-8234-123456789abc", "c3334455-1234-4234-8234-123456789abc"
+	insertCandidateSkin(t, db, candidate, owner.User.ID, "Owned candidate")
+	for _, row := range []struct{ id, owner, state string }{{plugin, owner.User.ID, "removed"}, {readerPlugin, reader.User.ID, "approved"}} {
+		if _, err := db.pool.Exec(t.Context(), `INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,version,license,manifest,archive,request_sha256,moderation) VALUES($1,$2,'sound','com.example.`+row.id[:2]+`','Pack','1.0','MIT','{}','zip',repeat('a',64),$3)`, row.id, row.owner, row.state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	states := func(body []byte, list string) map[string]any {
+		t.Helper()
+		var page map[string]json.RawMessage
+		var items []map[string]any
+		if err := json.Unmarshal(body, &page); err != nil || json.Unmarshal(page[list], &items) != nil {
+			t.Fatal(string(body), err)
+		}
+		out := map[string]any{}
+		for _, item := range items {
+			out[item["id"].(string)] = item["moderation"]
+		}
+		return out
+	}
+	// 不带开关时什么都不变，作者本人也一样。
+	for _, path := range []string{"/v1/community/skins", "/v1/community/skins/skin-a", "/v1/community/plugins", "/v1/community/plugins/" + plugin, "/v1/community/candidate-skins", "/v1/community/candidate-skins/" + candidate, "/v1/community/resources?kind=dictionary", "/v1/community/resources/dict-a"} {
+		if w := apiRequest(t, mux, "GET", path, "", owner.AccessToken, 200); strings.Contains(w.Body.String(), `"moderation"`) {
+			t.Fatal("moderation sent without fields=moderation", path, w.Body.String())
+		}
+	}
+	// 作者自己的作品带状态，其他用户的作品永远不带。
+	got := states(apiRequest(t, mux, "GET", "/v1/community/skins?fields=moderation", "", owner.AccessToken, 200).Body.Bytes(), "skins")
+	if got["skin-a"] != "removed" || got["skin-b"] != "approved" {
+		t.Fatal("owner skin states", got)
+	}
+	if w := apiRequest(t, mux, "GET", "/v1/community/skins?fields=moderation", "", reader.AccessToken, 200); strings.Contains(w.Body.String(), `"moderation"`) || strings.Contains(w.Body.String(), "skin-a") {
+		t.Fatal("another user saw a review state or the removed skin", w.Body.String())
+	}
+	if w := apiRequest(t, mux, "GET", "/v1/community/skins/skin-b?fields=moderation", "", "", 200); strings.Contains(w.Body.String(), `"moderation"`) {
+		t.Fatal("anonymous viewer saw a review state", w.Body.String())
+	}
+	if w := apiRequest(t, mux, "GET", "/v1/community/skins/skin-a?fields=moderation", "", owner.AccessToken, 200); !strings.Contains(w.Body.String(), `"moderation":"removed"`) || strings.Contains(w.Body.String(), "内容低俗") {
+		t.Fatal("owner detail", w.Body.String())
+	}
+	got = states(apiRequest(t, mux, "GET", "/v1/community/plugins?fields=moderation", "", owner.AccessToken, 200).Body.Bytes(), "plugins")
+	if got[plugin] != "removed" || got[readerPlugin] != nil {
+		t.Fatal("plugin states", got)
+	}
+	if w := apiRequest(t, mux, "GET", "/v1/community/plugins/"+plugin+"?fields=moderation", "", owner.AccessToken, 200); !strings.Contains(w.Body.String(), `"moderation":"removed"`) {
+		t.Fatal("owner plugin detail", w.Body.String())
+	}
+	// 候选皮肤可以单独请求 moderation，也可以和 sync 一起请求；单独请求 moderation 时仍不带同步字段。
+	w := apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+candidate+"?fields=moderation", "", owner.AccessToken, 200)
+	if !strings.Contains(w.Body.String(), `"moderation":"approved"`) || strings.Contains(w.Body.String(), `"visibility"`) {
+		t.Fatal("candidate detail", w.Body.String())
+	}
+	w = apiRequest(t, mux, "GET", "/v1/community/candidate-skins?scope=mine&fields=sync,moderation", "", owner.AccessToken, 200)
+	if !strings.Contains(w.Body.String(), `"moderation":"approved"`) || !strings.Contains(w.Body.String(), `"visibility":"public"`) {
+		t.Fatal("candidate list with both opt-ins", w.Body.String())
+	}
+	got = states(apiRequest(t, mux, "GET", "/v1/community/resources?kind=dictionary&scope=mine&fields=moderation", "", owner.AccessToken, 200).Body.Bytes(), "items")
+	if got["dict-a"] != "pending" {
+		t.Fatal("resource states", got)
+	}
+	if w = apiRequest(t, mux, "GET", "/v1/community/resources/dict-a?fields=moderation", "", reader.AccessToken, 200); strings.Contains(w.Body.String(), `"moderation"`) {
+		t.Fatal("reader saw a resource state", w.Body.String())
+	}
+	for _, path := range []string{"/v1/community/skins?fields=reason", "/v1/community/skins/skin-a?fields=moderation,reason", "/v1/community/plugins?fields=sync", "/v1/community/plugins/" + plugin + "?fields=x", "/v1/community/candidate-skins?fields=reason", "/v1/community/resources?kind=reply&fields=sync", "/v1/community/resources/dict-a?fields=MODERATION"} {
+		if w = apiRequest(t, mux, "GET", path, "", owner.AccessToken, 400); !strings.Contains(w.Body.String(), "invalid_fields") {
+			t.Fatal(path, w.Body.String())
+		}
+	}
+}
+
+// 皮肤和插件用 `scope=mine` 列出作者自己的上传（含已下架的），需要用户会话。
+func TestSkinAndPluginScopeMine(t *testing.T) {
+	db, _, owner, reader, call := moderationFixture(t)
+	a := &Service{store: db}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","id":"skin-a","reason":"内容低俗"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if _, err := db.pool.Exec(t.Context(), `INSERT INTO community_skins(id,owner_id,name,description,design) VALUES('skin-r',$1,'读者的皮肤','','`+communityFixture+`')`, reader.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct{ id, owner string }{{"d1334455-1234-4234-8234-123456789abc", owner.User.ID}, {"d2334455-1234-4234-8234-123456789abc", reader.User.ID}} {
+		if _, err := db.pool.Exec(t.Context(), `INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,version,license,manifest,archive,request_sha256) VALUES($1,$2,'music','com.example.`+row.id[:2]+`','Pack','1.0','MIT','{}','zip',repeat('a',64))`, row.id, row.owner); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := func(body []byte, list string) []string {
+		t.Helper()
+		var page map[string]json.RawMessage
+		var items []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil || json.Unmarshal(page[list], &items) != nil {
+			t.Fatal(string(body), err)
+		}
+		var out []string
+		for _, item := range items {
+			out = append(out, item.ID)
+		}
+		slices.Sort(out)
+		return out
+	}
+	if got := ids(apiRequest(t, mux, "GET", "/v1/community/skins?scope=mine", "", owner.AccessToken, 200).Body.Bytes(), "skins"); !slices.Equal(got, []string{"skin-a", "skin-b"}) {
+		t.Fatal("owner skins", got)
+	}
+	if got := ids(apiRequest(t, mux, "GET", "/v1/community/skins?scope=mine", "", reader.AccessToken, 200).Body.Bytes(), "skins"); !slices.Equal(got, []string{"skin-r"}) {
+		t.Fatal("reader skins", got)
+	}
+	if got := ids(apiRequest(t, mux, "GET", "/v1/community/plugins?scope=mine", "", owner.AccessToken, 200).Body.Bytes(), "plugins"); !slices.Equal(got, []string{"d1334455-1234-4234-8234-123456789abc"}) {
+		t.Fatal("owner plugins", got)
+	}
+	if got := ids(apiRequest(t, mux, "GET", "/v1/community/plugins?scope=mine&kind=sound", "", owner.AccessToken, 200).Body.Bytes(), "plugins"); len(got) != 0 {
+		t.Fatal("kind filter ignored with scope=mine", got)
+	}
+	for _, path := range []string{"/v1/community/skins?scope=mine", "/v1/community/plugins?scope=mine"} {
+		if w := apiRequest(t, mux, "GET", path, "", "", 401); !strings.Contains(w.Body.String(), "user_session_required") {
+			t.Fatal(path, w.Body.String())
+		}
+	}
+	for _, path := range []string{"/v1/community/skins?scope=saved", "/v1/community/plugins?scope=all"} {
+		if w := apiRequest(t, mux, "GET", path, "", owner.AccessToken, 400); !strings.Contains(w.Body.String(), "invalid_scope") {
+			t.Fatal(path, w.Body.String())
+		}
+	}
+}
+
+// 敏感词库无法加载时，上传以 503 `screening_unavailable` 和 `Retry-After` 拒绝，而不是笼统的 `auth_unavailable`。
+func TestScreenUploadReportsScreeningOutage(t *testing.T) {
+	db := testStore(t)
+	a := &Service{store: db}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	if _, ok := a.screenUpload(w, httptest.NewRequest("POST", "/v1/community/skins", nil).WithContext(ctx), "名字"); ok {
+		t.Fatal("upload screened without a word list")
+	}
+	if w.Code != 503 || w.Header().Get("Retry-After") != "30" || !strings.Contains(w.Body.String(), `"screening_unavailable"`) {
+		t.Fatal(w.Code, w.Header(), w.Body.String())
+	}
+}

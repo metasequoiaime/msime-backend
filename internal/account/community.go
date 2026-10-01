@@ -7,6 +7,7 @@ import (
 	"image/jpeg"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -120,6 +121,34 @@ type CommunitySkin struct {
 	RatingAverage float64         `json:"rating_average"`
 	Owned         bool            `json:"owned"`
 	MyRating      int             `json:"my_rating"`
+	// Moderation 是作品的审核状态（approved、pending 或 removed），只出现在作者自己的作品上，且只在请求带了 `fields=moderation` 时出现（见 communityFields）。
+	Moderation string `json:"moderation,omitempty"`
+	// moderation 是为作者读出的状态，其他人为空。
+	moderation string
+}
+
+// communityFields 读取社区列表和详情接口的 `fields=` 开关：逗号分隔、取自 allowed 的名称列表，出现其他名称时 ok 为 false。已发布的客户端解析社区条目时拒绝未知字段，所以额外字段只发给显式请求的客户端。
+func communityFields(r *http.Request, allowed ...string) (fields map[string]bool, ok bool) {
+	fields = map[string]bool{}
+	raw := r.URL.Query().Get("fields")
+	if raw == "" {
+		return fields, true
+	}
+	for _, name := range strings.Split(raw, ",") {
+		if !slices.Contains(allowed, name) {
+			return nil, false
+		}
+		fields[name] = true
+	}
+	return fields, true
+}
+
+// ownerModeration 返回条目的 moderation 值：客户端请求了 `fields=moderation` 时为读给作者的状态，否则为空，字段因此省略。
+func ownerModeration(fields map[string]bool, state string) string {
+	if fields["moderation"] {
+		return state
+	}
+	return ""
 }
 
 const communitySelect = `SELECT s.id,s.name,s.description,
@@ -127,12 +156,13 @@ const communitySelect = `SELECT s.id,s.name,s.description,
  (SELECT count(*) FROM community_skin_downloads WHERE skin_id=s.id),
  (SELECT count(*) FROM community_skin_ratings WHERE skin_id=s.id),
  COALESCE((SELECT avg(stars) FROM community_skin_ratings WHERE skin_id=s.id),0),
- s.owner_id=$1,COALESCE((SELECT stars FROM community_skin_ratings WHERE skin_id=s.id AND user_id=$1),0)
+ s.owner_id=$1,COALESCE((SELECT stars FROM community_skin_ratings WHERE skin_id=s.id AND user_id=$1),0),
+ CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END
  FROM community_skins s JOIN auth_users u ON u.id=s.owner_id `
 
 func scanSkin(row interface{ Scan(...any) error }) (CommunitySkin, error) {
 	var s CommunitySkin
-	err := row.Scan(&s.ID, &s.Name, &s.Description, &s.Author, &s.Design, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating)
+	err := row.Scan(&s.ID, &s.Name, &s.Description, &s.Author, &s.Design, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.moderation)
 	return s, err
 }
 
@@ -159,7 +189,22 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_search")
 		return
 	}
-	rows, e := a.store.pool.Query(r.Context(), communitySelect+`WHERE strpos(lower(s.name),lower($2))>0 AND (s.moderation<>'removed' OR s.owner_id=$1) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $3`, a.communityViewer(r), search, offset)
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != "mine" {
+		writeError(w, 400, "invalid_scope")
+		return
+	}
+	fields, ok := communityFields(r, "moderation")
+	if !ok {
+		writeError(w, 400, "invalid_fields")
+		return
+	}
+	viewer := a.communityViewer(r)
+	if scope == "mine" && viewer == "" {
+		writeError(w, 401, "user_session_required")
+		return
+	}
+	rows, e := a.store.pool.Query(r.Context(), communitySelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($4='' OR s.owner_id=$1) AND (s.moderation<>'removed' OR s.owner_id=$1) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $3`, viewer, search, offset, scope)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -172,6 +217,7 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 			a.error(w, e)
 			return
 		}
+		v.Moderation = ownerModeration(fields, v.moderation)
 		items = append(items, v)
 	}
 	if e = rows.Err(); e != nil {
@@ -185,6 +231,11 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"skins": items, "has_more": more})
 }
 func (a *Service) communityDetail(w http.ResponseWriter, r *http.Request) {
+	fields, ok := communityFields(r, "moderation")
+	if !ok {
+		writeError(w, 400, "invalid_fields")
+		return
+	}
 	v, e := scanSkin(a.store.pool.QueryRow(r.Context(), communitySelect+`WHERE s.id=$2 AND (s.moderation<>'removed' OR s.owner_id=$1)`, a.communityViewer(r), r.PathValue("id")))
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
@@ -199,6 +250,7 @@ func (a *Service) communityDetail(w http.ResponseWriter, r *http.Request) {
 		a.error(w, e)
 		return
 	}
+	v.Moderation = ownerModeration(fields, v.moderation)
 	write(w, 200, v)
 }
 func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
