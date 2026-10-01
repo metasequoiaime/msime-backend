@@ -350,15 +350,18 @@
     ],
     "POST /v1/skins/jobs": [
       "internal/server/skin_jobs_test.go::TestSkinJobReturnsBeforeUpstreamAndBindsOwner",
-      "internal/server/skin_jobs_test.go::TestSkinJobCapacityCancelExpiryAndShutdown"
+      "internal/server/skin_jobs_test.go::TestSkinJobCapacityCancelExpiryAndShutdown",
+      "internal/server/skin_jobs_test.go::TestSharedSkinJobCapsSpanReplicas"
     ],
     "GET /v1/skins/jobs/{job}": [
       "internal/server/skin_jobs_test.go::TestSkinJobReturnsBeforeUpstreamAndBindsOwner",
-      "internal/server/skin_jobs_test.go::TestSkinJobCapacityCancelExpiryAndShutdown"
+      "internal/server/skin_jobs_test.go::TestSkinJobCapacityCancelExpiryAndShutdown",
+      "internal/server/skin_jobs_test.go::TestSharedSkinJobPolledAndDeletedOnAnotherReplica"
     ],
     "DELETE /v1/skins/jobs/{job}": [
       "internal/server/skin_jobs_test.go::TestSkinJobReturnsBeforeUpstreamAndBindsOwner",
-      "internal/server/skin_jobs_test.go::TestSkinJobCapacityCancelExpiryAndShutdown"
+      "internal/server/skin_jobs_test.go::TestSkinJobCapacityCancelExpiryAndShutdown",
+      "internal/server/skin_jobs_test.go::TestSharedSkinJobDeleteOnAnotherReplicaStopsUpstream"
     ],
     "GET /v1/community/word-submissions": [
       "internal/server/word_submissions_test.go::TestWordSubmissionSettings"

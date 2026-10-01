@@ -34,8 +34,11 @@ type Server struct {
 	skinActive int
 	skinOwners map[string]int
 
-	skinJobs    map[string]*skinArtworkJob
-	skinWorkers sync.WaitGroup
+	// skinJobs, skinActive and skinOwners hold the artwork jobs only when there is no database; with one the jobs live in skin_jobs and skinRunning maps the ids this replica executes to their cancel functions, so a DELETE that lands here stops the upstream call at once.
+	skinJobs      map[string]*skinArtworkJob
+	skinRunning   map[string]context.CancelFunc
+	skinHeartbeat time.Duration
+	skinWorkers   sync.WaitGroup
 
 	words *wordSubmitter
 
@@ -70,7 +73,7 @@ func New(c Config) (*Server, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	s := &Server{config: c, slots: make(chan struct{}, c.MaxConcurrent), buckets: map[string]bucket{}, client: &http.Client{Timeout: time.Duration(c.TimeoutSeconds) * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	s := &Server{config: c, slots: make(chan struct{}, c.MaxConcurrent), buckets: map[string]bucket{}, client: &http.Client{Timeout: time.Duration(c.TimeoutSeconds) * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, skinHeartbeat: skinJobHeartbeat}
 	s.lifetime, s.stop = context.WithCancel(context.Background())
 	// 30 秒:启动时可能要顺带补迁移,空库要建二十多张表。独立的 -migrate-users 入口本来就按这个额度
 	// 算,两边保持一致。

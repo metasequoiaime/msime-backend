@@ -14,10 +14,15 @@ import (
 	"unicode/utf8"
 )
 
-// Jobs are short-lived drafts, not saved skins. The current single-instance
-// deployment retains at most eight bounded image responses for ten minutes.
+// Jobs are short-lived drafts, not saved skins: at most eight bounded image responses are retained, for ten minutes. With a database the jobs live in the shared skin_jobs table (skin_jobs_shared.go) and the caps apply to the whole deployment; without one they live in this process, which is only correct for a single replica.
 const skinJobTTL = 10 * time.Minute
 const maxSkinJobs = 8
+const skinJobsPerOwner = 3
+
+// skinJobTimeout bounds one job's upstream call, the same budget the synchronous endpoint gets.
+const skinJobTimeout = 180 * time.Second
+
+func skinJobCap(c Config) int { return min(maxSkinJobs, c.MaxConcurrent) }
 
 type skinArtworkJob struct {
 	owner   string
@@ -66,6 +71,11 @@ func (s *Server) createSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := hex.EncodeToString(nonce[:])
+	body, _ := json.Marshal(input)
+	if s.accounts != nil {
+		s.createSharedSkinJob(w, r, id, owner, body)
+		return
+	}
 	s.mu.Lock()
 	s.expireSkinJobs(time.Now())
 	count := 0
@@ -74,7 +84,7 @@ func (s *Server) createSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 			count++
 		}
 	}
-	if s.closed || len(s.skinJobs) >= min(maxSkinJobs, s.config.MaxConcurrent) || count >= 3 || s.skinOwners[owner] >= 3 || s.skinActive >= min(maxSkinJobs, s.config.MaxConcurrent) {
+	if s.closed || len(s.skinJobs) >= skinJobCap(s.config) || count >= skinJobsPerOwner || s.skinOwners[owner] >= skinJobsPerOwner || s.skinActive >= skinJobCap(s.config) {
 		s.mu.Unlock()
 		w.Header().Set("Retry-After", "5")
 		fail(w, 503, "skin_jobs_busy")
@@ -83,7 +93,7 @@ func (s *Server) createSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 	if s.skinJobs == nil {
 		s.skinJobs = make(map[string]*skinArtworkJob)
 	}
-	ctx, cancel := context.WithTimeout(s.lifetime, 180*time.Second)
+	ctx, cancel := context.WithTimeout(s.lifetime, skinJobTimeout)
 	job := &skinArtworkJob{owner: owner, expires: time.Now().Add(skinJobTTL), cancel: cancel, state: "running"}
 	s.skinJobs[id] = job
 	if s.skinOwners == nil {
@@ -93,16 +103,10 @@ func (s *Server) createSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 	s.skinActive++
 	s.skinWorkers.Add(1)
 	s.mu.Unlock()
-	body, _ := json.Marshal(input)
 	go func() {
 		defer s.skinWorkers.Done()
 		defer cancel()
-		// Reuse the same fixed upstream, prompt rules and image validation as the
-		// synchronous compatibility endpoint; never retain the user's bearer token.
-		request, _ := http.NewRequestWithContext(ctx, "POST", "/v1/skins/generate", bytes.NewReader(body))
-		request.Header.Set("Content-Type", "application/json")
-		response := &skinJobResponse{header: make(http.Header)}
-		s.generateSkinArtwork(response, request)
+		response := s.runSkinArtwork(ctx, body)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.skinActive--
@@ -122,12 +126,40 @@ func (s *Server) createSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 			slog.Error("skin artwork job failed", "job", id, "status", response.status, "reason", job.reason)
 		}
 	}()
+	respondSkinJobCreated(w, id, job.expires)
+}
+
+// runSkinArtwork reuses the same fixed upstream, prompt rules and image validation as the synchronous compatibility endpoint; it never retains the user's bearer token.
+func (s *Server) runSkinArtwork(ctx context.Context, body []byte) *skinJobResponse {
+	request, _ := http.NewRequestWithContext(ctx, "POST", "/v1/skins/generate", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := &skinJobResponse{header: make(http.Header)}
+	s.generateSkinArtwork(response, request)
+	return response
+}
+
+func respondSkinJobCreated(w http.ResponseWriter, id string, expires time.Time) {
 	w.Header().Set("Location", "/v1/skins/jobs/"+id)
-	respond(w, http.StatusAccepted, map[string]any{"id": id, "state": "running", "expires_at": job.expires.UTC().Format(time.RFC3339)})
+	respond(w, http.StatusAccepted, map[string]any{"id": id, "state": "running", "expires_at": expires.UTC().Format(time.RFC3339)})
+}
+
+func respondSkinJob(w http.ResponseWriter, id, state, reason string, artwork json.RawMessage) {
+	if state == "running" {
+		w.Header().Set("Retry-After", "5")
+	}
+	payload := map[string]any{"id": id, "state": state, "artwork": artwork}
+	if reason != "" {
+		payload["reason"] = reason
+	}
+	respond(w, 200, payload)
 }
 
 func (s *Server) getSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 	owner, _ := r.Context().Value(skinJobOwnerKey{}).(string)
+	if s.accounts != nil {
+		s.getSharedSkinJob(w, r, owner)
+		return
+	}
 	s.mu.Lock()
 	s.expireSkinJobs(time.Now())
 	job := s.skinJobs[r.PathValue("job")]
@@ -138,18 +170,15 @@ func (s *Server) getSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 	}
 	state, artwork, reason := job.state, job.artwork, job.reason
 	s.mu.Unlock()
-	if state == "running" {
-		w.Header().Set("Retry-After", "5")
-	}
-	payload := map[string]any{"id": r.PathValue("job"), "state": state, "artwork": artwork}
-	if reason != "" {
-		payload["reason"] = reason
-	}
-	respond(w, 200, payload)
+	respondSkinJob(w, r.PathValue("job"), state, reason, artwork)
 }
 
 func (s *Server) deleteSkinArtworkJob(w http.ResponseWriter, r *http.Request) {
 	owner, _ := r.Context().Value(skinJobOwnerKey{}).(string)
+	if s.accounts != nil {
+		s.deleteSharedSkinJob(w, r, owner)
+		return
+	}
 	s.mu.Lock()
 	job := s.skinJobs[r.PathValue("job")]
 	if job == nil || owner == "" || job.owner != owner {
