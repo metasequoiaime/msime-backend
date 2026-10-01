@@ -15099,7 +15099,7 @@
             }
           },
           "503": {
-            "description": "功能未开启或配置无效、Turnstile/数据库/GitHub 暂不可用，或屏蔽词检查暂不可用（screening_unavailable）；此时尚未写入任何词条",
+            "description": "功能未开启或配置无效、Turnstile/数据库/GitHub 暂不可用、屏蔽词检查暂不可用（screening_unavailable），或其他副本对同一仓库的写入 15 秒内未完成（server_busy）；此时尚未写入任何词条",
             "content": {
               "application/json": {
                 "schema": {

@@ -51,8 +51,10 @@ const (
 	translationGlossChars   = 200
 	wordSubmissionBranches  = "community-words/"
 	wordSubmissionTimeout   = 45 * time.Second
-	defaultTurnstileURL     = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-	defaultGitHubAPIURL     = githubapp.DefaultAPIURL
+	// How long a submission waits for another replica's GitHub write to finish. One write takes a few seconds; the wait stays well inside wordSubmissionTimeout so the GitHub calls that follow still have time.
+	wordSubmissionLockWait = 15 * time.Second
+	defaultTurnstileURL    = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+	defaultGitHubAPIURL    = githubapp.DefaultAPIURL
 )
 
 // Conservative per-address limits. They count requests that passed Turnstile, so an automated client cannot use up a visitor's quota without solving a challenge. The shorter window is checked first so a burst does not also consume the daily allowance.
@@ -201,6 +203,11 @@ type rateLimiter interface {
 	RateLimit(ctx context.Context, scope, subject string, limit int, window time.Duration) error
 }
 
+// sharedLocker is account.Service.WaitLock: a lock held across replicas until release, or account.ErrLockBusy after wait.
+type sharedLocker interface {
+	WaitLock(ctx context.Context, name string, wait time.Duration) (release func(), err error)
+}
+
 type wordSubmitter struct {
 	config    WordSubmissionsConfig
 	origins   []string
@@ -208,8 +215,10 @@ type wordSubmitter struct {
 	limiter   rateLimiter
 	client    *http.Client
 	now       func() time.Time
-	// Serialises the read-modify-write on GitHub within this process so two local requests never race for the same blob SHA. Replicas can still race; GitHub's SHA check turns that into a 409.
+	// Serialises the read-modify-write on GitHub within this process so two local requests never race for the same blob SHA. Without a database this is the only serialisation, which is correct for a single replica only.
 	writes sync.Mutex
+	// locks extends that serialisation to every replica through a PostgreSQL advisory lock keyed by the target repository; nil without a database.
+	locks sharedLocker
 	// Installation tokens minted for the dictionary repository, shared by every call through app().
 	github githubapp.Cache
 	// The base dictionary's median word weights, once the Engine has computed them.
@@ -333,10 +342,16 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	address := ws.clientAddress(r)
-	// A cheap in-memory gate in front of Turnstile so a script cannot make this server call siteverify without bound.
-	if !s.allow(Client{ID: "word-submissions:" + address, RequestsPerMinute: 10}, time.Now()) {
+	// A cheap gate in front of Turnstile so a script cannot make this server call siteverify without bound. It is shared by every replica through PostgreSQL, so round-robin across replicas does not multiply it.
+	switch err := s.limitShared(r.Context(), "word-submissions", address, 10); {
+	case errors.Is(err, account.ErrLimited):
 		w.Header().Set("Retry-After", "60")
 		wordsFail(w, 429, "rate_limit_exceeded", "提交过于频繁，请稍后再试。")
+		return
+	case err != nil:
+		slog.Error("word submissions: rate limit unavailable", "reason", err.Error())
+		w.Header().Set("Retry-After", "30")
+		wordsFail(w, 503, "rate_limit_unavailable", "词条提交暂时不可用，请稍后再试。")
 		return
 	}
 	if ct := strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]); ct != "application/json" {
@@ -492,6 +507,12 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errWordsUncertain):
 		slog.Error("word submissions: GitHub write outcome unknown", "reason", err.Error())
 		respond(w, 502, map[string]any{"error": "暂时无法确认提交结果。请先查看词库仓库中最新的 Pull Request，确认词条未写入后再提交。", "code": "outcome_unknown", "uncertain": true, "pulls_url": "https://github.com/" + ws.config.GitHub.Repository + "/pulls"})
+	case errors.Is(err, errWordsBusy):
+		if !errors.Is(err, account.ErrLockBusy) {
+			slog.Error("word submissions: submission lock unavailable", "reason", err.Error())
+		}
+		w.Header().Set("Retry-After", "30")
+		wordsFail(w, 503, "server_busy", "其他词条正在写入，你的词条尚未写入，请稍后再试。")
 	case errors.Is(err, errWordsMisconfigured):
 		slog.Error("word submissions: GitHub App misconfigured", "reason", err.Error())
 		wordsFail(w, 503, "word_submissions_misconfigured", "词条提交暂未开放，请稍后再试。")

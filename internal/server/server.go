@@ -56,6 +56,8 @@ type Server struct {
 	mu          sync.Mutex
 	buckets     map[string]bucket
 	handler     http.Handler
+	// limits is the PostgreSQL rate limiter every replica shares (account.Service.RateLimit), used by limitShared; nil without a database.
+	limits rateLimiter
 
 	// adminGitHub is the console's GitHub App client; nil when admin.github is not configured.
 	adminGitHub *githubapp.Client
@@ -104,8 +106,12 @@ func New(c Config) (*Server, error) {
 		s.adminGitHub = s.config.Admin.adminGitHubClient()
 		s.startAdminJobs()
 	}
+	if s.accounts != nil {
+		s.limits = s.accounts
+	}
 	if c.WordSubmissions.enabled() && s.accounts != nil {
 		s.words = newWordSubmitter(c.WordSubmissions, c.AllowedOrigins, s.accounts)
+		s.words.locks = s.accounts
 	}
 	mux := http.NewServeMux()
 	// Anonymous website endpoints: the /v1/community/ prefix skips Bearer authentication in the middleware, and the handlers apply their own origin, Turnstile and rate checks.

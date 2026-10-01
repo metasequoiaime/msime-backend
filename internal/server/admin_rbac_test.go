@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -138,6 +139,26 @@ func TestAdminRateLimitPerActor(t *testing.T) {
 		if w.Code != 200 {
 			t.Fatal("another admin was limited by the legacy token's traffic", w.Code)
 		}
+	}
+	// With a database the budget is counted in the limiter every replica shares, per actor under the admin scope; a spent budget is still 429 and a database failure 503 with Retry-After.
+	limiter := &fakeLimiter{}
+	s.limits = limiter
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, adminRequest(s, "GET", "/api/system", strings.Repeat("r", 64), ""))
+	if w.Code != 200 || len(limiter.calls) != 1 || limiter.calls[0] != "admin|google:reviewer:reviewer@example.test" {
+		t.Fatal("shared admin budget", w.Code, limiter.calls)
+	}
+	limiter.err = account.ErrLimited
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, adminRequest(s, "GET", "/api/system", strings.Repeat("r", 64), ""))
+	if w.Code != 429 || w.Header().Get("Retry-After") != "60" || !strings.Contains(w.Body.String(), "rate_limit_exceeded") {
+		t.Fatal("spent shared budget", w.Code, w.Body.String())
+	}
+	limiter.err = errors.New("database down")
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, adminRequest(s, "GET", "/api/system", strings.Repeat("r", 64), ""))
+	if w.Code != 503 || w.Header().Get("Retry-After") != "30" || !strings.Contains(w.Body.String(), "admin_auth_unavailable") || strings.Contains(w.Body.String(), "database down") {
+		t.Fatal("limiter failure", w.Code, w.Body.String())
 	}
 }
 

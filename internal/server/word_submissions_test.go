@@ -72,6 +72,8 @@ type fakeWordsUpstream struct {
 	tokens          int
 	// files holds custom/english.txt and custom/translations.txt; a nil entry is a file the repository does not have.
 	files map[string]*fakeFile
+	// before, when set, runs for every request before the fake takes its lock, so a test can hold one request while others arrive.
+	before func(key string)
 }
 
 // fakeFile is one file on the rolling branch (content, sha) and on the base branch (base).
@@ -93,6 +95,9 @@ func newFakeWordsUpstream(t *testing.T) *fakeWordsUpstream {
 }
 
 func (f *fakeWordsUpstream) serve(w http.ResponseWriter, r *http.Request) {
+	if f.before != nil {
+		f.before(r.Method + " " + r.URL.Path)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := r.Method + " " + r.URL.Path
@@ -528,7 +533,7 @@ func TestWordSubmissionRateLimit(t *testing.T) {
 	if w = postWords(s, validWords); w.Code != 503 || decodeBody(t, w)["code"] != "rate_limit_unavailable" {
 		t.Fatal("limiter failure", w.Code, w.Body.String())
 	}
-	// The in-memory gate in front of Turnstile allows ten requests a minute per address.
+	// Without a database the gate in front of Turnstile is this process's bucket: ten requests a minute per address.
 	s, f, _ = wordsFixture(t)
 	codes := map[int]int{}
 	for range 12 {
@@ -536,6 +541,23 @@ func TestWordSubmissionRateLimit(t *testing.T) {
 	}
 	if codes[400] != 10 || codes[429] != 2 || f.count("POST /siteverify") != 0 {
 		t.Fatal(codes)
+	}
+	// With a database the gate is counted in the shared limiter under its own scope, before Turnstile; a spent budget is 429 and a database failure 503, both without calling siteverify.
+	s, f, _ = wordsFixture(t)
+	gate := &fakeLimiter{err: account.ErrLimited}
+	s.limits = gate
+	if w = postWords(s, validWords); w.Code != 429 || w.Header().Get("Retry-After") != "60" || decodeBody(t, w)["code"] != "rate_limit_exceeded" {
+		t.Fatal("shared gate", w.Code, w.Body.String())
+	}
+	if len(gate.calls) != 1 || gate.calls[0] != "word-submissions|198.51.100.7" {
+		t.Fatal(gate.calls)
+	}
+	gate.err = errors.New("database down")
+	if w = postWords(s, validWords); w.Code != 503 || w.Header().Get("Retry-After") != "30" || decodeBody(t, w)["code"] != "rate_limit_unavailable" {
+		t.Fatal("shared gate failure", w.Code, w.Body.String())
+	}
+	if f.count("POST /siteverify") != 0 {
+		t.Fatal("a gated request reached Turnstile")
 	}
 }
 
