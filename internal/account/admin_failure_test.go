@@ -77,6 +77,7 @@ func TestConsoleEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 		{"notifications", "GET", "/api/notifications", nil},
 		{"notifications read", "POST", "/api/notifications/read", func(consoleFailureFixture) string { return `{"ids":[1]}` }},
 		{"notifications read all", "POST", "/api/notifications/read", func(consoleFailureFixture) string { return `{"all":true}` }},
+		{"notifications read all up to", "POST", "/api/notifications/read", func(consoleFailureFixture) string { return `{"all":true,"up_to_id":"1"}` }},
 		{"me", "GET", "/api/me", nil},
 		{"me set pref", "POST", "/api/me", func(consoleFailureFixture) string { return `{"action":"set_pref","key":"notify_report","value":false}` }},
 		{"me regenerate token", "POST", "/api/me", func(consoleFailureFixture) string { return `{"action":"regenerate_token"}` }},

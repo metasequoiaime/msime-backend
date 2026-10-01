@@ -49,7 +49,9 @@ function Harness() {
       <Segmented label="模式" value={mode} onChange={setMode} options={[{ value: "a", label: "甲" }, { value: "b", label: "乙" }]} />
       <Switch label="开关" checked={on} onCheckedChange={setOn} />
       <Button variant="primary" onClick={() => setDrawer(true)}>打开抽屉</Button>
-      <Button onClick={() => toast({ text: "已合并", delayCommit: async () => setCommitted("yes"), undo: () => setCommitted("undone") })}>延迟提交</Button>
+      <Button onClick={() => { setCommitted("waiting"); toast({ text: "已合并", delayCommit: async () => setCommitted("yes"), undo: () => setCommitted("undone") }); }}>延迟提交</Button>
+      <Button onClick={() => toast({ text: "已驳回", delayCommit: () => Promise.reject(new Error("提交失败")), undo: () => undefined })}>延迟失败</Button>
+      <Button onClick={() => toast("这是一条提示")}>普通提示</Button>
       <span data-testid="committed">{committed}</span>
     </div>
     <Banner>说明横幅</Banner>

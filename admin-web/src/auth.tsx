@@ -5,6 +5,7 @@ import { z } from "zod";
 import { ArrowRight } from "lucide-react";
 import { APICredentialsContext, APIError, errorMessage, requestAPI } from "./api/client";
 import logo from "./assets/msime.png";
+import { useFlushToast } from "./ui/toast";
 
 const sessionSchema = z.object({ version: z.string().optional(), authenticated: z.boolean(), email: z.string(), google_enabled: z.boolean(), token_enabled: z.boolean(), can_manage_admins: z.boolean().default(false) });
 export type Session = z.infer<typeof sessionSchema>;
@@ -41,15 +42,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     client.clear();
   }, [client]);
   const onUnauthorized = useCallback(() => { clear(); setError("登录已失效，请重新登录。"); }, [clear]);
+  const flushToast = useFlushToast();
   const logout = useCallback(async () => {
     setError("");
+    // A merge or rejection still inside its 4s undo window is sent with the current session; after auth/logout it would fail with 401 and be lost.
+    await flushToast();
     try {
       await requestAPI("auth/logout", z.unknown(), { method: "POST", body: {}, token });
       clear();
     } catch (err) {
       setError(errorMessage(err));
     }
-  }, [token, clear]);
+  }, [token, clear, flushToast]);
   // The legacy admin token is verified through /api/auth/session, which reports authenticated for a valid bearer token.
   const login = useCallback(async (value: string) => {
     const result = await requestAPI("auth/session", sessionSchema, { token: value });

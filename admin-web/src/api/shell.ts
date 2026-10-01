@@ -31,7 +31,7 @@ export const searchResultSchema = z.object({
 export type SearchResult = z.infer<typeof searchResultSchema>;
 export const searchSchema = z.union([z.object({ items: z.array(searchResultSchema) }), z.array(searchResultSchema).transform(items => ({ items }))]);
 
-// GET /api/notifications?limit=20 and POST /api/notifications/read {ids}|{all:true}.
+// GET /api/notifications?limit=20 and POST /api/notifications/read {ids}|{all:true,up_to_id}.
 export const notificationSchema = z.object({
   id: z.union([z.string(), z.number()]).transform(String),
   kind: z.string(),

@@ -50,6 +50,7 @@ FIXTURES = {
             {"index": 1, "file": "custom/words.txt", "kind": "words", "word": "潜江", "pinyin": "qian'jiang", "flag": "dup", "reason": "词库中已有这个词条"},
         ]},
     "/api/dict-prs/9/trim": {"ok": True, "count": 1, "removed": 1, "head_sha": "head10"},
+    "/api/dict-prs/9/approve": {"ok": True, "merged": True, "count": 1, "removed": 1},
     "/api/sensitive-words": {"items": [
         {"id": 2, "pattern": "(微信|vx)[\\s:：]*[a-z0-9_-]{5,}", "is_regex": True, "category": "ad", "level": "block", "created_by": "owner@example.com", "created_at": "2026-09-02T08:00:00Z", "hits_7d": 41},
         {"id": 1, "pattern": "代购", "is_regex": False, "category": "custom", "level": "review", "created_by": "legacy-token", "created_at": "2026-08-20T08:00:00Z", "hits_7d": 0},
@@ -184,6 +185,8 @@ class Handler(BaseHTTPRequestHandler):
     csp = ""
     harness = Path()
     logged_out = False
+    # posts records the path of every POST in arrival order.
+    posts: list[str] = []
 
     def log_message(self, *_args):
         pass
@@ -203,6 +206,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/auth/logout":
             Handler.logged_out = True
         body = FIXTURES.get(path)
+        if path == "/api/me" and self.command == "POST":
+            body = {"ok": True}
         if path == "/api/auth/session" and Handler.logged_out:
             body = {**FIXTURES[path], "authenticated": False, "email": ""}
         if body is None:
@@ -212,6 +217,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(length)
+        Handler.posts.append(self.path.split("?", 1)[0])
         if self.path.startswith("/api/"):
             return self.api()
         return self.send(405, b"", "text/plain")
@@ -483,15 +489,36 @@ def main() -> int:
                 expect(page.get_by_text("msime_pat_••••7c2e", exact=False)).to_be_visible()
                 expect(page.get_by_text("通过了词库 PR #210（5 条）")).to_be_visible()
                 expect(page.get_by_text("当前设备")).to_be_visible()
+                # The badge follows /api/shell once the bell is closed, not the list cached when it was last open, and a notification preference change refreshes it.
+                page.get_by_role("button", name=re.compile("^通知")).click()
+                expect(page.get_by_text("词库 PR #9 等待审核")).to_be_visible()
+                page.keyboard.press("Escape")
+                FIXTURES["/api/shell"]["unread_notifications"] = 3
+                try:
+                    page.get_by_role("switch", name="崩溃告警").click()
+                    expect(page.get_by_role("button", name="通知，3 条未读")).to_be_visible()
+                finally:
+                    FIXTURES["/api/shell"]["unread_notifications"] = 1
                 violations("me")
                 page.get_by_role("button", name="退出登录").click()
                 dialog = page.get_by_role("dialog", name="退出登录？")
                 expect(dialog).to_be_visible()
                 page.keyboard.press("Escape")
                 expect(dialog).to_be_hidden()
+                # Logging out inside a merge's 4s undo window sends the merge first, while the session is still valid.
+                page.goto(base + "/dictpr")
+                expect(page.get_by_role("list", name="#9 的词条")).to_contain_text("江汉油田")
+                page.get_by_role("list", name="词库 PR 列表").get_by_role("button").first.focus()
+                page.keyboard.press("a")
+                expect(page.get_by_text("#9 已通过（1 条）", exact=True)).to_be_visible()
+                page.locator('a[href="/me"]').first.click()
+                page.wait_for_url(base + "/me")
                 page.get_by_role("button", name="退出登录").click()
                 dialog.get_by_role("button", name="退出").click()
                 expect(page.get_by_role("heading", name="水杉管理后台")).to_be_visible()
+                posts = [path for path in Handler.posts if path in ("/api/dict-prs/9/approve", "/api/auth/logout")]
+                if posts != ["/api/dict-prs/9/approve", "/api/auth/logout"]:
+                    problems.append(f"a merge pending at logout must be sent before auth/logout, got {posts}")
                 violations("confirm + logout")
 
                 page.goto(base + "/harness/")
@@ -518,6 +545,22 @@ def main() -> int:
                 expect(page.get_by_test_id("committed")).to_have_text("undone")
                 page.get_by_role("button", name="延迟提交").click()
                 expect(page.get_by_test_id("committed")).to_have_text("yes", timeout=6000)
+                # A plain toast shown while a delayed commit waits neither sends the commit early nor takes away its 撤销.
+                page.get_by_role("button", name="延迟提交").click()
+                page.get_by_role("button", name="普通提示").click()
+                expect(page.get_by_text("这是一条提示", exact=True)).to_be_visible()
+                page.wait_for_timeout(300)
+                expect(page.get_by_test_id("committed")).to_have_text("waiting")
+                page.get_by_role("button", name="撤销").click()
+                expect(page.get_by_test_id("committed")).to_have_text("undone")
+                # Nor does the failure toast of an earlier commit that a newer delayed action sent.
+                page.get_by_role("button", name="延迟失败").click()
+                page.get_by_role("button", name="延迟提交").click()
+                expect(page.get_by_text("操作失败：提交失败", exact=True)).to_be_visible()
+                page.wait_for_timeout(300)
+                expect(page.get_by_test_id("committed")).to_have_text("waiting")
+                page.get_by_role("button", name="撤销").click()
+                expect(page.get_by_test_id("committed")).to_have_text("undone")
                 page.get_by_role("radio", name=re.compile("待处理")).click()
                 expect(page.get_by_text("第三行")).to_be_hidden()
                 page.get_by_text("第一行").click()

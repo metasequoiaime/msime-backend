@@ -149,6 +149,54 @@ func TestNotificationsReadStateIsPerAdmin(t *testing.T) {
 	}
 }
 
+// 全部已读 with up_to_id covers only what the console had on screen: a notification inserted after the list was fetched stays unread.
+func TestNotificationsReadAllStopsAtShownNewest(t *testing.T) {
+	a := notificationTestService(t)
+	ctx := context.Background()
+	for _, kind := range []string{NotifyIssue, NotifyRelease} {
+		if err := a.NotifyNow(ctx, Notification{Kind: kind}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shown := listNotifications(t, a, "a@example.test", "")
+	if len(shown.Items) != 2 || shown.Unread != 2 {
+		t.Fatalf("got %+v", shown)
+	}
+	if err := a.NotifyNow(ctx, Notification{Kind: NotifyIncident}); err != nil {
+		t.Fatal(err)
+	}
+	read := func(body string, status int) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		a.AdminHTTP(w, notificationRequest("POST", "/api/notifications/read", body, "a@example.test"))
+		if w.Code != status {
+			t.Fatalf("read %s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	for _, bad := range []string{`{"up_to_id":"1"}`, `{"ids":["1"],"up_to_id":"1"}`, `{"all":true,"up_to_id":"x"}`, `{"all":true,"up_to_id":0}`, `{"all":true,"up_to_id":null}`} {
+		read(bad, 400)
+	}
+	read(`{"ids":["`+jsonInt(shown.Items[1].ID)+`"]}`, 200)
+	read(`{"all":true,"up_to_id":"`+jsonInt(shown.Items[0].ID)+`"}`, 200)
+	got := listNotifications(t, a, "a@example.test", "")
+	if got.Unread != 1 || got.Items[0].Kind != NotifyIncident || got.Items[0].Read || !got.Items[1].Read || !got.Items[2].Read {
+		t.Fatalf("after read all up to the shown newest: %+v", got)
+	}
+	var markers int
+	if err := a.store.pool.QueryRow(ctx, `SELECT count(*) FROM admin_notification_reads`).Scan(&markers); err != nil || markers != 0 {
+		t.Fatalf("redundant markers %d %v", markers, err)
+	}
+	// An older or vanished up_to_id never moves the watermark back.
+	read(`{"all":true,"up_to_id":"`+jsonInt(shown.Items[1].ID)+`"}`, 200)
+	read(`{"all":true,"up_to_id":"999999999"}`, 200)
+	if n, err := a.UnreadNotifications(ctx, "a@example.test"); err != nil || n != 1 {
+		t.Fatalf("watermark moved: %d %v", n, err)
+	}
+	if n, err := a.UnreadNotifications(ctx, "b@example.test"); err != nil || n != 3 {
+		t.Fatalf("other admin unread %d %v", n, err)
+	}
+}
+
 func TestNotificationsLegacyTokenHasNone(t *testing.T) {
 	a := notificationTestService(t)
 	if err := a.NotifyNow(context.Background(), Notification{Kind: NotifyIssue}); err != nil {

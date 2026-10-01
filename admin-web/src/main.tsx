@@ -17,12 +17,13 @@ const root = document.getElementById("root");
 if (!root) throw new Error("Missing application root");
 createRoot(root).render(<StrictMode>
   <QueryClientProvider client={queryClient}>
-    <AuthProvider>
-      <ToastProvider>
+    {/* ToastProvider wraps AuthProvider so logout can send a delayed commit that is still waiting before the session ends. */}
+    <ToastProvider>
+      <AuthProvider>
         <ConfirmProvider>
           <RouterProvider router={router} />
         </ConfirmProvider>
-      </ToastProvider>
-    </AuthProvider>
+      </AuthProvider>
+    </ToastProvider>
   </QueryClientProvider>
 </StrictMode>);
