@@ -1,0 +1,69 @@
+import { z } from "zod";
+
+const count = z.number().int().nonnegative();
+
+// One group of GET /api/downloads/summary: telemetry rows group reported download events, github_release rows are GitHub Release asset downloads taken from daily snapshots.
+export const downloadRowSchema = z.object({
+  source: z.enum(["telemetry", "github_release"]),
+  platform: z.string(),
+  version: z.string(),
+  artifact: z.string().nullable(),
+  channel: z.string().nullable(),
+  repo: z.string().optional(),
+  tag: z.string().optional(),
+  today: count,
+  week: count,
+});
+export type DownloadRow = z.infer<typeof downloadRowSchema>;
+
+// GET /api/downloads/summary. Days are UTC; mirror_share is null while no download event of the week reports a channel.
+export const downloadsSummarySchema = z.object({
+  day: z.string(),
+  rows: z.array(downloadRowSchema),
+  totals: z.object({ today: count, week: count, github_today: count, github_week: count, mirror_week: count }),
+  mirror_share: z.number().min(0).max(1).nullable(),
+  channel_reported: z.boolean(),
+  snapshot_day: z.string().nullable(),
+  truncated: z.boolean(),
+});
+export type DownloadsSummary = z.infer<typeof downloadsSummarySchema>;
+
+// The platform chips of the design; reported platform names are matched case-insensitively and with common aliases.
+export const platformOptions = [
+  { key: "windows", label: "Windows" },
+  { key: "macos", label: "macOS" },
+  { key: "linux", label: "Linux" },
+  { key: "android", label: "Android" },
+  { key: "ios", label: "iOS" },
+  { key: "harmony", label: "HarmonyOS" },
+] as const;
+
+const platformAliases: Record<string, string> = { win: "windows", win32: "windows", win64: "windows", mac: "macos", osx: "macos", darwin: "macos", harmonyos: "harmony", ohos: "harmony", openharmony: "harmony", iphone: "ios", ipados: "ios" };
+
+// platformKey normalizes a reported platform to a chip key; an unknown platform keeps its lower-cased name and lands under 其他.
+export function platformKey(platform: string): string {
+  const key = platform.trim().toLowerCase();
+  return platformAliases[key] ?? key;
+}
+
+export function platformLabel(platform: string): string {
+  const key = platformKey(platform);
+  return platformOptions.find(option => option.key === key)?.label ?? (platform || "未知平台");
+}
+
+const channelLabels: Record<string, string> = {
+  "cn-mirror": "官网镜像（国内）",
+  website: "官网",
+  github: "GitHub（客户端上报）",
+  "app-store": "App Store",
+  testflight: "TestFlight",
+  appgallery: "AppGallery",
+  "google-play": "Google Play",
+};
+
+// channelLabel names a row's channel: snapshot rows are the GitHub Release channel, telemetry rows use the reported channel key.
+export function channelLabel(row: Pick<DownloadRow, "source" | "channel">): string {
+  if (row.source === "github_release") return "GitHub Release";
+  if (!row.channel) return "未上报渠道";
+  return channelLabels[row.channel] ?? row.channel;
+}

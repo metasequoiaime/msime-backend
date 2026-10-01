@@ -38,6 +38,11 @@ FIXTURES = {
     "/api/notifications/read": {"ok": True},
     "/api/search": {"items": [{"kind": "user", "id": "u1", "title": "smoke-user", "where": "用户账号", "target": "users"}]},
     "/api/auth/logout": {"ok": True},
+    "/api/downloads/summary": {"day": "2026-10-01", "rows": [
+        {"source": "github_release", "platform": "windows", "version": "v0.5.4", "artifact": "msime-windows-x64-setup.exe", "channel": "github", "repo": "metasequoiaime/msime-windows", "tag": "windows-v0.5.4", "today": 812, "week": 5120},
+        {"source": "telemetry", "platform": "windows", "version": "v0.5.4", "artifact": "x64 安装包", "channel": "cn-mirror", "today": 388, "week": 2410},
+        {"source": "telemetry", "platform": "android", "version": "0.1.0", "artifact": None, "channel": None, "today": 0, "week": 3},
+    ], "totals": {"today": 1200, "week": 7533, "github_today": 812, "github_week": 5120, "mirror_week": 2410}, "mirror_share": 0.32, "channel_reported": True, "snapshot_day": "2026-10-01", "truncated": False},
 }
 
 
@@ -138,6 +143,14 @@ def main() -> int:
                     expect(page.get_by_role("complementary", name="后台导航")).to_be_visible()
                     expect(page.locator("header h1")).to_have_text(title)
                     violations(path)
+
+                page.goto(base + "/downloads")
+                expect(page.get_by_role("table", name="下载记录")).to_contain_text("官网镜像（国内）")
+                expect(page.get_by_text("32%", exact=True)).to_be_visible()
+                page.get_by_role("radio", name=re.compile("^Android")).click()
+                page.wait_for_url(re.compile(r"/downloads\?platform=android$"))
+                expect(page.get_by_role("table", name="下载记录")).not_to_contain_text("GitHub Release")
+                violations("downloads")
 
                 for old, new in REDIRECTS.items():
                     page.goto(base + old)
