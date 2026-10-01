@@ -460,6 +460,11 @@ func pluginAudioName(name *string) bool {
 	return name != nil && validPluginFileName(*name) && pluginAudio(*name)
 }
 
+// pluginSampleName limits sound samples to WAV: hosts decode a sample whole before playing it, and only a WAV's length can be checked up front (HarmonyOS silences Ogg samples for that reason). Ogg stays allowed for music tracks.
+func pluginSampleName(name *string) bool {
+	return pluginAudioName(name) && pluginExtension(*name) == "wav"
+}
+
 // validPluginSound follows sound_pack.rs: keys mode needs sounds.default and no sequence; sequence mode needs a sequence of 1 to 128 semitones in -24..24.
 func validPluginSound(table map[string]any, m pluginManifest) ([]string, bool) {
 	mode := "keys"
@@ -479,7 +484,7 @@ func validPluginSound(table map[string]any, m pluginManifest) ([]string, bool) {
 			if name == nil {
 				continue
 			}
-			if !pluginAudioName(name) {
+			if !pluginSampleName(name) {
 				return nil, false
 			}
 			audio = append(audio, *name)
@@ -487,7 +492,7 @@ func validPluginSound(table map[string]any, m pluginManifest) ([]string, bool) {
 	}
 	if m.Sequence != nil {
 		sequence, _ := table["sequence"].(map[string]any)
-		if !pluginKeys(sequence, "sample", "semitones", "advance") || !pluginAudioName(m.Sequence.Sample) || m.Sequence.Semitones == nil {
+		if !pluginKeys(sequence, "sample", "semitones", "advance") || !pluginSampleName(m.Sequence.Sample) || m.Sequence.Semitones == nil {
 			return nil, false
 		}
 		semitones := *m.Sequence.Semitones

@@ -30,7 +30,7 @@ permissions = []
 
 [sounds]
 default = "click.wav"
-enter = "enter.ogg"
+enter = "enter.wav"
 `
 
 const pluginMusicManifest = `schema_version = 1
@@ -110,7 +110,7 @@ func pluginZip(t *testing.T, files ...pluginFile) []byte {
 }
 
 func pluginSoundZip(t *testing.T) []byte {
-	return pluginZip(t, pluginFile{name: "plugin.toml", data: pluginSoundManifest}, pluginFile{name: "click.wav", data: pluginWAV}, pluginFile{name: "enter.ogg", data: pluginOGG}, pluginFile{name: "LICENSE.txt", data: "CC-BY-4.0"})
+	return pluginZip(t, pluginFile{name: "plugin.toml", data: pluginSoundManifest}, pluginFile{name: "click.wav", data: pluginWAV}, pluginFile{name: "enter.wav", data: pluginWAV}, pluginFile{name: "LICENSE.txt", data: "CC-BY-4.0"})
 }
 
 func TestPluginArchiveAcceptsEveryKind(t *testing.T) {
@@ -132,7 +132,7 @@ func TestPluginArchiveAcceptsEveryKind(t *testing.T) {
 
 func TestPluginArchiveRejectsUnsafeArchives(t *testing.T) {
 	manifest := pluginFile{name: "plugin.toml", data: pluginSoundManifest}
-	audio := []pluginFile{{name: "click.wav", data: pluginWAV}, {name: "enter.ogg", data: pluginOGG}}
+	audio := []pluginFile{{name: "click.wav", data: pluginWAV}, {name: "enter.wav", data: pluginWAV}}
 	with := func(extra ...pluginFile) []byte {
 		return pluginZip(t, append(append([]pluginFile{manifest}, audio...), extra...)...)
 	}
@@ -199,7 +199,7 @@ func TestPluginArchiveRejectsUnsafeArchives(t *testing.T) {
 func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 	sound := func(manifest string, files ...pluginFile) []byte {
 		if files == nil {
-			files = []pluginFile{{name: "click.wav", data: pluginWAV}, {name: "enter.ogg", data: pluginOGG}}
+			files = []pluginFile{{name: "click.wav", data: pluginWAV}, {name: "enter.wav", data: pluginWAV}}
 		}
 		return pluginZip(t, append([]pluginFile{{name: "plugin.toml", data: manifest}}, files...)...)
 	}
@@ -227,7 +227,7 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 		{"upper-case key", replace(`kind = "sound"`, `Kind = "sound"`), "invalid_plugin_manifest"},
 		{"unknown key", replace(`author = "Tester"`, `homepage = "https://example.test"`), "invalid_plugin_manifest"},
 		{"other kind's table", replace("[sounds]", "[music]\ntracks = [\"click.wav\"]\n[sounds]"), "invalid_plugin_manifest"},
-		{"unknown nested key", replace(`enter = "enter.ogg"`, `enter = "enter.ogg"`+"\nBackspace = \"click.wav\""), "invalid_plugin_manifest"},
+		{"unknown nested key", replace(`enter = "enter.wav"`, `enter = "enter.wav"`+"\nBackspace = \"click.wav\""), "invalid_plugin_manifest"},
 		{"duplicate key", replace(`author = "Tester"`, `author = "Tester"`+"\nauthor = \"Again\""), "invalid_plugin_manifest"},
 		{"permissions", replace("permissions = []", `permissions = ["network"]`), "invalid_plugin_manifest"},
 		{"permissions string", replace("permissions = []", `permissions = "network"`), "invalid_plugin_manifest"},
@@ -238,13 +238,15 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 		{"control in name", replace(`name = "Clicks"`, `name = "a\tb"`), "invalid_plugin_manifest"},
 		{"long version", replace(`version = "1.0.0"`, `version = "`+strings.Repeat("1", 33)+`"`), "invalid_plugin_manifest"},
 		{"license characters", replace(`license = "CC-BY-4.0"`, `license = "MIT; rm -rf"`), "invalid_plugin_manifest"},
-		{"bad audio magic", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: "hello"}, pluginFile{name: "enter.ogg", data: pluginOGG}), "invalid_plugin_manifest"},
-		{"ogg named wav", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: pluginOGG}, pluginFile{name: "enter.ogg", data: pluginOGG}), "invalid_plugin_manifest"},
-		{"empty audio", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: ""}, pluginFile{name: "enter.ogg", data: pluginOGG}), "invalid_plugin_manifest"},
+		{"bad audio magic", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: "hello"}, pluginFile{name: "enter.wav", data: pluginWAV}), "invalid_plugin_manifest"},
+		{"ogg named wav", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: pluginOGG}, pluginFile{name: "enter.wav", data: pluginWAV}), "invalid_plugin_manifest"},
+		{"empty audio", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: ""}, pluginFile{name: "enter.wav", data: pluginWAV}), "invalid_plugin_manifest"},
 		{"missing audio", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: pluginWAV}), "invalid_plugin_manifest"},
-		{"unreferenced audio", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: pluginWAV}, pluginFile{name: "enter.ogg", data: pluginOGG}, pluginFile{name: "extra.wav", data: pluginWAV}), "invalid_plugin_manifest"},
+		{"unreferenced audio", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: pluginWAV}, pluginFile{name: "enter.wav", data: pluginWAV}, pluginFile{name: "extra.wav", data: pluginWAV}), "invalid_plugin_manifest"},
 		{"unsupported audio", replace(`default = "click.wav"`, `default = "click.mp3"`), "invalid_plugin_manifest"},
-		{"oversized sample", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: pluginWAV + strings.Repeat("\x01", maxSoundSampleBytes)}, pluginFile{name: "enter.ogg", data: pluginOGG}), "plugin_too_large"},
+		{"ogg key sample", sound(strings.Replace(pluginSoundManifest, `enter = "enter.wav"`, `enter = "enter.ogg"`, 1), pluginFile{name: "click.wav", data: pluginWAV}, pluginFile{name: "enter.ogg", data: pluginOGG}), "invalid_plugin_manifest"},
+		{"ogg sequence sample", sound(strings.Replace(pluginSoundManifest, "[sounds]\ndefault = \"click.wav\"\nenter = \"enter.wav\"\n", "mode = \"sequence\"\n[sequence]\nsample = \"tone.ogg\"\nsemitones = [0]\n", 1), pluginFile{name: "tone.ogg", data: pluginOGG}), "invalid_plugin_manifest"},
+		{"oversized sample", sound(pluginSoundManifest, pluginFile{name: "click.wav", data: pluginWAV + strings.Repeat("\x01", maxSoundSampleBytes)}, pluginFile{name: "enter.wav", data: pluginWAV}), "plugin_too_large"},
 		{"keys mode without default", replace(`default = "click.wav"`, `space = "click.wav"`), "invalid_plugin_manifest"},
 		{"sequence semitone range", replace("[sounds]", "mode = \"sequence\"\n[sequence]\nsample = \"click.wav\"\nsemitones = [0, 25]\n[sounds]"), "invalid_plugin_manifest"},
 		{"bad trigger", command(`trigger = "now"`, `trigger = "Now"`), "invalid_plugin_manifest"},
@@ -267,7 +269,7 @@ func TestPluginArchiveRejectsInvalidManifests(t *testing.T) {
 		}
 	}
 	// A valid sequence-mode pack, so the semitone case above fails only on its range.
-	sequence := strings.Replace(pluginSoundManifest, "[sounds]\ndefault = \"click.wav\"\nenter = \"enter.ogg\"\n", "mode = \"sequence\"\n[sequence]\nsample = \"click.wav\"\nsemitones = [0, 2, 4, -24, 24]\nadvance = \"commit\"\n", 1)
+	sequence := strings.Replace(pluginSoundManifest, "[sounds]\ndefault = \"click.wav\"\nenter = \"enter.wav\"\n", "mode = \"sequence\"\n[sequence]\nsample = \"click.wav\"\nsemitones = [0, 2, 4, -24, 24]\nadvance = \"commit\"\n", 1)
 	if _, code := validPluginArchive(sound(sequence, pluginFile{name: "click.wav", data: pluginWAV})); code != "" {
 		t.Fatal("sequence", code)
 	}
