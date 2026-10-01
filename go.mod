@@ -11,9 +11,11 @@ require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/mileusna/useragent v1.3.5
 	github.com/pelletier/go-toml/v2 v2.4.3
 	golang.org/x/image v0.45.0
 	golang.org/x/oauth2 v0.36.0
+	golang.org/x/sync v0.22.0
 )
 
 require (
@@ -34,7 +36,6 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/opentracing/opentracing-go v1.2.1-0.20220228012449-10b1cf09e00b // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 )

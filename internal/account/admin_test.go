@@ -24,7 +24,7 @@ func TestAdminDataAndActions(t *testing.T) {
 		t.Helper()
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
-		r = r.WithContext(WithAdminActor(r.Context(), "google:test:admin@example.test"))
+		r = r.WithContext(adminTestContext(r.Context(), "google:test:admin@example.test"))
 		w := httptest.NewRecorder()
 		if telemetry {
 			a.Telemetry(w, r)

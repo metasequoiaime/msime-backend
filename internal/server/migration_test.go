@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -199,5 +200,127 @@ func TestStartupMigratesCommunityCandidateSkinTablesAddedLater(t *testing.T) {
 				t.Fatal(table, exists, err)
 			}
 		})
+	}
+}
+
+// Every table, column and constraint the admin console added is probed at startup, so a database migrated before any one of them existed gets it created. Objects that public endpoints use are probed by Ready and must heal with the admin host disabled; the admin-only ones heal through AdminReady.
+func TestStartupMigratesAdminConsoleObjectsAddedLater(t *testing.T) {
+	public := []string{
+		"community_reports", "word_submissions", "admin_crash_groups", "admin_notices", "admin_sensitive_words", "admin_sensitive_hits",
+		"community_skins.moderation", "community_skins.moderated_by", "community_resources.previous_moderation", "community_candidate_skins.moderated_at", "community_plugins.moderation_reason",
+		"auth_users.banned_at", "auth_users.ban_reason", "auth_users.banned_by", "auth_sessions.user_agent",
+		"admin_events.artifact", "admin_events.channel", "admin_events.install_id", "admin_events.signature", "admin_events_kind_check",
+	}
+	adminOnly := []string{
+		"admin_roles", "admin_role_permissions", "admin_tokens", "admin_notifications", "admin_notification_reads", "admin_preferences", "admin_service_metrics", "admin_service_daily", "admin_incidents", "release_asset_snapshots",
+		"admin_audit.detail", "admin_members.role", "admin_sessions.id", "admin_sessions.name", "admin_sessions.created_at", "admin_sessions.last_seen_at", "admin_sessions.user_agent",
+	}
+	for _, object := range append(append([]string{}, public...), adminOnly...) {
+		t.Run(object, func(t *testing.T) {
+			admin, schema := disposableSchema(t)
+			ctx := context.Background()
+			db, err := account.Open(ctx, os.Getenv("MSIME_TEST_DATABASE_URL"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+			quoted := pgx.Identifier{schema}.Sanitize()
+			table, column, isColumn := strings.Cut(object, ".")
+			exists := `SELECT to_regclass($1||'.'||$2) IS NOT NULL`
+			args := []any{schema, table}
+			switch {
+			case object == "admin_events_kind_check":
+				_, err = admin.Exec(ctx, "ALTER TABLE "+quoted+".admin_events DROP CONSTRAINT admin_events_kind_check, ADD CONSTRAINT admin_events_kind_check CHECK(kind IN ('download','crash'))")
+				exists = `SELECT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=$1 AND c.conname=$2 AND pg_get_constraintdef(c.oid) LIKE '%session_crash%')`
+			case isColumn:
+				_, err = admin.Exec(ctx, "ALTER TABLE "+quoted+"."+pgx.Identifier{table}.Sanitize()+" DROP COLUMN "+pgx.Identifier{column}.Sanitize()+" CASCADE")
+				exists = `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3)`
+				args = append(args, column)
+			default:
+				_, err = admin.Exec(ctx, "DROP TABLE "+quoted+"."+pgx.Identifier{table}.Sanitize()+" CASCADE")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
+			t.Setenv("TEST_CLIENT_TOKEN", testToken)
+			t.Setenv("TEST_ADMIN_TOKEN", strings.Repeat("q", 48))
+			config := Config{
+				Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
+				Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
+			}
+			if slices.Contains(adminOnly, object) {
+				config.Admin = AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN"}
+			}
+			s, err := New(config)
+			if err != nil {
+				t.Fatalf("missing %s was not migrated at startup: %v", object, err)
+			}
+			s.CloseAccounts()
+			s.Close()
+			var restored bool
+			if err = admin.QueryRow(ctx, exists, args...).Scan(&restored); err != nil || !restored {
+				t.Fatal(object, "not restored", err)
+			}
+		})
+	}
+}
+
+// notificationRows lists the console notifications recorded in schema as "kind page id", oldest first, so a test can check that a GitHub-driven write really reached the bell.
+func notificationRows(t *testing.T, conn *pgx.Conn, schema string) []string {
+	t.Helper()
+	rows, err := conn.Query(context.Background(), `SELECT kind||' '||target_page||' '||target_id FROM `+pgx.Identifier{schema, "admin_notifications"}.Sanitize()+` ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// Rerunning the migration must not add constraints. PostgreSQL 12 re-adds the inline CHECK of ADD COLUMN IF NOT EXISTS on every run, so those checks are added by name; the copies an earlier rerun left on PostgreSQL 12 (name1, name2, ...) are dropped.
+func TestMigrationRerunKeepsConstraints(t *testing.T) {
+	admin, schema := disposableSchema(t)
+	ctx := context.Background()
+	db, err := account.Open(ctx, os.Getenv("MSIME_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		t.Helper()
+		var n int
+		if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=$1`, schema).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	first := count()
+	quoted := pgx.Identifier{schema}.Sanitize()
+	if _, err = admin.Exec(ctx, `ALTER TABLE `+quoted+`.admin_events ADD CONSTRAINT admin_events_artifact_check1 CHECK(length(artifact) BETWEEN 1 AND 64);
+ALTER TABLE `+quoted+`.community_skins ADD CONSTRAINT community_skins_moderation_check1 CHECK(moderation IN ('pending','approved','removed'))`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err = db.Migrate(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n := count(); n != first {
+			t.Fatalf("migration rerun changed the constraint count from %d to %d", first, n)
+		}
+	}
+	for _, name := range []string{"admin_events_artifact_check", "community_skins_moderation_check", "admin_sessions_user_agent_check", "auth_users_ban_reason_check", "community_candidate_skins_visibility_check"} {
+		var exists bool
+		if err = admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=$1 AND c.conname=$2)`, schema, name).Scan(&exists); err != nil || !exists {
+			t.Fatal(name, exists, err)
+		}
 	}
 }

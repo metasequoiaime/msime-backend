@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -41,6 +42,9 @@ var communityCandidateSkinSchema string
 
 //go:embed community_plugin_schema.sql
 var communityPluginSchema string
+
+//go:embed admin_ops_schema.sql
+var adminOpsSchema string
 var ErrInvalid = errors.New("invalid_credentials")
 var ErrLimited = errors.New("rate_limit_exceeded")
 var ErrConflict = errors.New("identity_already_linked")
@@ -162,14 +166,14 @@ func (s *Store) MigrateAs(ctx context.Context, role string) error {
 			return e
 		}
 	}
-	if _, e = tx.Exec(ctx, schema+"\n"+userDataSchema+"\n"+communitySchema+"\n"+adminSchema+"\n"+translationSchema+"\n"+candidateSkinSchema+"\n"+communityCandidateSkinSchema+"\n"+communityPluginSchema); e != nil {
+	if _, e = tx.Exec(ctx, schema+"\n"+userDataSchema+"\n"+communitySchema+"\n"+adminSchema+"\n"+translationSchema+"\n"+candidateSkinSchema+"\n"+communityCandidateSkinSchema+"\n"+communityPluginSchema+"\n"+adminOpsSchema); e != nil {
 		return e
 	}
 	return tx.Commit(ctx)
 }
 func (s *Store) Ready(ctx context.Context) error {
 	var n int
-	return s.pool.QueryRow(ctx, `SELECT count(*) FROM auth_users u
+	if e := s.pool.QueryRow(ctx, `SELECT count(*) FROM auth_users u
  LEFT JOIN user_preferences p ON p.user_id=u.id
  LEFT JOIN user_clipboard_settings cs ON cs.user_id=u.id
  LEFT JOIN user_clipboard c ON c.user_id=u.id
@@ -198,7 +202,38 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN site_settings ss ON false
  LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture||u.avatar_key='' AND ai.updated_at IS NULL
  LEFT JOIN auth_challenges ch ON false AND ch.code_verifier||ch.redirect_uri=''
- LEFT JOIN auth_provider_tokens pt ON false WHERE false`).Scan(&n)
+ LEFT JOIN auth_provider_tokens pt ON false WHERE false`).Scan(&n); e != nil {
+		return e
+	}
+	return s.consoleReady(ctx)
+}
+
+// consoleReady probes what the admin console added to tables and paths that run whether or not the admin host is enabled: community moderation and reports, bans, session user agents, dictionary submissions, the extended telemetry columns and kinds, crash groups, public notices and sensitive words. Any of them missing sends startup through the migration.
+func (s *Store) consoleReady(ctx context.Context) error {
+	if _, e := s.pool.Exec(ctx, `SELECT moderation,previous_moderation,moderation_reason,moderated_by,moderated_at FROM community_skins WHERE false;
+SELECT moderation,previous_moderation,moderation_reason,moderated_by,moderated_at FROM community_resources WHERE false;
+SELECT moderation,previous_moderation,moderation_reason,moderated_by,moderated_at FROM community_candidate_skins WHERE false;
+SELECT moderation,previous_moderation,moderation_reason,moderated_by,moderated_at FROM community_plugins WHERE false;
+SELECT id,kind,item_id,reporter_id,reason,detail,created_at FROM community_reports WHERE false;
+SELECT banned_at,ban_reason,banned_by FROM auth_users WHERE false;
+SELECT user_agent FROM auth_sessions WHERE false;
+SELECT id,pr_number,kind,entries,note,created_at FROM word_submissions WHERE false;
+SELECT artifact,channel,install_id,signature FROM admin_events WHERE false;
+SELECT signature,platform,version,title,status,issue_url,first_seen,last_seen FROM admin_crash_groups WHERE false;
+SELECT id,title,body,targets,channels,status,created_by,created_at,published_at,updated_at FROM admin_notices WHERE false;
+SELECT id,pattern,is_regex,category,level,created_by,created_at FROM admin_sensitive_words WHERE false;
+SELECT word_id,day,count FROM admin_sensitive_hits WHERE false`); e != nil {
+		return e
+	}
+	// The telemetry kinds live in a CHECK constraint, which no SELECT can probe.
+	var current bool
+	if e := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='admin_events'::regclass AND conname='admin_events_kind_check' AND pg_get_constraintdef(oid) LIKE '%session_crash%')`).Scan(&current); e != nil {
+		return e
+	}
+	if !current {
+		return errors.New("admin_events kind constraint predates the active and session kinds")
+	}
+	return nil
 }
 func (s *Store) Rate(ctx context.Context, key string, limit int, window time.Duration) error {
 	var n int
@@ -260,6 +295,23 @@ func (s *Store) completeWith(ctx context.Context, c Challenge, identity Identity
 	if c.LinkUser != "" && uid != "" && uid != c.LinkUser {
 		return Tokens{}, ErrConflict
 	}
+	account := uid
+	if account == "" {
+		account = c.LinkUser
+	}
+	if account != "" {
+		// A banned account can neither sign in nor gain identities. The challenge is still consumed, so the verified credential cannot be replayed. FOR SHARE waits for a ban committing concurrently (it holds the row FOR UPDATE), so a login racing a ban either sees the ban or creates its session before the ban revokes every session.
+		var banned bool
+		if e = tx.QueryRow(ctx, "SELECT banned_at IS NOT NULL FROM auth_users WHERE id=$1 FOR SHARE", account).Scan(&banned); e != nil && !errors.Is(e, pgx.ErrNoRows) {
+			return Tokens{}, e
+		}
+		if banned {
+			if e = tx.Commit(ctx); e != nil {
+				return Tokens{}, e
+			}
+			return Tokens{}, ErrBanned
+		}
+	}
 	if uid == "" {
 		uid = c.LinkUser
 		if uid == "" {
@@ -306,7 +358,8 @@ func newSession(ctx context.Context, tx pgx.Tx, uid string) (Tokens, error) {
 	if e != nil {
 		return t, e
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO auth_sessions(id,user_id,access_hash,refresh_hash,access_expires,expires_at) VALUES($1,$2,$3,$4,now()+interval '15 minutes',now()+interval '30 days')`, randomToken(), uid, hash(t.AccessToken), hash(t.RefreshToken))
+	// The login request's User-Agent, when the handler passed one, lets the console tell the user's devices apart.
+	_, e = tx.Exec(ctx, `INSERT INTO auth_sessions(id,user_id,access_hash,refresh_hash,access_expires,expires_at,user_agent) VALUES($1,$2,$3,$4,now()+interval '15 minutes',now()+interval '30 days',$5)`, randomToken(), uid, hash(t.AccessToken), hash(t.RefreshToken), sessionUserAgent(ctx))
 	return t, e
 }
 func (s *Store) Authenticate(ctx context.Context, token string) (Principal, error) {
@@ -314,9 +367,14 @@ func (s *Store) Authenticate(ctx context.Context, token string) (Principal, erro
 	if len(token) != 64 {
 		return p, ErrInvalid
 	}
-	e := s.pool.QueryRow(ctx, `SELECT user_id,id,created_at FROM auth_sessions WHERE access_hash=$1 AND NOT revoked AND access_expires>now() AND expires_at>now()`, hash(token)).Scan(&p.UserID, &p.SessionID, &p.CreatedAt)
+	var banned bool
+	e := s.pool.QueryRow(ctx, `SELECT s.user_id,s.id,s.created_at,u.banned_at IS NOT NULL FROM auth_sessions s JOIN auth_users u ON u.id=s.user_id WHERE s.access_hash=$1 AND NOT s.revoked AND s.access_expires>now() AND s.expires_at>now()`, hash(token)).Scan(&p.UserID, &p.SessionID, &p.CreatedAt, &banned)
 	if errors.Is(e, pgx.ErrNoRows) {
 		e = ErrInvalid
+	}
+	if e == nil && banned {
+		// Banning revokes every session in the same transaction; this covers a ban written outside the console.
+		return Principal{}, ErrBanned
 	}
 	return p, e
 }
@@ -330,7 +388,15 @@ func (s *Store) Refresh(ctx context.Context, token string) (Tokens, error) {
 	}
 	defer tx.Rollback(ctx)
 	var sid, uid string
-	e = tx.QueryRow(ctx, `SELECT id,user_id FROM auth_sessions WHERE refresh_hash=$1 AND NOT revoked AND expires_at>now() FOR UPDATE`, hash(token)).Scan(&sid, &uid)
+	var revoked, banned bool
+	e = tx.QueryRow(ctx, `SELECT s.id,s.user_id,s.revoked,u.banned_at IS NOT NULL FROM auth_sessions s JOIN auth_users u ON u.id=s.user_id WHERE s.refresh_hash=$1 AND s.expires_at>now() FOR UPDATE OF s`, hash(token)).Scan(&sid, &uid, &revoked, &banned)
+	if e == nil && banned {
+		// The ban revoked this session; the client learns why instead of being sent back to a login that would fail the same way.
+		return Tokens{}, ErrBanned
+	}
+	if e == nil && revoked {
+		e = pgx.ErrNoRows
+	}
 	if errors.Is(e, pgx.ErrNoRows) {
 		// 已轮换令牌被重放时撤销该会话族，已签发的新 access_token 也立即失效。
 		_, e = tx.Exec(ctx, "UPDATE auth_sessions SET revoked=true WHERE id=(SELECT session_id FROM auth_used_refresh WHERE hash=$1)", hash(token))
@@ -437,7 +503,9 @@ func (s *Store) DeleteUser(ctx context.Context, uid string) error {
 	return e
 }
 func (s *Store) Prune(ctx context.Context) {
-	for _, q := range []string{"DELETE FROM admin_login_flows WHERE expires_at<now()", "DELETE FROM admin_sessions WHERE expires_at<now()", "DELETE FROM auth_challenges WHERE expires_at<now()", "DELETE FROM auth_rates WHERE expires_at<now()", "DELETE FROM auth_sessions WHERE expires_at<now()"} {
+	for _, q := range []string{"DELETE FROM admin_login_flows WHERE expires_at<now()", "DELETE FROM admin_sessions WHERE expires_at<now()", "DELETE FROM admin_tokens WHERE expires_at<now()", "DELETE FROM auth_challenges WHERE expires_at<now()", "DELETE FROM auth_rates WHERE expires_at<now()", "DELETE FROM auth_sessions WHERE expires_at<now()",
+		// Activity heartbeats and session ends only feed the overview's last 60 days, so they are kept for telemetryActivityRetentionDays. Downloads and crashes stay: the cumulative counters and crash groups read them.
+		"DELETE FROM admin_events WHERE kind IN ('active','session','session_crash') AND created_at<now()-interval '" + strconv.Itoa(telemetryActivityRetentionDays) + " days'"} {
 		s.pool.Exec(ctx, q)
 	}
 }

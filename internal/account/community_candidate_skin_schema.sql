@@ -19,7 +19,22 @@ CREATE TABLE IF NOT EXISTS community_candidate_skins (
  UNIQUE(owner_id,id)
 );
 -- Databases created before private rows existed: every existing row stays public, and the column-level license check that required assets on every row is replaced by the named one below.
-ALTER TABLE community_candidate_skins ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'public' CHECK(visibility IN ('private','public'));
+ALTER TABLE community_candidate_skins ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'public';
+-- The CHECK constraints of the columns added above, by the names PostgreSQL gives a column constraint. They are added separately because PostgreSQL 12 adds an inline CHECK again on every rerun of ADD COLUMN IF NOT EXISTS even when the column exists; copies an earlier rerun left (name1, name2, ...) are dropped.
+DO $$
+DECLARE c record; d record;
+BEGIN
+ FOR c IN SELECT * FROM (VALUES
+  ('community_candidate_skins','community_candidate_skins_visibility_check','visibility IN (''private'',''public'')')
+ ) v(tbl,name,expr) LOOP
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=c.tbl::regclass AND conname=c.name) THEN
+   EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I CHECK(%s)',c.tbl,c.name,c.expr);
+  END IF;
+  FOR d IN SELECT conname FROM pg_constraint WHERE conrelid=c.tbl::regclass AND contype='c' AND conname ~ ('^'||c.name||'[0-9]+$') LOOP
+   EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I',c.tbl,d.conname);
+  END LOOP;
+ END LOOP;
+END $$;
 -- A released row was last changed when it was published, so updated_at starts from created_at rather than from the migration time.
 DO $$
 BEGIN

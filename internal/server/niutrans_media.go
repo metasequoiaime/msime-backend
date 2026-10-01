@@ -139,7 +139,9 @@ func (s *Server) niuTransUpload(w http.ResponseWriter, r *http.Request, e NiuTra
 	}
 	_ = mw.WriteField("authStr", params["authStr"])
 	_ = mw.Close()
-	b, err := s.niuTransRequest(r, e.URL, http.MethodPost, mw.FormDataContentType(), &body)
+	mr, call := metered(r, "niutrans_"+kind, 0)
+	b, err := s.niuTransRequest(mr, e.URL, http.MethodPost, mw.FormDataContentType(), &body)
+	s.settleMeter(call, json.Valid(b))
 	if err != nil {
 		upstreamError(w, r, err)
 		return
@@ -158,7 +160,8 @@ func (s *Server) niuTransVoiceUpload(w http.ResponseWriter, r *http.Request) {
 	s.niuTransUpload(w, r, s.config.NiuTrans.Voice, "voice")
 }
 
-func (s *Server) niuTransFileRequest(w http.ResponseWriter, r *http.Request, e NiuTransEndpoint, operation, fileNo string) {
+// niuTransFileRequest forwards a status, interrupt, delete or download call for fileNo; service is the metrics key the call is recorded under.
+func (s *Server) niuTransFileRequest(w http.ResponseWriter, r *http.Request, e NiuTransEndpoint, service, operation, fileNo string) {
 	if !s.niuTransEndpoint(w, e) {
 		return
 	}
@@ -190,7 +193,9 @@ func (s *Server) niuTransFileRequest(w http.ResponseWriter, r *http.Request, e N
 		query.Set(key, value)
 	}
 	base.RawQuery = query.Encode()
-	b, contentType, err := s.niuTransRequestWithType(r, base.String(), r.Method, "", nil)
+	mr, call := metered(r, service, 0)
+	b, contentType, err := s.niuTransRequestWithType(mr, base.String(), r.Method, "", nil)
+	s.settleMeter(call, operation == "download" || json.Valid(b))
 	if err != nil {
 		upstreamError(w, r, err)
 		return
@@ -208,35 +213,35 @@ func (s *Server) niuTransFileRequest(w http.ResponseWriter, r *http.Request, e N
 }
 
 func (s *Server) niuTransDocumentStatus(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "status", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "niutrans_document", "status", r.PathValue("file_no"))
 }
 func (s *Server) niuTransDocumentInterrupt(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "interrupt", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "niutrans_document", "interrupt", r.PathValue("file_no"))
 }
 func (s *Server) niuTransDocumentDelete(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "delete", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "niutrans_document", "delete", r.PathValue("file_no"))
 }
 func (s *Server) niuTransDocumentDownload(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "download", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Document, "niutrans_document", "download", r.PathValue("file_no"))
 }
 
 func (s *Server) niuTransImageStatus(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "status", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "niutrans_image", "status", r.PathValue("file_no"))
 }
 func (s *Server) niuTransImageInterrupt(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "interrupt", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "niutrans_image", "interrupt", r.PathValue("file_no"))
 }
 func (s *Server) niuTransImageDownload(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "download", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Image, "niutrans_image", "download", r.PathValue("file_no"))
 }
 func (s *Server) niuTransVoiceStatus(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "status", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "niutrans_voice", "status", r.PathValue("file_no"))
 }
 func (s *Server) niuTransVoiceInterrupt(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "interrupt", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "niutrans_voice", "interrupt", r.PathValue("file_no"))
 }
 func (s *Server) niuTransVoiceDownload(w http.ResponseWriter, r *http.Request) {
-	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "download", r.PathValue("file_no"))
+	s.niuTransFileRequest(w, r, s.config.NiuTrans.Voice, "niutrans_voice", "download", r.PathValue("file_no"))
 }
 
 func (s *Server) niuTransResources(w http.ResponseWriter, r *http.Request) {
@@ -277,7 +282,15 @@ func (s *Server) niuTransRequest(r *http.Request, target, method, contentType st
 	return b, err
 }
 
+// niuTransRequestWithType sends one NiuTrans call; for a request tagged by metered the exchange is captured for the console's service metrics.
 func (s *Server) niuTransRequestWithType(r *http.Request, target, method, contentType string, body io.Reader) ([]byte, string, error) {
+	started := time.Now()
+	b, contentType, err := s.sendNiuTrans(r, target, method, contentType, body)
+	captureMeter(r.Context(), started, err)
+	return b, contentType, err
+}
+
+func (s *Server) sendNiuTrans(r *http.Request, target, method, contentType string, body io.Reader) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(r.Context(), method, target, body)
 	if err != nil {
 		return nil, "", err

@@ -91,7 +91,15 @@ type adminAuthStore interface {
 	AdminSession(context.Context, string) (account.AdminIdentity, error)
 	DeleteAdminSession(context.Context, string) error
 	AdminEmailAllowed(context.Context, string) (bool, error)
+	// AdminMemberRole resolves an enabled member's role and permissions; see account.Service.AdminMemberRole.
+	AdminMemberRole(context.Context, string) (string, []string, error)
+	// AdminTokenIdentity resolves a personal access token (account.AdminTokenPrefix) to its identity.
+	AdminTokenIdentity(context.Context, string) (account.AdminIdentity, error)
 }
+
+// adminGoogleScopes asks for the profile scope only to show the admin's Google name on the console; the avatar is never loaded because the console's CSP allows images from itself only.
+var adminGoogleScopes = []string{oidc.ScopeOpenID, "email", "profile"}
+
 type adminGoogleAuth struct {
 	oauth    oauth2.Config
 	verifier account.Verifier
@@ -107,7 +115,7 @@ func (s *Server) initAdminGoogle() {
 	}
 	keys := oidc.NewRemoteKeySet(oidc.ClientContext(s.lifetime, s.client), "https://www.googleapis.com/oauth2/v3/certs")
 	s.adminGoogle = &adminGoogleAuth{
-		oauth:    oauth2.Config{ClientID: c.ClientID, ClientSecret: c.secret, RedirectURL: c.RedirectURI, Scopes: []string{oidc.ScopeOpenID, "email"}, Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", AuthStyle: oauth2.AuthStyleInParams}},
+		oauth:    oauth2.Config{ClientID: c.ClientID, ClientSecret: c.secret, RedirectURL: c.RedirectURI, Scopes: adminGoogleScopes, Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", AuthStyle: oauth2.AuthStyleInParams}},
 		verifier: oidc.NewVerifier("https://accounts.google.com", keys, &oidc.Config{ClientID: c.ClientID, SupportedSigningAlgs: []string{"RS256"}}),
 	}
 }
@@ -138,9 +146,34 @@ func (s *Server) adminBearer(r *http.Request) bool {
 	expected := sha256.Sum256([]byte(s.config.Admin.token))
 	return s.config.Admin.token != "" && strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare(supplied[:], expected[:]) == 1
 }
+
+// adminPersonalToken returns the personal access token the request carries, if any.
+func adminPersonalToken(r *http.Request) (string, bool) {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return token, ok && strings.HasPrefix(token, account.AdminTokenPrefix)
+}
+
 func (s *Server) adminIdentity(r *http.Request) (string, string, error) {
 	if s.adminBearer(r) {
 		return "legacy-token", "", nil
+	}
+	// A personal access token stands for its holder, whose membership is checked as for a session.
+	if token, ok := adminPersonalToken(r); ok {
+		if s.adminStore == nil {
+			return "", "", account.ErrInvalid
+		}
+		identity, err := s.adminStore.AdminTokenIdentity(r.Context(), token)
+		if err != nil {
+			return "", "", err
+		}
+		allowed, err := s.adminEmailAllowed(r.Context(), identity.Email)
+		if err != nil {
+			return "", "", err
+		}
+		if !allowed {
+			return "", "", account.ErrInvalid
+		}
+		return "pat:" + strings.ToLower(identity.Email), identity.Email, nil
 	}
 	if s.adminGoogle == nil {
 		return "", "", account.ErrInvalid
@@ -164,6 +197,10 @@ func (s *Server) adminIdentity(r *http.Request) (string, string, error) {
 }
 func (s *Server) adminMutationOrigin(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method == "GET" || r.Method == "HEAD" || s.adminBearer(r) {
+		return true
+	}
+	// Bearer tokens are never sent by the browser on its own, so they need no cross-site protection.
+	if _, ok := adminPersonalToken(r); ok {
 		return true
 	}
 	// Cookie authentication requires an explicit same-origin browser request.
@@ -310,6 +347,7 @@ func (s *Server) adminGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	var claims struct {
 		Email    string `json:"email"`
 		Verified bool   `json:"email_verified"`
+		Name     string `json:"name"`
 	}
 	if token.Claims(&claims) != nil || !claims.Verified {
 		denied()
@@ -324,7 +362,7 @@ func (s *Server) adminGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		denied()
 		return
 	}
-	value, err := s.adminStore.CreateAdminSession(r.Context(), account.AdminIdentity{Subject: token.Subject, Email: strings.ToLower(claims.Email)})
+	value, err := s.adminStore.CreateAdminSession(r.Context(), account.AdminIdentity{Subject: token.Subject, Email: strings.ToLower(claims.Email), Name: claims.Name, UserAgent: r.UserAgent()})
 	if err != nil {
 		s.adminAuthError(w, err)
 		return

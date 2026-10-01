@@ -1,22 +1,17 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
-	jose "github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/metasequoiaime/MSIME-Backend/internal/githubapp"
 )
 
 // Outcomes of the GitHub part of a submission. Anything that fails before the first write that could carry entries is errWordsUnavailable (nothing was submitted, the visitor may simply try again). A write that GitHub may or may not have applied is errWordsUncertain and is never retried, because a retry could duplicate the entries.
@@ -45,41 +40,16 @@ type githubResponse struct {
 	body   []byte
 }
 
+// app is the GitHub App the submitter writes as. It is rebuilt from the configuration on every call so the HTTP client and clock stay replaceable, while minted tokens live in the submitter's shared cache.
+func (ws *wordSubmitter) app() githubapp.Client {
+	g := ws.config.GitHub
+	return githubapp.Client{AppID: g.AppID, InstallationID: g.InstallationID, Key: g.key, APIURL: g.APIURL, UserAgent: "MSIME-Backend-word-submissions", HTTP: ws.client, Now: ws.now, Cache: &ws.github}
+}
+
 // githubRequest performs one GitHub REST call. A transport failure is returned as an error with a zero status; HTTP errors are returned as a status for the caller to classify.
 func (ws *wordSubmitter) githubRequest(ctx context.Context, token, method, path string, body any) (githubResponse, error) {
-	var reader io.Reader
-	if body != nil {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			return githubResponse{}, err
-		}
-		reader = bytes.NewReader(raw)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, ws.config.GitHub.APIURL+path, reader)
-	if err != nil {
-		return githubResponse{}, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "MSIME-Backend-word-submissions")
-	req.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := ws.client.Do(req)
-	if err != nil {
-		return githubResponse{}, err
-	}
-	defer resp.Body.Close()
-	// Files come back base64-encoded inside JSON; 8 MiB leaves room for a file several times the size of today's largest, translations.txt.
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20+1))
-	if err != nil {
-		return githubResponse{status: resp.StatusCode}, err
-	}
-	if len(raw) > 8<<20 {
-		return githubResponse{status: resp.StatusCode}, errors.New("GitHub response too large")
-	}
-	return githubResponse{resp.StatusCode, raw}, nil
+	r, err := ws.app().Do(ctx, token, method, path, body)
+	return githubResponse{r.Status, r.Body}, err
 }
 
 func (r githubResponse) ok() bool { return r.status >= 200 && r.status < 300 }
@@ -94,42 +64,15 @@ func phaseError(kind error, phase string, r githubResponse, cause error) error {
 
 // installationToken mints (and caches until shortly before expiry) an installation token restricted to the target repository with only contents:write and pull_requests:write, whatever else the installation may have been granted.
 func (ws *wordSubmitter) installationToken(ctx context.Context) (string, error) {
-	ws.tokenMu.Lock()
-	defer ws.tokenMu.Unlock()
-	now := ws.now()
-	if ws.token != "" && now.Before(ws.tokenExpiry.Add(-5*time.Minute)) {
-		return ws.token, nil
+	token, err := ws.app().Token(ctx, ws.config.GitHub.Repository, map[string]string{"contents": "write", "pull_requests": "write"})
+	switch {
+	case err == nil:
+		return token, nil
+	case errors.Is(err, githubapp.ErrRejected):
+		return "", errors.Join(errWordsMisconfigured, err)
+	default:
+		return "", errors.Join(errWordsUnavailable, err)
 	}
-	g := ws.config.GitHub
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: g.key}, (&jose.SignerOptions{}).WithType("JWT"))
-	if err != nil {
-		return "", err
-	}
-	// GitHub rejects app JWTs that live longer than ten minutes; issuing a minute in the past absorbs clock drift.
-	assertion, err := jwt.Signed(signer).Claims(jwt.Claims{Issuer: strconv.FormatInt(g.AppID, 10), IssuedAt: jwt.NewNumericDate(now.Add(-time.Minute)), Expiry: jwt.NewNumericDate(now.Add(9 * time.Minute))}).Serialize()
-	if err != nil {
-		return "", err
-	}
-	_, name, _ := strings.Cut(g.Repository, "/")
-	r, err := ws.githubRequest(ctx, assertion, "POST", "/app/installations/"+strconv.FormatInt(g.InstallationID, 10)+"/access_tokens", map[string]any{
-		"repositories": []string{name},
-		"permissions":  map[string]string{"contents": "write", "pull_requests": "write"},
-	})
-	if err != nil || r.status >= 500 {
-		return "", phaseError(errWordsUnavailable, "installation token", r, err)
-	}
-	if !r.ok() {
-		return "", phaseError(errWordsMisconfigured, "installation token", r, nil)
-	}
-	var result struct {
-		Token     string    `json:"token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
-	if json.Unmarshal(r.body, &result) != nil || result.Token == "" {
-		return "", phaseError(errWordsUnavailable, "installation token", r, errors.New("invalid response"))
-	}
-	ws.token, ws.tokenExpiry = result.Token, result.ExpiresAt
-	return ws.token, nil
 }
 
 type githubPull struct {

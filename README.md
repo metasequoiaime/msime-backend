@@ -243,7 +243,7 @@ GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and
 
 `GET /v1/community/stats` 公开返回社区内容总量 `{skins,skin_downloads,dictionaries,replies,resource_saves,generated_at}`，供官网服务端拉取后自行缓存。下载与收藏按账号去重，注销账号的作品和互动随之移除；不含用户数和安装包上报（这两项只在管理后台概览提供）。与其他社区接口一样免令牌、按 IP 每分钟 120 次限流、响应禁用缓存，用户体系未启用时返回 503。
 
-`GET /v1/site/download-mirrors` 公开返回官网下载页使用的镜像链接 `{lanzou_url,updated_at}`（未设置时均为空字符串），由管理员在后台「站点设置」中修改。同样免令牌、按 IP 每分钟 120 次限流，但成功响应允许 60 秒公共缓存；详见 [管理后台](docs/admin.md)。
+`GET /v1/site/download-mirrors` 公开返回官网下载页使用的镜像链接 `{lanzou_url,updated_at}`（未设置时均为空字符串），由管理员在后台「站点设置」中修改。同样免令牌，但与 `GET /v1/notices` 共用另一份按 IP 每分钟 1200 次的限流（不占用其他用户接口的 120 次），成功响应允许 60 秒公共缓存；详见 [管理后台](docs/admin.md)。
 
 ### 各平台设置同步
 
@@ -253,4 +253,4 @@ GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and
 
 ## 管理后台
 
-新增内嵌 Go 的 [Admin Web 项目](admin-web/README.md)，随同一镜像、同一端口启动，通过 `admin.msime.app` 独立 Host 提供服务。支持用户与会话管理、下载及崩溃统计、社区皮肤/词库/回复模板管理和操作审计。默认关闭，需要 PostgreSQL 迁移及 Google 管理员白名单（或独立管理员密钥）。配置、域名接入与客户端上报协议见 [管理后台文档](docs/admin.md)。
+新增内嵌 Go 的 [Admin Web 项目](admin-web/README.md)，随同一镜像、同一端口启动，通过 `admin.msime.app` 独立 Host 提供服务。共 14 个页面：数据概览、词库 PR 审核、社区事后审核与举报、GitHub Issue 分诊、敏感词库、用户与封禁、下载记录、公告推送（含 Telegram）、发布管理、云端监控、崩溃分组、系统状态与故障事件、角色权限与操作日志、个人中心与个人访问令牌。默认关闭，需要 PostgreSQL 12 及以上、后台迁移和 Google 管理员白名单（或独立管理员密钥）；GitHub、上游服务额度和 Telegram 渠道按需配置。角色权限、配置项、公开接口（`/v1/notices`、`/v1/community/reports`、遥测）以及需要客户端配合的改动见 [管理后台文档](docs/admin.md)。

@@ -14,7 +14,16 @@
 msime-server -config /config/config.json -migrate-users
 ```
 
-迁移使用事务和 PostgreSQL advisory lock，可重复运行，多副本同时启动也会串行执行、后到的跑成空操作。生产可由运维迁移，再给运行账号授予本数据库的 CONNECT、public schema USAGE 和七张 `auth_*` 表的 SELECT/INSERT/UPDATE/DELETE；运行账号不需要超级用户、建库或建角色权限。连接生产 PostgreSQL 应启用 TLS；使用私有 CA 时挂载 CA 并设置 `sslmode=verify-full&sslrootcert=...`。
+迁移使用事务和 PostgreSQL advisory lock，可重复运行，多副本同时启动也会串行执行、后到的跑成空操作。生产可由运维迁移，再给运行账号授予本数据库的 CONNECT、public schema USAGE，以及迁移建出的所有表的 SELECT/INSERT/UPDATE/DELETE 和所有序列的 USAGE/SELECT；运行账号不需要超级用户、建库或建角色权限。需要授权的不只是 `auth_*` 表：即使没有启用管理后台，启动检查、社区接口、遥测上报和公告接口也会读写用户数据、社区、`admin_*`（如 `admin_events`、`admin_crash_groups`、`admin_notices`、`admin_sensitive_words`、`admin_sensitive_hits`）、`community_reports`、`word_submissions` 和 `site_settings` 等表，缺任何一张的权限，服务都会在启动时报「迁移后仍缺少必需的表」。最简单的做法是在迁移后整体授权，并配置 default privileges 让以后新建的表自动授权：
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO msime_backend;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO msime_backend;
+ALTER DEFAULT PRIVILEGES FOR ROLE msime_migrator IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO msime_backend;
+ALTER DEFAULT PRIVILEGES FOR ROLE msime_migrator IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO msime_backend;
+```
+
+其中 `msime_backend` 是运行账号，`msime_migrator` 是执行迁移的账号，按实际角色名替换。管理后台各表的说明见 [admin.md](admin.md) 的部署步骤。连接生产 PostgreSQL 应启用 TLS；使用私有 CA 时挂载 CA 并设置 `sslmode=verify-full&sslrootcert=...`。
 
 数据库保存用户、身份、验证码摘要、会话摘要和限流计数；不保存明文验证码或会话令牌，不按同名邮箱自动合并第三方身份。服务每小时清理过期挑战、会话和限流计数。数据库需要纳入备份；本服务不提供数据备份功能。
 
@@ -39,6 +48,6 @@ msime-server -config /config/config.json -migrate-users
 6. `PATCH /v1/users/me`：`{"display_name":"昵称"}`，最长 64 字符。
 7. 绑定其他身份：创建挑战时使用 `purpose: link`，创建和验证均携带同一用户的访问令牌。绑定与 `DELETE /v1/users/me` 注销操作均要求最近 10 分钟内重新登录。注销删除用户、身份、会话及关联挑战。
 
-验证码最多尝试五次，每个目标每分钟一次、每小时五次、每天十次，全服务每天最多发送 500 次。邮箱地址统一转为小写。用户接口按 TCP 对端每分钟最多 120 次，不信任转发头；部署在反向代理后，同一代理的请求共享此额度。
+验证码最多尝试五次，每个目标每分钟一次、每小时五次、每天十次，全服务每天最多发送 500 次。邮箱地址统一转为小写。用户接口按 TCP 对端每分钟最多 120 次，不信任转发头；部署在反向代理后，同一代理的请求共享此额度。公开的 `GET /v1/notices` 和 `GET /v1/site/download-mirrors` 另用一份每分钟 1200 次的额度，轮询它们不占用这 120 次。
 
 本地设置 `docs_enabled: true` 后，Swagger `/swagger/` 包含所有用户接口。生产环境默认关闭文档。未完成生产提供方配置时，不应宣称相应登录已经可用。测试使用本地签名 JWT、模拟短信和 SMTP 服务以及真实 PostgreSQL，不替代生产供应商联调。

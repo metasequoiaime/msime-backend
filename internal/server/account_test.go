@@ -91,6 +91,29 @@ func TestUserSessionAuthorizesAPIAndDeviceCannotManageUsers(t *testing.T) {
 			t.Fatalf("%s: got %d want %d", tc.path, w.Code, tc.status)
 		}
 	}
+	// A ban written straight into the database leaves the session alive; the bearer middleware tells the client the account is banned instead of asking it to sign in again.
+	bannedSum := sha256.Sum256([]byte(id + "banned"))
+	bannedChallenge := account.Challenge{IDHash: hex.EncodeToString(bannedSum[:]), Provider: "email", Subject: "banned-" + id + "@example.com"}
+	if e = db.PutChallenge(ctx, bannedChallenge); e != nil {
+		t.Fatal(e)
+	}
+	banned, e := db.Complete(ctx, bannedChallenge, account.Identity{Provider: "email", Subject: bannedChallenge.Subject})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.DeleteUser(ctx, banned.User.ID)
+	if _, e = admin.Exec(ctx, "UPDATE "+quoted+".auth_users SET banned_at=now(),ban_reason='manual' WHERE id=$1", banned.User.ID); e != nil {
+		t.Fatal(e)
+	}
+	for _, path := range []string{"/v1/capabilities", "/v1/users/me"} {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Header.Set("Authorization", "Bearer "+banned.AccessToken)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 403 || !strings.Contains(w.Body.String(), "account_banned") {
+			t.Fatalf("%s for a banned account: %d %s", path, w.Code, w.Body.String())
+		}
+	}
 	p, e := db.Authenticate(ctx, tokens.AccessToken)
 	if e != nil {
 		t.Fatal(e)

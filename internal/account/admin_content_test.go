@@ -32,7 +32,7 @@ func TestAdminContentDetails(t *testing.T) {
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
-		a.AdminHTTP(w, r)
+		a.AdminHTTP(w, r.WithContext(adminTestContext(r.Context(), "legacy-token")))
 		return w
 	}
 	for _, tc := range []struct {

@@ -1,12 +1,14 @@
 # 管理后台
 
-`admin-web/` 与官网 MSIME-Web 使用相同核心技术栈：React 19、TypeScript、Vite 8、Sass、TanStack Router / Query、Zod、pnpm 10.15 和 Biome。Router 负责页面路由，Query 负责请求缓存与变更刷新，Zod 校验 API 响应。Vite 生成 `dist/`，`embed.go` 将产物嵌入 Go 二进制；Docker 在 Node 构建阶段重新构建前端，再编译进 Go 镜像。与现有 HTTP 服务共用端口，不需要单独启动 Node、前端容器或静态文件服务器。
+管理后台是挂在独立域名（默认 `admin.msime.app`）上的单页应用，源码在 `admin-web/`。技术栈：React 19、TypeScript、Vite 8、Tailwind CSS v4、TanStack Router / Query / Table、Radix UI、Recharts、Zod、react-hook-form、cmdk、date-fns、lucide-react、pnpm 10.15 和 Biome，不再使用 Sass。Vite 生成 `admin-web/dist/`，`admin-web/embed.go` 把产物嵌入 Go 二进制；Docker 在 Node 构建阶段重新构建前端，再编译进 Go 镜像。后台与现有 HTTP 服务共用端口，不需要单独启动 Node、前端容器或静态文件服务器。
+
+后台页面受严格 CSP 约束：`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`。不允许 eval、内联样式表和外链图片，所以不显示 Google 头像，Zod 以 jitless 模式运行，也不使用会注入 `<style>` 的 Radix Overlay。
 
 ## 启用与部署
 
-1. 配置现有 PostgreSQL 用户体系（`auth.enabled: true`），设置 `MSIME_DATABASE_URL` 与 `MSIME_AUTH_PEPPER`。
-2. 在 Google Cloud 项目中创建 Web OAuth 客户端，授权重定向 URI 设为 `https://admin.msime.app/api/auth/google/callback`；只使用 `openid email` 登录范围。将 Client Secret 保存到部署环境的 `MSIME_ADMIN_GOOGLE_SECRET`，将管理员邮箱白名单保存到 `MSIME_ADMIN_GOOGLE_EMAILS`（逗号分隔）。
-3. 在原有配置中加入：
+1. 启用现有 PostgreSQL 用户体系（`auth.enabled: true`），设置 `MSIME_DATABASE_URL` 与 `MSIME_AUTH_PEPPER`。数据库最低版本为 PostgreSQL 12，见下文「PostgreSQL 兼容性」。
+2. 在 Google Cloud 项目中创建 Web OAuth 客户端，授权重定向 URI 设为 `https://admin.msime.app/api/auth/google/callback`。登录范围是 `openid email profile`，`profile` 只用来在外壳和个人中心显示管理员的 Google 名字。把 Client Secret 保存到 `MSIME_ADMIN_GOOGLE_SECRET`，把所有者邮箱白名单保存到 `MSIME_ADMIN_GOOGLE_EMAILS`（逗号分隔）。
+3. 在配置中加入 `admin` 块。下面是包含全部配置项的示例，各块的含义见「配置」一节：
 
    ```json
    "admin": {
@@ -18,13 +20,31 @@
        "secret_env": "MSIME_ADMIN_GOOGLE_SECRET",
        "redirect_uri": "https://admin.msime.app/api/auth/google/callback",
        "allowed_emails_env": "MSIME_ADMIN_GOOGLE_EMAILS"
+     },
+     "environment": "生产环境",
+     "github": {
+       "app_id": 123456,
+       "installation_id": 7890123,
+       "private_key_env": "MSIME_ADMIN_GITHUB_APP_KEY",
+       "dictionary_repo": "metasequoiaime/msime-dictionary",
+       "issue_repos": ["metasequoiaime/msime", "metasequoiaime/msime-windows"],
+       "platforms": [
+         {"id": "windows", "name": "Windows", "repo": "metasequoiaime/msime-windows", "tag_prefix": "windows-v", "release_workflow": "release.yml", "assignee": "houko", "label": "windows"}
+       ]
+     },
+     "services": [
+       {"key": "translation", "name": "翻译", "provider": "DeepL", "quota": {"limit": 500000, "unit": "chars", "period": "month", "unit_price": 0}, "slow_ms": 3000}
+     ],
+     "telegram": {
+       "bot_token_env": "MSIME_ADMIN_TELEGRAM_TOKEN",
+       "chat_id": "@msime_news"
      }
    }
    ```
 
-4. Google 登录模式不需要设置 `MSIME_ADMIN_TOKEN`。如果保留它，界面会额外提供管理员密钥登录作为兼容入口；不配置 Google 时仍需要至少 32 字节的独立随机管理员密钥。不要将任何密钥放进前端源码、安装包或版本库。
-5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表会自己补上。运行账号按最小权限只有 DML 时，仍需先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`（镜像中可在正常入口后追加 `-migrate-users`）。迁移是幂等的；后台启用而表既不存在又补不上时，服务拒绝启动并在错误里说明原因。
-6. 正常启动镜像；容器中的 `listen` 应为 `0.0.0.0:8080`。配置 `admin.msime.app` 的 DNS 指向入口，并在入口终止 HTTPS，将该域名的请求转发到相同的 Go 端口，保留原始 Host。Go 不信任 `X-Forwarded-Host`。
+4. Google 登录模式不需要 `MSIME_ADMIN_TOKEN`。保留它时，登录页额外提供「管理员密钥登录」作为兼容入口；不配置 Google 时仍需要至少 32 字节的独立随机管理员密钥。管理员密钥不能以 `msime_pat_` 开头，这个前缀留给个人访问令牌，配置校验会拒绝。不要把任何密钥放进前端源码、安装包或版本库。
+5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表或列，会自动执行 `internal/account/admin_schema.sql` 和 `internal/account/admin_ops_schema.sql`，两者都是幂等的追加式迁移。运行账号按最小权限只有 DML 时，先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`，再给运行角色授予新表的 `SELECT, INSERT, UPDATE, DELETE` 以及 bigserial 序列的 `USAGE, SELECT`。新表包括 `admin_roles`、`admin_role_permissions`、`admin_tokens`、`admin_notifications`、`admin_notification_reads`、`admin_preferences`、`admin_notices`、`admin_crash_groups`、`admin_service_metrics`、`admin_service_daily`、`admin_incidents`、`admin_sensitive_words`、`admin_sensitive_hits`、`release_asset_snapshots`、`community_reports`、`word_submissions` 和 `site_settings`；已有的 `admin_members`、`admin_sessions`、`admin_audit`、`admin_events` 和四张社区表新增了列。后台启用而表既不存在又补不上时，服务拒绝启动并在错误里说明原因。
+6. 正常启动镜像，容器中的 `listen` 应为 `0.0.0.0:8080`。把 `admin.msime.app` 的 DNS 指向入口，在入口终止 HTTPS，把该域名的请求转发到相同的 Go 端口，并保留原始 Host。Go 不信任 `X-Forwarded-Host`。
 
 示例 Nginx HTTPS 虚拟主机（证书路径、后端地址按部署调整）：
 
@@ -41,130 +61,343 @@ server {
 }
 ```
 
-浏览器访问 `https://admin.msime.app`，点击“使用 Google 账号登录”。Google 验证完成后，后端校验 ID Token 的签名、issuer、audience、有效期、nonce，以及 `email_verified` 和邮箱白名单。普通 Google 用户不会因此成为管理员，也不会自动创建普通输入法用户账户。支持配置 `allowed_emails` 数组；配置 `allowed_emails_env` 时以环境变量为准。
+默认 `admin.enabled: false`，不会改变已有域名的路由。后台域名不承载 `/v1/*` 客户端 API。
 
-授权码流程使用 PKCE S256 和一次性 state；state 与浏览器 HttpOnly Cookie 绑定，并在数据库中保留 10 分钟。管理员会话在 PostgreSQL 中仅存令牌哈希，有效期固定为 8 小时；浏览器使用 Secure、HttpOnly、SameSite=Lax、无 Domain 的 `__Host-` Cookie，页面刷新可恢复登录。每个请求重新校验当前权限：部署白名单指定超级管理员，数据库中启用的 `admin_members` 指定普通管理员。删除部署白名单账号并重启所有副本后，其旧会话不再具有超级管理员权限；若同一邮箱仍有普通管理员记录，则按该记录判定访问权限。退出会删除服务端会话；Cookie 管理写操作还要求 Origin 与配置的回调来源完全相同。过期登录流程和会话按现有每小时清理任务回收。
+本地私密配置可放在 `config.admin.local.json` 和 `.env.admin.local`（均被 Git 忽略）。Go 不自动加载 `.env`，可由部署工具注入，或在本机先 `set -a; . ./.env.admin.local; set +a`。
 
-审计的 `actor` 记录 Google subject 与邮箱，旧数据和管理员密钥操作记为 `legacy-token`。Google Client Secret 和授权令牌不会返回给前端。此处遵循 [Google OpenID Connect 服务端流程](https://developers.google.com/identity/openid-connect/openid-connect)。
+### PostgreSQL 兼容性
 
-所有后台 `/api/*` 均校验管理员权限（仅登录元数据、开始登录、回调与退出接口有各自认证流程），普通用户/设备令牌无权访问。后台域名不承载 `/v1/*` 客户端 API。默认 `admin.enabled: false`，不会改变已有域名路由。
+后台的全部迁移和查询都兼容 PostgreSQL 12 及以上版本：
 
-登录端点：
+- 不使用 PostgreSQL 13 才进入核心的 `gen_random_uuid()`。`admin_sessions.id` 这类短随机句柄由 `left(md5(random()::text||clock_timestamp()::text),16)` 生成。
+- 社区皮肤相关表用到生成列，要求 12 及以上，这也是整个服务的最低版本。
+- 在 `ADD COLUMN IF NOT EXISTS` 里写 `REFERENCES` 并非在所有版本上都受 `IF NOT EXISTS` 保护，所以外键（如 `admin_members.role → admin_roles`）放在 `DO` 块里，先查 `pg_constraint` 再单独添加；放宽 `admin_events.kind` 的 CHECK 约束也是同样的写法。
+- 迁移可以重复执行。内置角色的默认权限只在创建角色行的那条语句里写入，之后在后台改过的权限矩阵不会被重跑的迁移覆盖。
+
+## 登录、身份与令牌
+
+后台有三种身份。每个 `/api/*` 请求都会重新解析身份和权限，所以改角色、停用成员、从白名单删除所有者都即时生效。
+
+| 身份 | 认证方式 | 审计中的 actor | 角色与权限 |
+| --- | --- | --- | --- |
+| 所有者 | Google 登录，邮箱在 `google.allowed_emails` / `allowed_emails_env` 中 | `google:<sub>:<email>` | 恒为维护者，拥有全部 8 项权限，不受权限矩阵影响 |
+| 成员 | Google 登录或个人访问令牌，邮箱在已启用的 `admin_members` 中 | `google:<sub>:<email>` 或 `pat:<email>` | `admin_members.role` 对应角色在权限矩阵中的权限 |
+| 管理员密钥 | `Authorization: Bearer <MSIME_ADMIN_TOKEN>` | `legacy-token` | 维护者，拥有除 `manage_permissions` 以外的全部权限；没有个人中心 |
+
+Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效期、nonce、`email_verified`，以及邮箱是否在白名单或 `admin_members` 中。授权码流程使用 PKCE S256 和一次性 state；state 与浏览器 HttpOnly Cookie 绑定，在数据库中保留 10 分钟。管理员会话在 PostgreSQL 中只存令牌哈希，有效期固定 8 小时；浏览器使用 Secure、HttpOnly、SameSite=Lax、无 Domain 的 `__Host-` Cookie。会话另外记录创建时间、最近活动时间（每 5 分钟最多更新一次）、截断到 256 字符的 User-Agent 和 Google 名字，供个人中心显示和吊销。Cookie 会话发起的写请求要求 `Origin` 与回调地址的来源完全相同，否则返回 403 `origin_required`；后台的访问地址（协议和域名）与 `admin.google.redirect_uri` 不一致时，所有写操作都会因此失败。普通 Google 用户不会因此成为管理员，也不会自动创建输入法用户账户。Google Cloud 项目处于测试发布状态时，需要把管理员加入测试用户。此处遵循 [Google OpenID Connect 服务端流程](https://developers.google.com/identity/openid-connect/openid-connect)。
 
 | 端点 | 用途 |
 | --- | --- |
-| `GET /api/auth/session` | 返回登录状态、管理员邮箱和启用的登录方式 |
-| `GET /api/auth/google/start` | 创建 state/nonce/PKCE，跳转到 Google |
+| `GET /api/auth/session` | 登录状态、版本号、管理员邮箱和启用的登录方式 |
+| `GET /api/auth/google/start` | 创建 state、nonce 和 PKCE，跳转到 Google |
 | `GET /api/auth/google/callback` | 校验回调并创建管理员会话 |
 | `POST /api/auth/logout` | 删除服务端会话并清除 Cookie |
 
-OAuth 客户端只允许配置固定回调。生产反向代理必须保持 Host，不应改写回调路径。Google Cloud 如果仍处于测试发布状态，需要将管理员加入该项目的测试用户；只有基础登录范围通常不涉及敏感 API 访问。真实 Google 回调验证需要新服务已在上述 HTTPS 域名上线。
+### 个人访问令牌（PAT）
 
-本地私密配置可放在 `config.admin.local.json` 和 `.env.admin.local`（均被 Git 忽略）。使用前将现有部署的数据库、验证码密钥和客户端认证配置合并进去；Go 不自动加载 `.env`，可由部署工具注入或在本机先 `set -a; . ./.env.admin.local; set +a`。不要把本地凭据文件提交到仓库。
+所有者和成员可以在个人中心生成个人访问令牌，用脚本调用后台 API：
 
-## 功能与统计口径
+- 格式为 `msime_pat_` 加 64 位十六进制，共 74 个字符。完整令牌只在生成时返回一次，数据库只存哈希和末 4 位。
+- 有效期 30 天。重新生成会在同一事务里删除该邮箱的旧令牌，所以每人同时只有一个有效令牌。
+- 用法：向后台域名发送 `Authorization: Bearer msime_pat_…`。令牌请求不需要 `Origin`，因为浏览器不会自动携带 Bearer 头，不存在跨站风险。
+- 令牌没有独立的权限：每次请求都按该邮箱当前是否为所有者、以及 `admin_members` 记录重新判定，成员被停用后令牌立即失效。审计 actor 记为 `pat:<email>`，限流也按这个 actor 单独计。
+- 用令牌访问个人中心时（`GET /api/me` 返回 `via: "token"`），资料和「安全」卡片标明为个人访问令牌访问，不显示 Google 两步验证状态；令牌不能为自己续期，重新生成只能在浏览器登录会话中操作。
+- 管理员密钥身份没有个人中心，不能生成令牌。
 
-- 数据总览：累计注册账户、近 30 天注册数、持有有效会话的用户、安装包下载上报、崩溃及待处理数、社区皮肤、共享词库、回复模板和资源收藏。有效会话用户不是 DAU。
-- 30 天趋势：UTC 自然日，每天的注册、下载上报和崩溃上报；图表展示下载，展开明细可看全部指标。
-- 用户：搜索、分页、撤销全部会话（包括刷新令牌）；不展示邮箱/手机号、私人词典或剪贴板。
-- 社区皮肤、词库与模板：查看列表与统计，删除公开内容。删除是永久操作，浏览器会要求确认，并连带删除对应下载/收藏/评分，所以这些社区统计反映当前留存记录。内置文件皮肤和引擎词库仍通过现有构建/配置管理。
-- 候选窗皮肤包：`GET /api/candidate-skins` 列出用户上传的候选窗皮肤包（ID、package_id、名称、发布者、图片总大小、文件数、可见性 `visibility`、发布时间和更新时间 `updated_at`），包括公开作品和账号同步上来的私有作品；`visibility=public|private` 只列其中一种，留空表示全部，该筛选只适用于这个列表。`delete_candidate_skin` 操作永久删除作品及其图片、下载和评分记录并写入审计。公开作品发布即公开，这是事后下架的途径；管理后台网页暂未提供对应页面，需直接调用 API。
-- 社区插件：`GET /api/plugins` 列出用户上传的插件包（ID、kind、plugin_id、名称、版本、发布者、大小、SHA-256、下载人数和发布时间）；`delete_plugin` 操作永久删除插件及其下载和评分记录并写入审计。总览另返回 `plugins` 和 `plugin_downloads` 计数。管理后台网页暂未提供对应页面，需直接调用 API。详见 [插件社区](plugin-community.md)。
-- 崩溃：版本、平台、错误及堆栈详情，标记已处理或重新打开。
-- 审计：管理变更与审计写入在同一数据库事务中，失败不部分生效。
-- 列表：每页 50 条、搜索、匹配总数、前后分页及重置筛选；最大 10000 页。处理或删除后当前页为空会自动回退至有效页。
+## 角色与权限
 
-总览接口支持按需缩短趋势查询范围：`GET /api/overview?days=7` 或 `GET /api/overview?days=30`，只接受这两个值；响应的 `range_days` 与 `daily` 数组反映实际范围。省略参数时默认为 30 天。
+权限共 8 项，与「权限日志」页的矩阵一一对应：
 
-`GET /api/system` 为管理员提供只读运行状态，展示后端版本、账号服务、输入法引擎与资源、云候选、对话、翻译及语音能力是否已配置。接口不会返回上游 URL、模型名、环境变量名或密钥；Admin 的「系统状态」页面直接使用该接口。
-- 下载与崩溃列表支持 `platform`（最长 32 字节）、`version`（最长 64 字节）精确匹配；崩溃另支持 `status=open|resolved`，留空表示全部。筛选可与关键词 `q` 组合，非法参数或不适用的筛选返回 400。列表响应新增 `total`，与当页内容使用同一数据库快照计算。
-- 操作日志支持 `action` 精确筛选和 `actor` 模糊筛选，便于按管理员或操作类型追查变更；这两个筛选只适用于 `audit` 列表。
+| 权限键 | 含义 |
+| --- | --- |
+| `review_dict_pr` | 词库 PR 的精简、通过和驳回 |
+| `review_community` | 社区内容的通过、下架、恢复和删除；敏感词库的增删改 |
+| `triage_issues` | Issue 分诊与回复；崩溃分组状态和为崩溃分组建 Issue；旧崩溃列表的处理；故障事件的开启、更新和恢复 |
+| `ban_users` | 封禁、解封用户，吊销用户会话 |
+| `publish_notices` | 发布、归档公告；修改官网下载镜像链接（`POST /api/site-settings`） |
+| `trigger_release` | 触发发布流水线、编辑发布说明、撤回版本 |
+| `view_cloud_usage` | 读取云端监控（`GET /api/cloud`），这是唯一受权限限制的读接口 |
+| `manage_permissions` | 修改权限矩阵 |
 
-安装包下载目前以新上报事件为数据来源，不会自动从 CDN、GitHub Release 或应用商店回填历史数据。皮肤下载沿用原有 `(skin_id,user_id)` 去重，资源收藏沿用 `(resource_id,user_id)`；不能与安装包下载混为一个总量。
+内置 4 个角色，默认矩阵如下（✓ 为拥有）：
 
-## 客户端数据接入
+| 权限 | 维护者 `maintainer` | 审核志愿者 `reviewer` | 运营/客服 `operator` | 只读 `readonly` |
+| --- | --- | --- | --- | --- |
+| `review_dict_pr` | ✓ | ✓ | | |
+| `review_community` | ✓ | ✓ | | |
+| `triage_issues` | ✓ | ✓ | ✓ | |
+| `ban_users` | ✓ | | ✓ | |
+| `publish_notices` | ✓ | | ✓ | |
+| `trigger_release` | ✓ | | | |
+| `view_cloud_usage` | ✓ | | ✓ | ✓ |
+| `manage_permissions` | ✓ | | | |
 
-向现有 API 域名发送 `POST /v1/telemetry/events`，携带现有设备或用户 Bearer 令牌：
+规则：
 
-```json
-{
-  "id": "8ff0faf8-5c26-4a15-bff5-e11c92bac154",
-  "kind": "download",
-  "platform": "windows",
-  "version": "1.0.0"
-}
+- 除 `GET /api/cloud` 外，所有 GET 请求对所有角色开放，「只读」角色就是靠这一点成立的。缺少权限的写操作返回 403 `permission_denied`，前端对应按钮置灰并提示所需权限，云端监控在侧栏和搜索中对没有 `view_cloud_usage` 的角色隐藏。
+- 维护者的 `manage_permissions` 不能收回（409 `protected`），迁移也会在它缺失时补回。权限矩阵通过 `POST /api/permissions {action: grant|revoke, role, permission}` 修改。
+- 所有者恒为维护者，不能在后台修改、停用或撤销（403 `protected_owner`），恢复入口始终在部署配置里。
+- 成员的增删、启停和改角色走 `GET/POST /api/admins`，只有所有者能调用。请求体为 `{"email","action":"add|enable|disable|revoke|set_role","role"?}`：`add` 可带 `role`（默认维护者），`set_role` 必须带 `role`。最多 100 个成员（409 `admin_limit`），重复添加返回 409 `admin_exists`。停用不删除记录，重新启用后需重新登录。添加、启用、停用和撤销都会删除该邮箱已有的后台会话和个人访问令牌，所以从配置中移除的前所有者被重新添加为成员时，旧凭据不会复活。成员记录不创建输入法用户账户，也不发送邀请邮件，被添加者直接用 Google 账号登录。
+- 引入角色之前已有的成员在迁移时成为维护者，权限不变。
+- `save_notice_draft` 不需要权限，任何角色都能写草稿，发布才需要 `publish_notices`。个人中心的偏好、会话和令牌操作也不需要权限，只作用于本人。
+
+## 限流与通用约定
+
+- 限流按身份分桶：`admin:<actor>`，每分钟 300 次，超限返回 429 `rate_limit_exceeded` 并带 `Retry-After: 60`。以前是所有管理员共享一个每分钟 120 次的桶；外壳每 60 秒轮询一次，多人同时在线会互相挤占，所以改为按人计。同一个人的多个 Google 会话共享一个桶，PAT 另算一个桶。
+- 登录相关端点（`/api/auth/*`）仍按来源 IP 计，每分钟 120 次。
+- 每个后台请求有 15 秒的服务端超时。
+- 数据库写操作统一经过 `POST /api/actions`，请求体为 `{"action","id"?,"user_id"?,"ids"?: [≤100],"reason"?: ≤500 字,"section"?,"value"?: JSON}`，拒绝未知字段。`value` 一般不超过 8 KiB，`save_notice_draft` 和 `publish_notice` 放宽到 256 KiB，以容纳 20000 字的公告正文。批量操作在单个事务内完成，审计与变更同事务写入，失败不部分生效。涉及 GitHub 的操作走各自的 REST 子路径，例如 `POST /api/dict-prs/{n}/approve`。
+- 错误响应形如 `{"error":{"code","message"}}` 或 `{"error":"code"}`。前端的中文提示集中在 `admin-web/src/api/client.ts` 的 `codeMessages` 里，页面只在语境需要不同措辞时覆盖个别代码。
+- 可逆操作（社区状态、Issue 标签、封禁、崩溃状态）完成后，提示条提供 4 秒「撤销」，调用服务端的反向操作。不可逆操作（合并、驳回词库 PR，为崩溃分组建 Issue）延迟 4 秒才真正发出，期间点「撤销」即取消。在此期间又做了一个可撤销或延迟的操作时，前一个立即发出；普通提示（包括前一个延迟操作的失败提示）显示在它上方，不会提前发出它，也不会遮住它的「撤销」。退出登录前会先发出并等它完成；关闭页面时立即以 keepalive 请求发出。
+
+## 外壳
+
+外壳由 `GET /api/shell` 一次性提供，每 60 秒刷新：版本号、环境标签（`admin.environment`）、本人邮箱、名字、角色和权限、侧栏待处理角标（词库 PR、社区待复核、待分诊 Issue）、未读通知数和后端状态（`ok`、`degraded`、`down`；前端也接受 `unknown` 并显示「状态未知」）。
+
+- 全局搜索（按 `/` 聚焦）：前端匹配页面名，`GET /api/search?q=` 最多返回 8 条，覆盖用户、社区内容、崩溃分组、敏感词、公告，以及内存缓存中的 GitHub PR、Issue 和 Release。结果通过 `?focus=<id>` 打开对应页面的详情。
+- 通知：`GET /api/notifications?limit=20`，`POST /api/notifications/read {ids}|{all:true,up_to_id?}`。「全部已读」带上列表中最新一条通知的 `up_to_id`，只把创建时间不晚于它的通知标为已读，打开列表之后才到的通知仍是未读；不带 `up_to_id` 时标记到服务端当前时间。通知列表每次打开都重新加载；角标在弹层关闭时跟随外壳的 60 秒轮询，在个人中心切换通知偏好后立即刷新。来源包括新举报（与举报同事务写入）、新词库 PR、崩溃分组 7 天环比上升超过 20%（每小时检查，同一分组 7 天内只提醒一次）、自动开启的故障事件、Release 状态变化和新 Issue。个人中心可以按类型关闭词库 PR、举报和崩溃提醒。新加入的管理员会看到全部历史通知为未读。
+- 外观：浅色、深色或跟随系统；配色可选春、夏、秋、冬或「自动」。自动配色按本地月份切换（3–5 月春，6–8 月夏，9–11 月秋，12–2 月冬），页面一直开着跨过月份边界时也会自动切换。外观保存在浏览器本地。
+- 旧路径重定向：`/admins`、`/audit` → `/perm`，`/system` → `/status`，`/crashes` → `/crash`，`/skins`、`/dictionaries`、`/replies` → `/community?tab=skins|dictionaries|replies`，原有查询参数保留。
+
+## 页面
+
+| 页面 | 路径 | 数据来源 | 写操作所需权限 |
+| --- | --- | --- | --- |
+| 数据概览 | `/` | `GET /api/overview` | — |
+| 词库审核 | `/dictpr` | `GET /api/dict-prs`、`/api/dict-prs/{n}`（GitHub） | `review_dict_pr` |
+| 社区审核 | `/community` | `GET /api/{skins,candidate-skins,plugins,dictionaries,replies}`、`/api/community/counts` | `review_community` |
+| 问题分诊 | `/issues` | `GET /api/issues`、`/api/issues/{owner}/{repo}/{n}`（GitHub） | `triage_issues` |
+| 敏感词库 | `/words` | `GET /api/sensitive-words` | `review_community` |
+| 用户账号 | `/users` | `GET /api/users`、`/api/users/stats`、`/api/users/{id}` | `ban_users` |
+| 下载记录 | `/downloads` | `GET /api/downloads/summary`、`GET /api/site-settings` | 修改官网下载镜像 `publish_notices` |
+| 公告推送 | `/notice` | `GET /api/notices` | 草稿无要求，发布与归档 `publish_notices` |
+| 发布管理 | `/release` | `GET /api/releases`、`/api/releases/{platform}`（GitHub） | `trigger_release` |
+| 云端监控 | `/cloud` | `GET /api/cloud` | 读取即需要 `view_cloud_usage` |
+| 崩溃上报 | `/crash` | `GET /api/crash-groups`、`/api/crash-groups/{signature}` | `triage_issues` |
+| 系统状态 | `/status` | `GET /api/status` | 故障事件需要 `triage_issues` |
+| 权限日志 | `/perm` | `GET /api/permissions`、`/api/audit` | `manage_permissions`；成员管理仅限所有者 |
+| 个人中心 | `/me` | `GET /api/me` | 只作用于本人 |
+
+- **数据概览**：累计下载、注册用户、近 30 天新增、活跃设备（按天分 Windows、Mac/Linux、移动端）、近 7 天各平台活跃、无崩溃会话率及拖累最大的平台版本、最新出现的崩溃分组、待处理事项和服务状态。活跃与会话指标依赖客户端上报 `active`、`session`、`session_crash`，近 60 天没有任何上报时显示「客户端未上报」而不是 0。「累计下载」来自下载事件，不是安装数。
+- **词库审核**：只列词库仓库自身 `community-words/` 分支上的 PR（忽略 fork），读最近 100 个。详情比较 PR 基准提交与头部提交的 `custom/{words,english,translations}.txt`，逐条标记：`ad` 命中敏感词，`bad` 不符合官网校验规则，`dup` 已在基准文件或内置词库中、或在 PR 内重复，`new` 可收录。可以只保留勾选项（逐个文件以 blob SHA 做比较交换后重写分支，并改写 PR 标题），可以通过（先精简，再以头部 SHA 为条件 squash 合并），也可以驳回（先评论「审核未通过：原因」再关闭）。三种操作都带上审核时看到的头部 SHA，PR 此后有了新提交（例如官网又追加了投稿）就返回 409 `pr_changed`，不会对没人看过的词条生效；精简时每个新提交的父提交也必须是上一个头部，否则说明分支在精简途中被追加了投稿，立即停止，不再继续写入或合并。精简和通过前会读取 PR 的改动文件列表，只要改动了这三个文件之外的任何文件就返回 409 `unexpected_files`，以免审核只看到词条而合并带进别的改动。页面显示每次投稿的补充说明和时间，来自 `word_submissions` 表。PR 作者是提交用的 GitHub App 时显示为「官网机器人」。
+- **社区审核**：皮肤、候选皮肤、插件、词库、回复模板 5 个分类，按待复核、已通过、已下架筛选。卡片显示自动检查标记和被举报次数；详情抽屉显示举报记录、实时敏感词检查、作者的其他作品和皮肤键盘预览，候选皮肤的预览图由 `GET /api/candidate-skins/{id}/preview` 提供。操作为 `approve_content`、`remove_content`（需要原因）、`restore_content`（恢复下架前的状态）和永久删除。作者因封禁被下架的内容只能通过解封恢复（409 `owner_banned`）。审核规则见「社区事后审核」。
+- **问题分诊**：遍历 `admin.github.issue_repos`，按平台 label 归类。状态映射：open 且无 `triaged` 标签为「新」，有 `triaged` 为「已分类」，closed 为「已关闭」，closed 且有 `duplicate` 标签为「重复」。可以分类（加 `triaged` 并指派给平台的 `assignee`）、标记重复、关闭、重新打开和回复。分类、标记重复和关闭完成后提示条提供「撤销」（分类的撤销即取消分类，平台的 `assignee` 在分类前已被指派的保留指派）；重新打开和回复没有撤销，需要时手动关闭或在 GitHub 上删除回复。每个仓库最多读 3 页共 300 个 open Issue，以及最近更新的 100 个 closed Issue。
+- **敏感词库**：规则是普通词或 RE2 正则（不超过 200 个字符，不能匹配空文本；`{n}`、`{n,m}` 这类计数重复展开后合计不超过 100 步，例如 `[\pL\pN]{101}` 会被拒绝，以免一条规则拖慢所有上传的检查），分类为广告导流、低俗、辱骂、违法、自定义，处理方式为「拦截」或「需复核」，并显示近 7 天命中次数。只在大小写、全半角或空白上不同的普通词视为重复（409 `exists`）。匹配器缓存在内存中，修改最多 30 秒后在所有副本生效；词库 PR 审核这类只读预览不计入命中次数；命中计数在内存中累积，每 30 秒批量写回一次，进程正常退出时写回剩余计数；进程被强制终止时可能丢失最近 30 秒的计数。规则作用于词库投稿和社区上传，见下文。
+- **用户账号**：搜索、按角色筛选（已验证邮箱是所有者或管理员成员时显示对应角色，所有者显示为维护者）、统计卡（总数、本周新增、开启设置同步的比例、已封禁数），详情抽屉显示脱敏的联系方式、登录设备（从 User-Agent 解析的平台，不显示地理位置）、作品和会话。`ban_user` 需要原因，在同一事务里封禁、吊销全部会话，并把该用户的社区内容以 `owner_banned` 下架；被封禁的账号登录、刷新令牌和会话鉴权都返回 403 `account_banned`，直接在数据库里写入的封禁也一样。`unban_user` 只恢复因 `owner_banned` 下架的内容。
+- **下载记录**：按平台、版本、安装包、渠道分组，显示今日和近 7 天下载量以及国内镜像占比，均按 UTC 自然日计。客户端和官网镜像的数据来自遥测下载事件；GitHub Release 渠道取每日资产下载量快照的差值，不依赖客户端上报，但每个资产的第一次快照计为 0，快照之前的下载不计入。页面底部的「官网下载镜像」维护官网下载页上 Windows 安装包的蓝奏云盘链接（旧路径 `/site-settings` 重定向到这里）：`GET /api/site-settings` 返回 `{"lanzou_url","updated_at","updated_by"}`，`POST /api/site-settings {"lanzou_url"}` 保存，空字符串表示清空。链接必须是带主机名的 `https://` 绝对地址，不含账号密码，最长 512 字节，否则返回 400 `invalid_lanzou_url`。修改与审计（`set_lanzou_url` / `clear_lanzou_url`）同事务写入，清空后仍保留最近修改时间和操作者。
+- **公告推送**：标题（不超过 200 字）、正文、投放平台（全部，或 windows、macos、linux、android、ios、harmony）和渠道（官网横幅 `site`、App 内通知 `app`、Telegram）。正文最多 20000 字，页面在发送前检查。草稿可以反复编辑，切换到另一条草稿前会提示放弃未保存的修改。发布时勾选了 Telegram 的，先调用 Bot API `sendMessage`，失败则整条公告不发布。归档没有撤销。「触达人数」需要客户端回执，显示「—」。
+- **发布管理**：每个平台一张卡片，显示最新版本、状态和检查清单。「CI 全部通过」取自 tag 所在提交的 check run；「签名与公证」只有 workflow 里存在名为 `sign` 的 check run 时才显示；「更新日志已填写」看 release 说明是否为空；需要商店 API 的平台，商店一项显示「需手动」。历史版本从每个仓库最近 100 个 release 中按 `tag_prefix` 过滤：草稿为「待发布」，prerelease 为「公开测试」，正式版为「已发布」，带撤回标记的为「已撤回」。说明按 `### 新增 / 修复 / 改进 / 说明 / 待办` 分类显示。可以触发发布流水线、编辑说明和撤回版本；撤回会改为 prerelease、在说明开头加撤回标记，并把上一个正式版设为 latest。
+- **云端监控**：每个上游服务近 24 小时（按整点滚动，不是 UTC 自然日）的调用数、P95、错误率和逐小时曲线，以及本月（UTC）用量与 `admin.services` 中额度的对比；金额按用量乘以 `unit_price` 估算。只记录服务、耗时和状态类别，不记录请求内容。
+- **崩溃上报**：按签名分组（平台、规范化后的错误信息和第一个非系统栈帧，取 SHA-256 的前 16 位）。同一问题出现在不同平台时分成各自的分组，分别在对应平台的仓库跟进；平台先归一（win 归 windows，mac、darwin 归 macos，ipados 归 ios，harmony、ohos 归 harmonyos，其余转小写），所以同一平台的不同写法仍在一组，分组的平台创建后不再变化。列表显示 7 天次数、与前 7 天的环比、新出现标记和影响设备数（按 `install_id` 去重）。状态为未处理、已知问题、已修复；可以在平台对应的仓库建 Issue，状态随之改为已知问题并记录链接。Issue 已在 GitHub 创建但链接写不回数据库时，服务返回 503 `issue_not_recorded` 并带上 `issue_url`，页面在提示条中显示这个链接，并在本次打开页面期间把该分组当作已有 Issue，不再提供「建 Issue」，以免重复创建；刷新后链接只能从服务日志中找回，应先把分组标记为已知问题。已修复的分组再次崩溃时不会自动重新打开。
+- **系统状态**：每 60 秒探测数据库，并汇总最近 5 分钟的上游指标，错误率或 P95 超过 `slow_ms` 判为降级；每日可用分钟数保留 60 天。降级时自动开启故障事件，恢复时自动关闭；也可以通过 `open_incident`、`update_incident`、`resolve_incident` 手动管理。只展示数据库和已配置的上游服务。
+- **权限日志**：角色与权限矩阵、成员列表（所有者排在最前，显示会话数和最近活动），以及操作日志（`/api/audit`，可按 `action` 精确筛选、按 `actor` 模糊筛选，文案由 `action` 和 `detail` 生成）。
+- **个人中心**：资料、本月处理量（词库 PR、社区审核、Issue）、社区审核的平均处理时长、通知偏好、最近 6 条本人操作、登录会话（可吊销其他会话）和个人访问令牌。「每周摘要」邮件尚未接入，开关置灰。
+
+旧接口仍保留：`/api/overview?days=7|30`、`/api/users`、`/api/downloads`、`/api/crashes` 及 `resolve_crash` / `reopen_crash`、各社区列表与详情、`/api/audit`、`/api/admins`（仅所有者），以及只读的 `/api/system`（版本和各能力是否已配置，不返回上游 URL、模型名或密钥）。所有列表每页 50 条，支持 `q` 和 `page`，返回 `total` 和 `has_more`；`q` 只匹配字段的值（不匹配字段名），皮肤的设计 JSON 不参与搜索。
+
+## 配置
+
+### `admin.environment`
+
+外壳顶部的环境标签，默认「生产环境」，最多 32 个字符，不能有首尾空白或换行。预发布或测试部署可以设为「测试环境」等，避免在错误的环境里操作。
+
+### `admin.github`
+
+后台以一个 GitHub App 的身份读写词库 PR、Issue、Release 和流水线。`app_id` 为 0 时整块只作文档用途，所有依赖 GitHub 的接口返回 404 `github_disabled`，对应页面显示「未配置」。
+
+| 字段 | 说明 |
+| --- | --- |
+| `app_id`、`installation_id` | GitHub App 及其安装的 ID |
+| `private_key_env` | 存放 App 私钥（PEM，PKCS#1 或 PKCS#8）的环境变量名 |
+| `api_url` | 可选，默认 `https://api.github.com`，必须是 HTTPS |
+| `dictionary_repo` | 词库审核的仓库。留空时跟随 `word_submissions.github.repository`，官网投稿未启用时默认 `metasequoiaime/msime-dictionary`。两者都启用时必须是同一个仓库（不区分大小写），否则服务拒绝启动：`word_submissions` 表只按 PR 编号记录投稿说明，换了仓库就会把说明挂到无关的 PR 上 |
+| `issue_repos` | 问题分诊的仓库，最多 20 个 |
+| `platforms[]` | 发布平台，最多 16 个，按显示顺序排列 |
+
+`platforms[]` 的字段：
+
+- `id`：URL 中的稳定键，小写字母、数字和连字符，最多 32 位。
+- `name`：显示名。
+- `repo`：`owner/name`。
+- `tag_prefix`：在仓库中选出本平台 release 的 tag 前缀，例如 `windows-v`。
+- `release_workflow`：触发发布的 workflow 文件名，例如 `release.yml`；留空则不能在后台触发发布。
+- `assignee`：分诊时指派的 GitHub 用户，可以留空。
+- `label`：本平台 Issue 的标签。
+
+GitHub App 需要安装到上面提到的每个仓库，并授予以下仓库权限：
+
+| 权限 | 级别 | 用途 |
+| --- | --- | --- |
+| Contents | Read and write | 读写词库 PR 分支的文件；列出草稿 release，修改 release 说明和状态 |
+| Pull requests | Read and write | 读取、改标题、合并、评论并关闭词库 PR |
+| Issues | Read and write | Issue 分诊、指派、评论、开关；为崩溃分组建 Issue |
+| Actions | Read and write | 以 `workflow_dispatch` 触发发布流水线 |
+| Checks | Read-only | 发布检查清单中的 CI 和 `sign` 结果 |
+| Metadata | Read-only | GitHub 对所有 App 的强制要求 |
+
+每个平台的 `release_workflow` 必须声明 `workflow_dispatch` 触发器，并有一个名为 `version` 的输入。后台以仓库默认分支为 `ref`，发送 `{"inputs":{"version":"v0.5.5"}}`：
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 要发布的版本号，例如 v0.5.5
+        required: true
 ```
 
-崩溃示例：
+缺少触发器或输入时 GitHub 返回 422，后台报 409 `workflow_rejected`；文件不存在时报 409 `workflow_not_found`；未配置 `release_workflow` 时报 409 `no_workflow`。版本号必须匹配 `^v?[0-9][0-9A-Za-z.+-]{0,62}$`，否则返回 400 `invalid_version`。
+
+GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免耗尽每小时 5000 次的配额。几个平台共用一个仓库时，GitHub 的 latest 是整个仓库的：撤回某个平台的最新版后，该平台的上一个正式版会成为整个仓库的 latest，可能盖过另一个平台更新的版本。所以下载站应按 `tag_prefix` 自行挑选每个平台的版本并跳过 prerelease，不要直接读 `/releases/latest`。
+
+`admin.github` 与官网词库投稿使用的 `word_submissions.github` 是两个独立配置，可以用同一个 App，也可以分开，但两者指向的词库仓库必须相同（见上表 `dictionary_repo`）。
+
+### `admin.services`
+
+云端监控和系统状态页展示的上游服务，最多 32 个。不配置时，两个页面按配置文件中实际启用的上游服务和默认名称展示，但没有额度。
+
+| 字段 | 说明 |
+| --- | --- |
+| `key` | 与指标记录一致的服务键：`cloud`、`chat`、`translation`、`transcription`、`streaming`、`images`、`niutrans_document`、`niutrans_image`、`niutrans_voice` |
+| `name`、`provider` | 显示名（1–32 字）和服务商（不超过 64 字） |
+| `quota.limit` | 月度额度，0 表示不限 |
+| `quota.unit` | `calls`、`chars`、`hours` 或 `cny`。`chars` 只能用于按字符计量的 `translation`，`hours` 只能用于按秒计量的 `transcription` 和 `streaming`，`cny` 需要 `unit_price` 大于 0；不匹配时启动报错，以免额度永远显示 0% |
+| `quota.period` | 只支持 `month`（UTC 自然月） |
+| `quota.unit_price` | 每个计量单位的估算人民币价格，0 表示不估算费用 |
+| `slow_ms` | P95 超过此值判为降级，默认 3000，范围 1–120000 |
+
+### `admin.telegram`
+
+公告的 Telegram 渠道。`chat_id` 为空时渠道关闭，此时在后台勾选 Telegram 发布会返回 409 `telegram_disabled`。`chat_id` 是数字会话 ID 或 `@频道名`；`bot_token_env` 默认 `MSIME_ADMIN_TELEGRAM_TOKEN`，启动时校验令牌格式。Bot 需要能在目标频道或群组里发消息（频道需设为管理员）。
+
+### 客户端跨域
+
+`/v1/notices` 受 `/v1` 中间件的来源规则约束：浏览器从其他域名请求时，该域名必须在顶层 `allowed_origins` 中，否则返回 403。官网要显示公告横幅，需要先把官网域名加进去。
+
+## 社区事后审核
+
+社区内容采用事后审核（post-moderation）：
+
+- 新上传的皮肤、候选皮肤、插件、词库和回复模板立即公开，状态为「待复核」（`pending`），由审核员随后复核。只有「已下架」（`removed`）的内容对作者以外的所有人隐藏：公开列表、详情、下载和评分接口都会排除它。已有内容在迁移时一律设为「已通过」。
+- 上传时用敏感词库检查名称、描述等文本：命中「拦截」级规则返回 422 `blocked_content`，不保存；命中「需复核」级规则照常发布，并在待复核卡片上标出命中的词。与已发布内容完全相同的重试在检查之前直接返回成功，所以词库后来新增的规则不会让已上线内容的重试失败，也不会重复计入命中次数。
+- 下架需要原因，可以撤销，撤销会恢复下架前的状态。撤销对已下架内容的通过或恢复时，后台用 `remove_content` 的 `value: {"previous":"pending"|"approved"}` 一并带回它原来的恢复状态，之后再恢复仍回到原来的状态（例如被驳回的待复核内容回到待复核）。
+- 后台的「通过并上架」带上审核员看到的状态和版本：`approve_content` 的 `value: {"from":"pending"|"removed","created_at":"…","updated_at":"…"}`，`created_at` 区分作者删除后用同一 id 重新发布的内容，`updated_at` 只用于作者可以修改的候选皮肤、词库和回复模板。内容已被其他审核员处理，或作者在此期间改过、删除重发过内容，接口返回 409 `conflict` 且不做改动，审核员需要查看最新内容后再操作。不带 `value` 的调用不做这项检查。
+- 封禁作者会以 `owner_banned` 下架其全部内容，只有解封能恢复。
+- 举报：登录用户通过 `POST /v1/community/reports` 举报，后台卡片显示被举报次数，详情列出举报原因，每条新举报生成一条通知。
+- 目前没有事先审核（pre-moderation）模式，也没有向作者发送下架原因的机制；确认框里填写的原因只记录在审核记录和操作日志中。
+
+## 公开客户端接口
+
+以下接口在 API 域名上，不在后台域名上。
+
+### `GET /v1/notices?platform=&channel=`
+
+不需要认证，返回最近 20 条已发布的公告：`{"items":[{"id","title","body","targets":[…],"channels":[…],"published_at"}]}`。
+
+- `platform` 为 `windows`、`macos`、`linux`、`android`、`ios`、`harmony` 之一，匹配投放到该平台或全部平台的公告。
+- `channel` 为 `site`、`app` 或 `telegram`。
+- 参数非法返回 400 `invalid_platform` 或 `invalid_channel`。
+- 响应带 `Cache-Control: public, max-age=60` 和 `Vary: Origin`，发布和归档最多 60 秒后可见。该接口与 `GET /v1/site/download-mirrors` 共用每个 IP 每分钟 1200 次的限额，与登录、刷新令牌和社区接口的每 IP 每分钟 120 次限额分开计数，所以轮询公告不会挤占登录额度；同一反向代理后的客户端共享这一额度，客户端应遵守缓存头，不要频繁轮询。
+
+### `GET /v1/site/download-mirrors`
+
+不需要认证，供官网下载页读取：`{"lanzou_url","updated_at"}`，未设置或已清空时两个字段都是空字符串。与 `GET /v1/notices` 共用每个 IP 每分钟 1200 次的限额（与登录的 120 次限额分开计数），响应带 `Cache-Control: public, max-age=60` 和 `Vary: Origin`；官网侧再缓存约 10 分钟，所以修改后最多约 10 分钟生效。
+
+### `POST /v1/community/reports`
+
+需要已登录的用户会话。请求体：
 
 ```json
-{
-  "id": "f0c84d7e-7ca2-48cd-bcb1-941e07ba9dc5",
-  "kind": "crash",
-  "platform": "windows",
-  "version": "1.0.0",
-  "message": "Unhandled exception in keyboard initialization",
-  "stack": "Keyboard::Initialize\nApplication::Start"
-}
+{"kind": "skins", "item_id": "…", "reason": "商标侵权", "detail": "可选补充说明"}
 ```
 
-- 每个事件生成一个全局唯一 ID（16–128 字符），重试必须复用；同一 ID 只记录第一次，重复也返回 `202 {"accepted":true}`。推荐 UUID，不含用户身份。
-- `platform` 为 1–32 字符，`version` 为 1–64 字符。崩溃 `message` 必填，最多 1000 字符，`stack` 最多 16000 字符；总请求体最多 32 KiB。下载事件不接受错误与堆栈字段的非空值。
-- 使用服务端接收时间，离线上报算在接收日。客户端须在用户允许采集后发送，先清理输入文本、密码、令牌及个人信息；后台不额外存 IP 或用户身份。
-- 接口沿用现有身份认证、速率限制与并发限制。数据保存在 PostgreSQL，多副本共享；当前不自动清理事件，需按实际规模设置归档/保留策略。
-- 必须执行新迁移；采集接口不要求开启后台域名，但要求启用用户数据库。完整接口见生成的 OpenAPI。
+- `kind` 为 `skins`、`candidate-skins`、`plugins`、`dictionaries`、`replies` 之一；`reason` 1–64 字；`detail` 最多 1000 字。
+- 只能举报自己能看到的内容（未下架；候选皮肤必须是公开的），否则返回 404 `item_not_found`。
+- 同一用户重复举报同一内容只记一次：首次返回 201，重复返回 200，响应体都是 `{"reported":true}`。
+- 每个账号每小时最多举报 30 次。
+
+### `POST /v1/telemetry/events`
+
+携带现有设备或用户 Bearer 令牌，请求体最多 32 KiB，成功返回 `202 {"accepted":true}`。
+
+| 字段 | 规则 |
+| --- | --- |
+| `id` | 必填，16–128 字符的全局唯一事件 ID，推荐 UUID；重试必须复用，同一 ID 只记录第一次 |
+| `kind` | 必填，见下表 |
+| `platform` | 必填，1–32 字符，如 `windows`、`macos`、`android`、`ios`、`harmony` |
+| `version` | 必填，1–64 字符 |
+| `message` | 只有 `crash` 使用，且必填，最多 1000 字符 |
+| `stack` | 只有 `crash` 使用，最多 16000 字符 |
+| `artifact` | 可选，安装包名，1–64 字符，单行 |
+| `channel` | 可选，分发渠道，匹配 `^[a-z0-9][a-z0-9_-]{0,31}$`；后台为 `cn-mirror`、`website`、`github`、`app-store`、`testflight`、`appgallery`、`google-play` 显示中文名 |
+| `install_id` | 可选（`active` 必填），匿名安装 ID，16–64 位 `[A-Za-z0-9_-]`，不能含用户或硬件标识 |
+
+| `kind` | 含义 | 用于 |
+| --- | --- | --- |
+| `download` | 一次安装包下载 | 下载记录、累计下载 |
+| `crash` | 一次崩溃，带错误信息和堆栈 | 崩溃分组：入库时计算签名并更新分组 |
+| `active` | 该安装当天活跃 | 活跃设备、各平台活跃、影响设备数 |
+| `session` | 一次正常结束的会话 | 无崩溃会话率 |
+| `session_crash` | 一次以崩溃结束的会话 | 无崩溃会话率 = session ÷ (session + session_crash)，按近 7 天计算 |
+
+非 `crash` 事件不能带非空的 `message` 或 `stack`。后台统计时会归一平台名（`win` → windows，`mac`、`darwin` → macos，`ipados` → ios，`harmony`、`ohos` → HarmonyOS）。服务端以接收时间入库，离线上报算在接收日；后台不额外存 IP 或用户身份。客户端须在用户同意采集后发送，并先清理输入文本、密码、令牌和个人信息。数据保存在 PostgreSQL，多副本共享；`download` 和 `crash` 事件不自动清理，需要按规模设置归档或保留策略。新增字段和类型都是可选的，旧客户端无需修改。
+
+`active`、`session`、`session_crash` 事件保留 90 天，由每小时的清理任务删除（概览最多读近 60 天）；`download` 和 `crash` 事件不清理，累计下载和崩溃分组依赖它们。
+
+如果官网或客户端对 GitHub Release 的下载也上报 `channel=github` 的下载事件，这次下载会被遥测和 Release 快照各计一次。在确定统计口径之前，不要为 GitHub Release 下载上报遥测事件。
+
+### 词库投稿的新错误码
+
+官网的词库投稿接口现在可能返回：400 `blocked_word`（备注命中拦截级敏感词）、`invalid_entries.rejected` 中的 `blocked_word` 条目（词条命中拦截级敏感词），以及 503 `screening_unavailable`（敏感词检查暂时不可用）。官网表单应显示这些代码，至少回退显示 `message` 字段。
+
+## 需要仓库外配合的改动
+
+下列设计元素依赖客户端、官网或外部系统。后台已做好接收和展示，在对方完成之前显示空态或说明，不造假数据。
+
+1. 活跃设备、各平台活跃、无崩溃会话率、影响设备数：各客户端需要上报 `active`、`session`、`session_crash` 事件和匿名 `install_id`。
+2. 下载记录的安装包和渠道：官网镜像和客户端需要在下载事件里带上 `artifact` 和 `channel`。GitHub Release 渠道靠快照获取，不依赖这一条。
+3. 社区举报：客户端需要增加「举报」按钮，调用 `POST /v1/community/reports`。
+4. 公告的 App 内通知和官网横幅：App 和官网需要拉取 `GET /v1/notices`，官网域名还要加入 `allowed_origins`。在此之前公告只写入数据库，用户看不到。
+5. 「下载后完成安装」比例无法测量，已去掉。
+6. 公告只有 Telegram 一个推送渠道（QQ 群没有官方 Bot API）；触达人数需要客户端回执，显示「—」。
+7. 登录方式是 Google OIDC，两步验证由 Google 账号控制，后台不提供 2FA、通行密钥或 GitHub 登录。
+8. 登录设备不显示地理位置，这需要 GeoIP 库。
+9. 没有站内信系统，用户详情不提供「发送站内信」；也没有 AI 额度模型。
+10. 问题分诊不显示「官网匿名提交」和诊断附件，因为仓库里没有官网反馈端点；来源一律是 GitHub。
+11. 「商店审核中」以及 iOS、HarmonyOS 的商店状态需要 App Store Connect 或 AppGallery API，检查清单显示「需手动」。
+12. 发布检查清单的「签名与公证」只有 workflow 定义了名为 `sign` 的 check run 时才显示。
+13. 词库仓库实际是 `metasequoiaime/msime-dictionary`。
+
+## 审计
+
+所有写操作都写入 `admin_audit`，包括 `actor`、`action`、`target` 和 `detail`（原因、条数、新旧值等 JSON）。数据库变更与审计在同一事务里，失败不部分生效。GitHub 和 Telegram 这类外部副作用无法与数据库放在同一事务里，做法是外部调用成功后再写审计，失败则不写；因此极少数情况下会出现外部动作已生效、而审计或数据库提交失败的情况，例如 Telegram 消息已发出但公告没有标记为已发布。标记通知已读只改本人的已读记录，不写审计。
 
 ## 本地开发与验证
 
 ```sh
 pnpm --dir admin-web install --frozen-lockfile
+pnpm --dir admin-web check
 pnpm --dir admin-web lint
 pnpm --dir admin-web build
+python3 admin-web/tests/csp_smoke.py
 go test ./...
 go build -o /tmp/msime-server ./cmd/msime-server
 ```
 
 修改 `admin-web/src/` 后执行 `pnpm --dir admin-web build`，再重新编译 Go。生成的 `dist/` 随源码提交，保证直接 `go build` 也可用；CI 会重新构建并核对产物。运行镜像不需要 Node.js。
 
-开发时将 Go 的 `admin.host` 配为 `admin.localhost`、`listen` 配为 `127.0.0.1:18089`，运行 `pnpm --dir admin-web dev`；Vite 将 `/api` 请求代理到该 Go 服务并设置开发 Host/Origin。也可直接访问 `http://admin.localhost:18089` 验证实际嵌入产物。生产必须通过 HTTPS 入口访问。
+`tests/csp_smoke.py` 用 Python 版 Playwright 和 Chromium，在模拟后端上逐页打开构建产物，检查 CSP 违规、旧路径重定向和外壳弹层，并单独构建 `tests/harness` 测试共享组件（表格、确认框、提示条、抽屉、图表）。改动依赖、共享组件或构建配置后都要运行。
 
-PostgreSQL 集成测试需设置 `MSIME_TEST_DATABASE_URL`，数据库名称必须含 `msime_auth_test`，仅可使用一次性测试库。测试会清空测试表。
+开发时把 Go 的 `admin.host` 设为 `admin.localhost`、`listen` 设为 `127.0.0.1:18089`，然后运行 `pnpm --dir admin-web dev`；Vite 把 `/api` 请求代理到该 Go 服务，并设置开发用的 Host 和 Origin。也可以直接访问 `http://admin.localhost:18089` 验证实际嵌入的产物。生产必须通过 HTTPS 入口访问。
 
-## 管理员账号管理
+PostgreSQL 集成测试需要设置 `MSIME_TEST_DATABASE_URL`，数据库名必须含 `msime_auth_test`，只能使用一次性测试库，测试会清空测试表。多个包共用一个库时，用 `go test -p 1 ./...` 串行运行。
 
-`/admins` 页面和 `GET/POST /api/admins` 仅允许通过 Google 登录的部署白名单账号访问。白名单中的账号是超级管理员，网页不能添加、停用或撤销这些账号；运维修改配置保留恢复入口。静态管理员密钥和普通管理员不能访问该接口。
+## 已知限制
 
-超级管理员可以添加 Google 邮箱（统一小写）、停用、重新启用普通管理员或撤销其会话。新增管理员可以执行已有运营和内容管理操作，不能管理管理员。最多保留 100 个普通管理员记录；停用不删除记录，重新启用需重新登录。状态更新与会话撤销、审计写入在同一事务中完成；会话创建锁定管理员行，防止停用与登录同时发生时产生遗漏的有效会话。
-
-接口请求体为 `{"email":"admin@example.com","action":"add|enable|disable|revoke"}`，其中 action 必须是四个值之一。重复添加返回 409；无效邮箱/动作返回 400，非超级管理员或修改受保护账号返回 403。普通管理员记录不创建输入法用户账户，也不发送邀请邮件；被添加者直接使用其 Google 账号登录。
-
-上线前需执行更新后的 `internal/account/admin_schema.sql`，新增 `admin_members` 与 `site_settings` 表，归既有迁移所有者所有，并授予运行角色这些表 SELECT/INSERT/UPDATE/DELETE（`GRANT SELECT, INSERT, UPDATE, DELETE ON admin_members, site_settings TO msime_backend;`，已配置 default privileges 时无需手动授权）；缺少迁移时服务拒绝启动。无需把 Google 密钥或超级管理员邮箱写入前端。
-
-### 用户详情与单个会话管理
-
-用户列表的「详情」展示注册时间、登录渠道类型、发布内容数量和最近 50 条保留的登录会话（创建时间、到期时间、有效/过期/撤销状态），同时显示有效及总会话数量。清理任务删除的历史会话不计入统计。接口不返回登录标识、访问令牌、刷新令牌或其哈希。
-
-`GET /api/users/{id}` 返回上述详情。`POST /api/actions` 的 `revoke_session` 操作要求同时提供会话 `id` 和所属 `user_id`，只撤销匹配该用户的会话，并在同一事务记录操作者和会话 ID；其他会话不受影响。上述接口沿用后台身份校验、同源限制和限流，不需要新增数据库迁移。
-
-### 社区内容详情
-
-皮肤、词库和回复模板列表均提供「详情」。详情展示名称、描述、发布者、时间、下载或收藏用户数及评分；词库额外展示修订版本和可搜索的完整词条表，回复模板展示完整文本，皮肤优先展示键盘外观预览，设计 JSON 可折叠查看。不执行社区内容中的 HTML 或脚本。
-
-只读接口为 `GET /api/skins/{id}`、`GET /api/candidate-skins/{id}`、`GET /api/dictionaries/{id}` 和 `GET /api/replies/{id}`，沿用后台认证、同源校验与限流。接口只查询社区内容，不涉及私人词库或发布者的登录标识；候选窗皮肤包是例外，详情也覆盖私有作品，并返回 `visibility` 与 `updated_at`。不存在或类型不匹配返回 404。候选窗皮肤包详情返回元数据、授权、skin.toml 文本和每个图片的路径、大小与 SHA-256，不返回图片字节。`GET /api/plugins/{id}` 返回插件元数据、plugin.toml 文本、包大小与 SHA-256 及下载和评分统计，不返回 zip 字节。详情页可确认后调用既有删除操作，关联记录级联删除并保留管理员审计。无需新增数据库迁移。
-
-### 工作台与批量操作
-
-- 总览支持近 7 / 30 天的新增用户、下载上报和崩溃上报趋势切换；明细和 CSV 导出遵循当前时间范围，日期采用 UTC。统计卡片可直接进入对应管理列表。
-- 所有管理列表可切换紧凑显示、查看更新时间、导出当前页 CSV。导出仅包含当前筛选结果的本页及列表字段，不代表全部记录；CSV 保留 UTF-8 中文、引号与换行，并转义可能被表格软件识别为公式的文本。
-- 崩溃列表支持选择当前页记录并批量标记已处理或重新打开。确认后逐条调用已有管理接口，每条操作独立写入审计；部分失败会显示成功/失败数量并保留失败项供重试。切换分页或筛选条件会清空选择，执行期间禁用筛选、翻页和重复操作。
-- 导航按数据与用户、社区内容、系统管理分组；手机端通过「导航」展开，选择页面后自动收起。表格独立横向滚动、固定表头，详情窗口可滚动并保留顶部操作区。左上角继续显示实际后端版本。
-
-### 皮肤外观预览
-
-社区皮肤详情顶部支持 26 键和九键示意预览，使用经过类型和范围校验的设计参数渲染 SVG，支持 RGB 配色、渐变、圆角、边框、透明度、阴影、纹理、材质、等宽字体和内嵌 JPEG 背景。图标使用 Lucide，不加载皮肤提供的外部 URL、CSS 或脚本；不需要放宽后台 CSP。未知或非法设计格式显示提示，原始 JSON 仍可展开检查。此预览用于外观检查，字体、纹理和材质细节可能与原生客户端略有差异。
-
-### 站点设置
-
-「系统管理 → 站点设置」页面维护官网下载页的 Windows 安装包蓝奏云盘链接，普通管理员和超级管理员都可修改。`GET /api/site-settings` 返回 `{"lanzou_url","updated_at","updated_by"}`；`POST /api/site-settings` 请求体为 `{"lanzou_url":"https://..."}`，空字符串表示清空。链接必须是带主机名的 `https://` 绝对地址，不能含账号密码，最长 512 字节，否则返回 400。修改与审计（`set_lanzou_url` / `clear_lanzou_url`）写在同一事务中；清空后仍保留最近修改时间和操作者。
-
-官网通过 API 域名的公开接口 `GET /v1/site/download-mirrors` 读取，响应为 `{"lanzou_url","updated_at"}`，未设置或已清空时两个字段均为空字符串。接口免令牌，按 IP 每分钟 120 次限流，成功响应带 `Cache-Control: public, max-age=60`；官网侧再缓存约 10 分钟，修改后最多约 10 分钟生效。数据存放在 `admin_schema.sql` 新增的 `site_settings` 表，迁移与授权见「管理员账号管理」一节。
+- 多副本部署：敏感词和 GitHub 缓存都在各副本的内存中，最多有 30–60 秒的不一致（词库 PR 和新 Issue 的通知按数据库去重，不会因重启或多副本重复）；系统状态的 5 分钟窗口按副本计算，自动故障事件可能来回开关。目前按单实例部署设计。
+- 数据库本身不可用时，宕机分钟数和自动故障事件无法写入，`/api/status` 返回 503。
+- 词库 PR 只读最近 100 个；条目比较以 PR 的 `base.sha` 为准，分支创建后主干上删除的行会显示为新增。驳回时如果评论成功而关闭失败，重试会再评论一次。
+- 发布历史每个仓库只读最近 100 个 release，共用仓库的平台多时，较早的版本会从历史和每日快照中消失。并发撤回或编辑同一个 release 以最后一次为准。
+- GitHub Release 的「今日」是当天快照与前一天快照的差值，快照任务在 UTC 清晨运行时主要反映前一天的下载；页面会显示「快照截至」日期。
+- 社区内容下架后恢复（或因解封恢复）到待复核时，自动检查标记按当前敏感词库重新计算，可能与上传时不同。
+- 弹窗打开之前出现的提示条，其「撤销」仍可用鼠标点击，但弹窗打开期间辅助技术读不到它。弹窗打开之后出现的提示条不会吞掉 Escape，按 Escape 关闭的是弹窗。

@@ -16,3 +16,6 @@ __pycache__/
 
 /.env.admin.local
 /config.admin.local.json
+
+# The global gitignore ignores downloads/; the admin downloads page is source.
+!/admin-web/src/pages/downloads/

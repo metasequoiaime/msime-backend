@@ -63,11 +63,12 @@ func main() {
 			os.Exit(1)
 		}
 	case <-ctx.Done():
-		handler.Close()
+		// Drain HTTP requests first, then Close: the final metrics flush must run after the last request has recorded its upstream call. Shutdown leaves hijacked WebSocket streams alone; Close cancels and waits for them and the background jobs, then flushes.
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdown); err != nil {
 			_ = srv.Close()
 		}
+		handler.Close()
 	}
 }

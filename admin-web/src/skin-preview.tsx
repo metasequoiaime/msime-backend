@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { z } from "zod";
 import { Delete, Globe, CornerDownLeft, ArrowUp } from "lucide-react";
+import { Segmented } from "./ui/segmented";
 
 const color = z.number().int().min(0).max(0xffffff);
 const designSchema = z.object({
@@ -17,7 +18,7 @@ const foreground = (value: number) => { const r = value >> 16, g = (value >> 8) 
 export function SkinPreview({ content, name }: { content: unknown; name: string }) {
   const [layout, setLayout] = useState<"full" | "nine">("full"); const prefix = useId();
   const parsed = designSchema.safeParse(content);
-  if (!parsed.success) return <p className="notice error" role="status">该皮肤设计格式暂不支持预览，请展开原始数据检查。</p>;
+  if (!parsed.success) return <p className="rounded-[14px] bg-bad-soft px-4 py-3 text-[13.5px] text-bad" role="status">该皮肤设计格式暂不支持预览，请展开原始数据检查。</p>;
   const d = parsed.data; const bg = hex(d.background), key = hex(d.keyBackground), ink = hex(d.keyForeground), accent = hex(d.accent);
   const radius = d.keyShape === "capsule" ? 24 : d.keyShape === "pebble" ? 18 : d.keyShape === "ticket" ? 3 : d.cornerRadius;
   const patternID = `${prefix}-pattern`, gradientID = `${prefix}-gradient`, materialID = `${prefix}-material`, clipID = `${prefix}-clip`;
@@ -33,9 +34,9 @@ export function SkinPreview({ content, name }: { content: unknown; name: string 
       {label === "删除" ? <Delete x={x + width / 2 - 10} y={y + 11} width={20} height={20} color={text} aria-hidden="true" /> : label === "换行" ? <CornerDownLeft x={x + width / 2 - 10} y={y + 11} width={20} height={20} color={text} aria-hidden="true" /> : label === "切换" ? <Globe x={x + width / 2 - 10} y={y + 11} width={20} height={20} color={text} aria-hidden="true" /> : label === "大写" ? <ArrowUp x={x + width / 2 - 10} y={y + 11} width={20} height={20} color={text} aria-hidden="true" /> : <text x={x + width / 2} y={y + 27} textAnchor="middle" fill={text} fontSize={label.length > 1 ? 12 : 17}>{label}</text>}
     </g>;
   }
-  return <section className="skin-preview" aria-label={`${name}外观预览`}>
-    <div className="panel-heading"><h3>键盘预览</h3><div className="skin-layout"><button type="button" aria-pressed={layout === "full"} onClick={() => setLayout("full")}>26 键</button><button type="button" aria-pressed={layout === "nine"} onClick={() => setLayout("nine")}>九键</button></div></div>
-    <div className="skin-preview-stage"><svg viewBox="0 0 390 290" role="img" aria-label={`${name}，${layout === "full" ? "26 键" : "九键"}键盘效果`} fontFamily={d.monospaced ? "ui-monospace, monospace" : "system-ui, sans-serif"}>
+  return <section className="my-4" aria-label={`${name}外观预览`}>
+    <div className="flex flex-wrap items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-bold text-ink">键盘预览</h3><Segmented size="sm" label="键盘布局" value={layout} onChange={setLayout} options={[{ value: "full", label: "26 键" }, { value: "nine", label: "九键" }]} /></div>
+    <div className="mt-3 grid place-items-center rounded-xl bg-panel-2 p-5"><svg className="block h-auto w-full max-w-[440px] drop-shadow-xl" viewBox="0 0 390 290" role="img" aria-label={`${name}，${layout === "full" ? "26 键" : "九键"}键盘效果`} fontFamily={d.monospaced ? "ui-monospace, monospace" : "system-ui, sans-serif"}>
       <title>{name}键盘示意预览</title><defs>
         <linearGradient id={gradientID} x1="0" y1="0" x2={d.gradientHorizontal ? "1" : "0"} y2={d.gradientHorizontal ? "0" : "1"}><stop stopColor={bg} /><stop offset="1" stopColor={hex(d.gradientEnd ?? d.background)} /></linearGradient>
         <linearGradient id={materialID} x2="0" y2="1"><stop stopColor="#ffffff" stopOpacity=".45" /><stop offset="1" stopColor="#ffffff" stopOpacity="0" /></linearGradient>
@@ -51,6 +52,6 @@ export function SkinPreview({ content, name }: { content: unknown; name: string 
         {layout === "full" ? <>{row([..."QWERTYUIOP"], 74, 7, 33.1)}{row([..."ASDFGHJKL"], 124, 25, 33.1)}{drawKey("大写", 7, 174, 42)}{row([..."ZXCVBNM"], 174, 54, 35)}{drawKey("删除", 334, 174, 49)}</> : <>{row(["符号", "ABC", "DEF"], 74, 7, 88)}{row(["GHI", "JKL", "MNO"], 124, 7, 88)}{row(["PQRS", "TUV", "WXYZ"], 174, 7, 88)}{drawKey("删除", 286, 74, 97)}{drawKey("分词", 286, 124, 97)}{drawKey("选词", 286, 174, 97, true)}</>}
         {drawKey("123", 7, 224, 46)}{drawKey("切换", 58, 224, 39)}{drawKey("空格", 102, 224, 183)}{drawKey("换行", 290, 224, 93, true)}
       </g>
-    </svg></div><p className="muted small">根据皮肤参数渲染的示意效果；字体、纹理和材质细节可能与客户端略有差异。</p>
+    </svg></div><p className="m-0 mt-2 text-xs leading-relaxed text-muted">根据皮肤参数渲染的示意效果；字体、纹理和材质细节可能与客户端略有差异。</p>
   </section>;
 }

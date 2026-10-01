@@ -17,10 +17,10 @@ type CommunityStats struct {
 
 // The counters mirror the community subset of the admin overview query so both surfaces report the same numbers.
 const communityStatsQuery = `SELECT
- (SELECT count(*) FROM community_skins),
+ (SELECT count(*) FROM community_skins WHERE moderation<>'removed'),
  (SELECT count(*) FROM community_skin_downloads),
- (SELECT count(*) FROM community_resources WHERE kind='dictionary'),
- (SELECT count(*) FROM community_resources WHERE kind='reply'),
+ (SELECT count(*) FROM community_resources WHERE kind='dictionary' AND moderation<>'removed'),
+ (SELECT count(*) FROM community_resources WHERE kind='reply' AND moderation<>'removed'),
  (SELECT count(*) FROM community_resource_saves),
  now()`
 

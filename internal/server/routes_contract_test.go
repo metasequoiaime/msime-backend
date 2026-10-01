@@ -44,7 +44,8 @@ func TestEveryPublishedRouteSecurityContract(t *testing.T) {
 					if path == "/healthz" || method == "get" && path == wordSubmissionsPath {
 						// The word form settings are anonymous and answer enabled:false when unconfigured.
 						expected = 200
-					} else if account.IsPath(path) {
+					} else if account.IsPath(path) || path == noticesPath {
+						// The notices feed needs no credentials and answers 503 without the account service.
 						expected = 503
 					}
 					if w.Code != expected {
