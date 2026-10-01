@@ -31,7 +31,7 @@ type SkinJob struct {
 	Artwork []byte
 }
 
-// CreateSkinJob records a new running job for owner unless owner already holds perOwner unexpired jobs or the deployment holds total. Jobs a DELETE cancelled still count until their worker has stopped, as the in-process implementation counted them until the upstream call returned. It returns the job's expiry.
+// CreateSkinJob records a new running job for owner unless owner already holds perOwner unexpired jobs or the deployment holds total. Jobs a DELETE cancelled still count until their worker has stopped, as the in-process implementation counted them until the upstream call returned. A running job whose worker stopped heartbeating does not count: its replica died (or lost the database for longer than SkinJobStaleAfter, after which its worker is told to stop), and in the in-process implementation a dead replica freed its slots with it. Without this a crashed replica's orphaned jobs, which no client may ever delete, would hold the caps until they expire. It returns the job's expiry.
 func (a *Service) CreateSkinJob(ctx context.Context, id, owner string, perOwner, total int, ttl time.Duration) (time.Time, error) {
 	var expires time.Time
 	tx, err := a.store.pool.Begin(ctx)
@@ -42,12 +42,12 @@ func (a *Service) CreateSkinJob(ctx context.Context, id, owner string, perOwner,
 	if _, err = tx.Exec(ctx, skinJobsLock); err != nil {
 		return expires, err
 	}
-	// Expired drafts can hold up to ~12 MB each; dropping them here keeps the table small between the hourly prunes.
-	if _, err = tx.Exec(ctx, `DELETE FROM skin_jobs WHERE expires_at<=now()`); err != nil {
+	// Expired drafts can hold up to ~12 MB each; dropping them here keeps the table small between the hourly prunes. A cancelled job whose worker went stale is dropped too: it is invisible to GET and DELETE and the worker that would have deleted it is gone, so nothing else ever would before it expires.
+	if _, err = tx.Exec(ctx, `DELETE FROM skin_jobs WHERE expires_at<=now() OR (cancelled AND NOT (`+skinJobLive+`))`); err != nil {
 		return expires, err
 	}
 	var all, own int
-	if err = tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE owner=$1) FROM skin_jobs`, owner).Scan(&all, &own); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE owner=$1) FROM skin_jobs WHERE state<>'running' OR `+skinJobLive, owner).Scan(&all, &own); err != nil {
 		return expires, err
 	}
 	if all >= total || own >= perOwner {

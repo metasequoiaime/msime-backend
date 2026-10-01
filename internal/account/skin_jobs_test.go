@@ -99,3 +99,44 @@ func TestSkinJobStoreCapsCancelAndStaleness(t *testing.T) {
 		t.Fatal("prune", ids, rows.Err())
 	}
 }
+
+// A replica that dies leaves rows no worker will finish: a running job it was executing and a job a DELETE on another replica had flagged cancelled. Once their heartbeat is stale neither holds a slot under the caps, and the cancelled one, which no client can see or delete any more, is removed; the running one stays readable as failed until it expires.
+func TestSkinJobStoreDeadWorkersReleaseSlots(t *testing.T) {
+	db := testStore(t)
+	a := &Service{store: db}
+	ctx := t.Context()
+	if _, err := db.pool.Exec(ctx, `TRUNCATE skin_jobs`); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []byte{'a', 'b'} {
+		if _, err := a.CreateSkinJob(ctx, skinJobID(c), "owner-1", 2, 2, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.DeleteSkinJob(ctx, skinJobID('a'), "owner-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CreateSkinJob(ctx, skinJobID('c'), "owner-2", 2, 2, time.Minute); !errors.Is(err, ErrSkinJobsBusy) {
+		t.Fatal("live jobs must hold their slots", err)
+	}
+	// The replica running both jobs dies before its next heartbeat.
+	if _, err := db.pool.Exec(ctx, `UPDATE skin_jobs SET heartbeat_at=now()-interval '1 minute'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CreateSkinJob(ctx, skinJobID('c'), "owner-1", 2, 2, time.Minute); err != nil {
+		t.Fatal("dead jobs held the per-owner cap", err)
+	}
+	if _, err := a.CreateSkinJob(ctx, skinJobID('d'), "owner-2", 2, 2, time.Minute); err != nil {
+		t.Fatal("dead jobs held the deployment cap", err)
+	}
+	var cancelled int
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM skin_jobs WHERE id=$1`, skinJobID('a')).Scan(&cancelled); err != nil || cancelled != 0 {
+		t.Fatal("orphaned cancelled job kept", cancelled, err)
+	}
+	if job, err := a.GetSkinJob(ctx, skinJobID('b'), "owner-1"); err != nil || job.State != "failed" || job.Reason != "cancelled" {
+		t.Fatal("orphaned running job", job, err)
+	}
+	if _, err := a.CreateSkinJob(ctx, skinJobID('e'), "owner-2", 2, 2, time.Minute); !errors.Is(err, ErrSkinJobsBusy) {
+		t.Fatal("live jobs must still fill the caps", err)
+	}
+}
