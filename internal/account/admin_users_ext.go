@@ -25,9 +25,16 @@ var communityModeratedTables = []string{"community_skins", "community_resources"
 // userVerifiedEmailsSQL yields the lowercase verified emails of the user u: an email-code identity's subject is a verified address, and a provider identity counts when the provider verified its email claim.
 const userVerifiedEmailsSQL = `SELECT lower(CASE WHEN i.provider='email' THEN i.subject ELSE i.email END) FROM auth_identities i WHERE i.user_id=u.id AND (i.provider='email' OR (i.email_verified AND i.email<>''))`
 
-// userRoleSQL is the console role of the user u: the role of an enabled admin member whose email matches one of the user's verified emails (maintainer first), otherwise 'user'.
-const userRoleSQL = `COALESCE((SELECT m.role FROM admin_members m WHERE m.enabled AND m.email IN (` + userVerifiedEmailsSQL + `)
- ORDER BY CASE m.role WHEN 'maintainer' THEN 0 WHEN 'operator' THEN 1 WHEN 'reviewer' THEN 2 WHEN 'readonly' THEN 3 ELSE 4 END,m.role LIMIT 1),'user')`
+// userRoleSQL is the console role of the user u: maintainer when one of the user's verified emails is a configured owner (ownersParam is the placeholder of a text[] holding them), otherwise the role of an enabled admin member whose email matches one of those emails (maintainer first), otherwise 'user'. Owners need no admin_members row, so without the owners argument they would show as ordinary users.
+func userRoleSQL(ownersParam string) string {
+	return `CASE WHEN EXISTS(SELECT 1 FROM (` + userVerifiedEmailsSQL + `) v(email) WHERE v.email=ANY(` + ownersParam + `::text[])) THEN 'maintainer' ELSE COALESCE((SELECT m.role FROM admin_members m WHERE m.enabled AND m.email IN (` + userVerifiedEmailsSQL + `)
+ ORDER BY CASE m.role WHEN 'maintainer' THEN 0 WHEN 'operator' THEN 1 WHEN 'reviewer' THEN 2 WHEN 'readonly' THEN 3 ELSE 4 END,m.role LIMIT 1),'user') END`
+}
+
+// adminOwnersArg is the configured owners as a non-nil text[] argument; a nil slice would be sent as NULL.
+func (a *Service) adminOwnersArg() []string {
+	return append([]string{}, a.admin.Owners...)
+}
 
 // userContactSQL picks the user's primary contact (an email-code address, then a provider email, then a phone number) and masks it in the database, so the console never receives a full address or number: "j***@gmail.com", "+86****2201"; a short phone number keeps only its last two digits, so most of it stays hidden.
 const userContactSQL = `LEFT JOIN LATERAL (SELECT CASE WHEN c.kind='phone' THEN left(c.value,3)||'****'||right(c.value,CASE WHEN length(c.value)>=12 THEN 4 ELSE 2 END) ELSE left(c.value,1)||'***@'||split_part(c.value,'@',2) END AS contact,c.kind AS contact_kind FROM (
@@ -39,10 +46,11 @@ const userContactSQL = `LEFT JOIN LATERAL (SELECT CASE WHEN c.kind='phone' THEN 
 const userActivitySQL = `LEFT JOIN LATERAL (SELECT count(*) FILTER (WHERE NOT s.revoked AND s.expires_at>now()) AS devices,
  max(greatest(s.created_at,s.access_expires-interval '15 minutes')) AS last_active FROM auth_sessions s WHERE s.user_id=u.id) activity ON true`
 
-// usersList serves GET /api/users. sessions is kept next to devices for older consoles; contact is already masked, so the page search never matches a full address either.
+// usersList serves GET /api/users. sessions is kept next to devices for older consoles; contact is already masked, so the page search never matches a full address either. $4 is the configured owners.
 var usersList = adminList{
+	args: func(a *Service) []any { return []any{a.adminOwnersArg()} },
 	query: `SELECT u.id,u.display_name,u.created_at,activity.devices AS sessions,activity.devices,activity.last_active,
- COALESCE(contact.contact,'') AS contact,COALESCE(contact.contact_kind,'') AS contact_kind,` + userRoleSQL + ` AS role,
+ COALESCE(contact.contact,'') AS contact,COALESCE(contact.contact_kind,'') AS contact_kind,` + userRoleSQL("$4") + ` AS role,
  u.banned_at IS NOT NULL AS banned,u.banned_at,COALESCE(u.ban_reason,'') AS ban_reason
  FROM auth_users u ` + userContactSQL + `
  ` + userActivitySQL,
@@ -183,7 +191,7 @@ func (a *Service) adminUserStats(w http.ResponseWriter, r *http.Request, _ strin
 		a.error(w, err)
 		return
 	}
-	rows, err := a.store.pool.Query(r.Context(), `SELECT role,count(*) FROM (SELECT `+userRoleSQL+` AS role FROM auth_users u) x GROUP BY role`)
+	rows, err := a.store.pool.Query(r.Context(), `SELECT role,count(*) FROM (SELECT `+userRoleSQL("$1")+` AS role FROM auth_users u) x GROUP BY role`, a.adminOwnersArg())
 	if err != nil {
 		a.error(w, err)
 		return

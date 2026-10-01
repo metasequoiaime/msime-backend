@@ -128,7 +128,9 @@ func contentRoute(section string) adminRouteHandler {
 
 // adminList is one paginated GET /api/{name} list: query yields the rows, each with created_at and id for ordering, and filters names the query parameters this list accepts besides page and q.
 type adminList struct {
-	query   string
+	query string
+	// args, when set, supplies extra query arguments from the service configuration (never from the request). They follow the runner's own $1 search, $2 offset and $3 page, so the first is $4, and come before the filter arguments.
+	args    func(*Service) []any
 	filters []listFilter
 }
 

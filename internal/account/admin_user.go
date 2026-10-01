@@ -24,7 +24,7 @@ func (a *Service) adminUser(w http.ResponseWriter, r *http.Request, id string) {
 	err := a.store.pool.QueryRow(r.Context(), `SELECT json_build_object(
  'id',u.id,'display_name',u.display_name,'created_at',u.created_at,
  'providers',COALESCE((SELECT json_agg(DISTINCT provider ORDER BY provider) FROM auth_identities WHERE user_id=u.id),'[]'::json),
- 'role',`+userRoleSQL+`,'contact',COALESCE(contact.contact,''),'contact_kind',COALESCE(contact.contact_kind,''),
+ 'role',`+userRoleSQL("$2")+`,'contact',COALESCE(contact.contact,''),'contact_kind',COALESCE(contact.contact_kind,''),
  'banned',u.banned_at IS NOT NULL,'banned_at',u.banned_at,'ban_reason',COALESCE(u.ban_reason,''),'banned_by',COALESCE(`+actorDisplaySQL("u.banned_by")+`,''),
  'sync',EXISTS(SELECT 1 FROM user_preferences WHERE user_id=u.id),'last_active',activity.last_active,
  'active_sessions',(SELECT count(*) FROM auth_sessions WHERE user_id=u.id AND NOT revoked AND expires_at>now()),
@@ -51,7 +51,7 @@ func (a *Service) adminUser(w http.ResponseWriter, r *http.Request, id string) {
  WHERE (a.target=u.id AND a.action IN ('ban_user','unban_user','revoke_sessions'))
   OR (a.action='revoke_session' AND a.target IN (SELECT id FROM auth_sessions WHERE user_id=u.id))
  ORDER BY a.created_at DESC,a.id DESC LIMIT 20
- ) h),'[]'::json)) FROM auth_users u `+userContactSQL+` `+userActivitySQL+` WHERE u.id=$1`, id).Scan(&result)
+ ) h),'[]'::json)) FROM auth_users u `+userContactSQL+` `+userActivitySQL+` WHERE u.id=$1`, id, a.adminOwnersArg()).Scan(&result)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "not_found")
 		return

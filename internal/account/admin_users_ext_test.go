@@ -526,3 +526,45 @@ func TestAdminUsersShortPhoneMasking(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+// A configured owner has no admin_members row, yet the list, the role chips and the detail show the owner's account as a maintainer; an unverified email claiming the owner address does not.
+func TestAdminUsersCountConfiguredOwnersAsMaintainers(t *testing.T) {
+	db, a := usersTestStore(t)
+	a.ConfigureAdmin(AdminSettings{Owners: []string{"boss@example.test"}})
+	owner := complete(t, db, Identity{"email", "boss@example.test"})
+	claimant := complete(t, db, Identity{"google", "google-claimant"})
+	plain := complete(t, db, Identity{"email", "someone@example.test"})
+	if _, err := db.pool.Exec(t.Context(), `UPDATE auth_identities SET email='boss@example.test',email_verified=false WHERE subject='google-claimant'`); err != nil {
+		t.Fatal(err)
+	}
+	readonly := AdminAccess{Actor: "pat:ro@example.test", Email: "ro@example.test", Role: "readonly", Permissions: []string{PermViewCloudUsage}}
+
+	var stats struct {
+		Roles map[string]int64 `json:"roles"`
+	}
+	if w := usersCall(a, readonly, "GET", "/api/users/stats", ""); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &stats) != nil || stats.Roles["maintainer"] != 1 || stats.Roles["user"] != 2 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var page struct {
+		Items []struct {
+			ID   string `json:"id"`
+			Role string `json:"role"`
+		} `json:"items"`
+	}
+	if w := usersCall(a, readonly, "GET", "/api/users?role=maintainer", ""); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Items) != 1 || page.Items[0].ID != owner.User.ID {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for id, want := range map[string]string{owner.User.ID: "maintainer", claimant.User.ID: "user", plain.User.ID: "user"} {
+		var detail struct {
+			Role string `json:"role"`
+		}
+		if w := usersCall(a, readonly, "GET", "/api/users/"+id, ""); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.Role != want {
+			t.Fatal(id, want, w.Code, w.Body.String())
+		}
+	}
+	// Without configured owners the same account is an ordinary user again, so the role comes from the configuration rather than the data.
+	a.ConfigureAdmin(AdminSettings{})
+	if w := usersCall(a, readonly, "GET", "/api/users?role=maintainer", ""); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Items) != 0 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}

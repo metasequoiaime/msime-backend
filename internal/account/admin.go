@@ -110,6 +110,9 @@ func (a *Service) adminList(w http.ResponseWriter, r *http.Request, list adminLi
 	query := r.URL.Query()
 	accepted := map[string]bool{}
 	args := []any{search, (page - 1) * 50, page}
+	if list.args != nil {
+		args = append(args, list.args(a)...)
+	}
 	conditions := ""
 	for _, f := range list.filters {
 		accepted[f.param] = true
