@@ -105,7 +105,7 @@ export default function CommunityPage() {
   useEffect(() => {
     if (lastPage !== null) setSearch({ page: lastPage > 1 ? String(lastPage) : undefined });
   }, [lastPage, setSearch]);
-  const target = (item: Item): Target => ({ section: tab, id: item.id, name: item.name, moderation: item.moderation, moderation_reason: item.moderation_reason });
+  const target = (item: Item): Target => ({ section: tab, id: item.id, name: item.name, moderation: item.moderation, moderation_reason: item.moderation_reason, previous_moderation: item.previous_moderation, created_at: item.created_at, updated_at: item.updated_at });
 
   let body: ReactNode;
   if (list.isError && !list.data) {

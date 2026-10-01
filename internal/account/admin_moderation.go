@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -19,7 +20,7 @@ import (
 
 // moderationColumns are the moderation fields every list row carries; flag is the automatic check's warning, shown only while the row awaits review. alias and section are fixed identifiers, never request text.
 func moderationColumns(alias, section string) string {
-	return alias + `.moderation,` + alias + `.moderation_reason,` + alias + `.moderated_by,` + alias + `.moderated_at,
+	return alias + `.moderation,` + alias + `.previous_moderation,` + alias + `.moderation_reason,` + alias + `.moderated_by,` + alias + `.moderated_at,
  CASE WHEN ` + alias + `.moderation='pending' THEN ` + alias + `.moderation_reason END AS flag,
  (SELECT count(*) FROM community_reports WHERE kind='` + section + `' AND item_id=` + alias + `.id) AS reports`
 }
@@ -82,18 +83,19 @@ var (
 	actionDeleteReply         = deleteContent(`DELETE FROM community_resources WHERE id=$1 AND kind='reply'`)
 )
 
-// moderationTable is where one admin section's rows live; kind narrows the shared resources table and label names the content kind in notifications.
+// moderationTable is where one admin section's rows live; kind narrows the shared resources table and label names the content kind in notifications. editable marks tables whose rows the author can change in place, which moves updated_at, so an approval can be pinned to the version the moderator reviewed.
 type moderationTable struct {
 	table, kind, label string
+	editable           bool
 }
 
 // moderationSections maps the admin section names (also the community_reports kinds) to their tables.
 var moderationSections = map[string]moderationTable{
-	"skins":           {"community_skins", "", "皮肤"},
-	"candidate-skins": {"community_candidate_skins", "", "候选皮肤"},
-	"plugins":         {"community_plugins", "", "插件"},
-	"dictionaries":    {"community_resources", "dictionary", "词库"},
-	"replies":         {"community_resources", "reply", "回复模板"},
+	"skins":           {"community_skins", "", "皮肤", false},
+	"candidate-skins": {"community_candidate_skins", "", "候选皮肤", true},
+	"plugins":         {"community_plugins", "", "插件", false},
+	"dictionaries":    {"community_resources", "dictionary", "词库", true},
+	"replies":         {"community_resources", "reply", "回复模板", true},
 }
 
 // match is the WHERE clause selecting the ids in $1 of this section; every identifier is a fixed string from moderationSections.
@@ -181,25 +183,64 @@ func bannedOwnerGuard(ctx context.Context, tx pgx.Tx, section moderationTable, i
 }
 
 // actionApproveContent approves the items ids (or id) of section. A pending row keeps its automatic flag in moderation_reason, so undoing the approval brings the warning back; a removed row's removal reason is cleared.
+//
+// With value {"from":"pending"|"removed","created_at":"<RFC 3339>","updated_at":"<RFC 3339>"} the approval applies only to rows still in the state the moderator saw, still the same row (created_at, since an author can delete an item and publish different content under the same id) and, for sections the author can edit, still at the version the moderator reviewed (updated_at), each as the list or detail returned it. Otherwise nothing changes and the action fails with 409 conflict, so a stale card can neither republish an item another moderator just removed nor publish content nobody reviewed.
 func actionApproveContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
 	section, ids, err := moderationRequest(v)
 	if err != nil {
 		return actionResult{}, err
 	}
+	var expect struct {
+		From      string     `json:"from"`
+		CreatedAt *time.Time `json:"created_at"`
+		UpdatedAt *time.Time `json:"updated_at"`
+	}
+	pinned := len(v.Value) > 0 && string(v.Value) != "null"
+	if pinned {
+		d := json.NewDecoder(bytes.NewReader(v.Value))
+		d.DisallowUnknownFields()
+		if d.Decode(&expect) != nil || (expect.From != "pending" && expect.From != "removed") || (expect.UpdatedAt != nil && !section.editable) {
+			return actionResult{}, actionFail(400, "invalid_value")
+		}
+	}
 	if err = bannedOwnerGuard(ctx, tx, section, ids); err != nil {
 		return actionResult{}, err
 	}
-	changed, err := moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET moderation='approved',previous_moderation=NULL,moderation_reason=CASE WHEN moderation='pending' THEN moderation_reason END,moderated_by=$2,moderated_at=now()`+section.match()+` RETURNING id,name`, ids, adminActor(ctx))
+	// $3, $4 and $5 are NULL without a pin, which leaves the conditions true.
+	var from *string
+	if pinned {
+		from = &expect.From
+	}
+	condition := ` AND ($3::text IS NULL OR moderation=$3) AND ($4::timestamptz IS NULL OR created_at=$4)`
+	args := []any{ids, adminActor(ctx), from, expect.CreatedAt}
+	if section.editable {
+		condition += ` AND ($5::timestamptz IS NULL OR updated_at=$5)`
+		args = append(args, expect.UpdatedAt)
+	}
+	changed, err := moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET moderation='approved',previous_moderation=NULL,moderation_reason=CASE WHEN moderation='pending' THEN moderation_reason END,moderated_by=$2,moderated_at=now()`+section.match()+condition+` RETURNING id,name`, args...)
 	if err != nil {
 		return actionResult{}, err
 	}
 	if len(changed) == 0 {
+		var exists bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM `+section.table+section.match()+`)`, ids).Scan(&exists); err != nil {
+			return actionResult{}, err
+		}
+		if exists {
+			return actionResult{}, actionFail(409, "conflict")
+		}
 		return actionResult{}, actionFail(404, "not_found")
+	}
+	if pinned && len(changed) < len(ids) {
+		// Part of a pinned batch went stale: the action error rolls the whole transaction back.
+		return actionResult{}, actionFail(409, "conflict")
 	}
 	return moderationResult(v, changed, nil), nil
 }
 
 // actionRemoveContent hides the items ids (or id) of section from the public endpoints, recording reason and the state it replaced.
+//
+// With value {"previous":"pending"|"approved"} the state a later restore_content returns to is that one instead of the state the removal replaced. The console sends it when undoing the approval or restore of a removed item, so the undo puts back the removed item's own restore state rather than "approved".
 func actionRemoveContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
 	section, ids, err := moderationRequest(v)
 	if err != nil {
@@ -209,8 +250,20 @@ func actionRemoveContent(a *Service, ctx context.Context, tx pgx.Tx, v actionReq
 	if reason == "" {
 		return actionResult{}, actionFail(400, "invalid_reason")
 	}
+	var previous *string
+	if len(v.Value) > 0 && string(v.Value) != "null" {
+		var value struct {
+			Previous string `json:"previous"`
+		}
+		d := json.NewDecoder(bytes.NewReader(v.Value))
+		d.DisallowUnknownFields()
+		if d.Decode(&value) != nil || (value.Previous != "pending" && value.Previous != "approved") {
+			return actionResult{}, actionFail(400, "invalid_value")
+		}
+		previous = &value.Previous
+	}
 	// Removing a removed row again only updates the reason, so previous_moderation keeps the state the first removal replaced.
-	changed, err := moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET previous_moderation=CASE WHEN moderation='removed' THEN previous_moderation ELSE moderation END,moderation='removed',moderation_reason=$3,moderated_by=$2,moderated_at=now()`+section.match()+` RETURNING id,name`, ids, adminActor(ctx), reason)
+	changed, err := moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET previous_moderation=CASE WHEN moderation='removed' THEN previous_moderation ELSE COALESCE($4,moderation) END,moderation='removed',moderation_reason=$3,moderated_by=$2,moderated_at=now()`+section.match()+` RETURNING id,name`, ids, adminActor(ctx), reason, previous)
 	if err != nil {
 		return actionResult{}, err
 	}

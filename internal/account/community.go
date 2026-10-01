@@ -232,6 +232,22 @@ func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
 		a.error(w, e)
 		return
 	}
+	// Stable client UUID makes publication retry safe, and never changes someone else's work. A published skin never changes, so a retry is answered before screening: a word added to the list since then cannot turn the retry of live content into 422 or count its hits again. The probe in the transaction stays authoritative.
+	var existingOwner string
+	var identical bool
+	e = a.store.pool.QueryRow(r.Context(), `SELECT owner_id, name=$2 AND description=$3 AND design=$4::jsonb FROM community_skins WHERE id=$1`, input.ID, input.Name, input.Description, raw).Scan(&existingOwner, &identical)
+	if e == nil {
+		if existingOwner != p.UserID || !identical {
+			writeError(w, 409, "skin_id_conflict")
+			return
+		}
+		write(w, 200, map[string]string{"id": input.ID})
+		return
+	}
+	if !errors.Is(e, pgx.ErrNoRows) {
+		a.error(w, e)
+		return
+	}
 	flag, ok := a.screenUpload(w, r, input.Name, input.Description)
 	if !ok {
 		return
@@ -242,9 +258,6 @@ func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	// Stable client UUID makes publication retry safe, and never changes someone else's work.
-	var existingOwner string
-	var identical bool
 	e = tx.QueryRow(r.Context(), `SELECT owner_id, name=$2 AND description=$3 AND design=$4::jsonb FROM community_skins WHERE id=$1`, input.ID, input.Name, input.Description, raw).Scan(&existingOwner, &identical)
 	if e == nil {
 		if existingOwner != p.UserID || !identical {
