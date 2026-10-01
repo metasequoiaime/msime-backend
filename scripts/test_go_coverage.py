@@ -15,7 +15,7 @@ class CoverageTests(unittest.TestCase):
 
     def test_scope_and_exact_threshold(self):
         module = "github.com/metasequoiaime/MSIME-Backend"
-        packages = [module + suffix for suffix in ("", "/cmd/msime-server", "/admin-web", "/internal/account", "/internal/server", "/internal/engine", "/internal/skins")]
+        packages = [module + suffix for suffix in ("", "/cmd/msime-server", "/cmd/msime-cloud", "/admin-web", "/internal/account", "/internal/server", "/internal/engine", "/internal/skins")]
         stats = dict.fromkeys(packages + ["total"], (100, 90))
         check(stats)
         for scope in ("total", module + "/internal/account", module + "/internal/server"):

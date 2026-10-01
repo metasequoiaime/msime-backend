@@ -10,6 +10,15 @@ import (
 //go:embed swagger/*
 var documentation embed.FS
 
+// OpenAPI returns the published API description, the same document /openapi.json serves.
+func OpenAPI() []byte {
+	data, err := documentation.ReadFile("swagger/openapi.json")
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
 var documentationHandler = func() http.Handler {
 	files, err := fs.Sub(documentation, "swagger")
 	if err != nil {

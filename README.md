@@ -157,6 +157,24 @@ Windows 设置中选择“MSIME 共通后端（实时语音）”，地址填写
 
 在 macOS 同时检出 MSIME-Apple 后，运行 `python3 scripts/apple_e2e.py` 可编译实际 Foundation 客户端并连接 Go TLS 服务。测试证书只作为测试进程的信任锚，不修改系统信任或 Keychain；验证候选、日语、错误令牌、未受信任证书、在途取消与主线程回传。WebSocket 依赖的许可见 `THIRD_PARTY_NOTICES.txt`，容器内放在 `/licenses/`。
 
+## 命令行（msime-cloud）
+
+`cmd/msime-cloud` 是给 AI 助手（以及人）在终端里使用水杉云的命令行：列出与查看接口、用邮箱或短信验证码登录、调用任意接口并自动附带和刷新会话。响应写到 stdout（JSON 自动缩进），提示写到 stderr；2xx 退出 0，服务端返回错误或调用失败退出 1（错误正文仍会打印），用法错误退出 2。
+
+```sh
+go build -o msime-cloud ./cmd/msime-cloud
+./msime-cloud routes dictionaries                       # 方法、路径、鉴权类型、说明
+./msime-cloud describe GET /v1/users/me/dictionaries/pinyin   # 参数、请求体与响应 schema
+./msime-cloud login start --email user@example.com      # 返回 challenge_id，验证码发到邮箱
+./msime-cloud login finish --challenge <id> --code 123456
+./msime-cloud call GET /v1/users/me/dictionaries/pinyin -q q=你好
+echo '{"display_name":"昵称"}' | ./msime-cloud call PATCH /v1/users/me -
+./msime-cloud call POST /v1/community/plugins -F file=@pack.zip
+MSIME_ADMIN_TOKEN=... ./msime-cloud call GET /api/overview -q days=7
+```
+
+`/v1` 接口的列表和说明直接取自内嵌的 `internal/server/swagger/openapi.json`，随规范自动更新；匿名接口不发送令牌。`/api` 路径发往管理后台并使用 `MSIME_ADMIN_TOKEN`，其路由表写在 `cmd/msime-cloud/routes.go`，由测试对照 `internal/account/admin.go` 检查。默认连接 `https://api.msime.app` 与 `https://admin.msime.app`，可用 `MSIME_CLOUD_URL`、`MSIME_ADMIN_URL` 改为本地服务；设置 `MSIME_CLOUD_TOKEN` 时改用该设备令牌或访问令牌。登录会话按服务地址保存在用户配置目录下 `msime-cloud/credentials.json`（权限 0600，可用 `MSIME_CLOUD_CONFIG_DIR` 指定目录），刷新令牌经文件锁串行使用，避免多个命令同时刷新时重放旧令牌导致会话被撤销。
+
 ## Swagger / OpenAPI
 
 文档默认关闭，生产环境保持 `docs_enabled: false`（省略时同样关闭）。只有本地开发需要调试时，在配置顶层设置 `"docs_enabled": true`，重启后访问 `/swagger/`（`/swagger` 自动跳转），规范文件为 `/openapi.json`。显式启用后的文档无需登录；关闭时页面、JS/CSS 和 OpenAPI 入口统一返回 404，即使携带有效令牌也不开放。在线 API 的鉴权不受文档开关影响。点击 **Authorize**，只填写令牌本身，再使用 **Try it out → Execute**。令牌不持久化到浏览器存储。WAV 接口提供文件上传；实时语音仅展示 WebSocket 协议，不提供 HTTP 调试按钮。页面与 Swagger UI 5.32.15 的 JS/CSS 均内嵌到二进制，无需外部 CDN，禁用外部 validator。
