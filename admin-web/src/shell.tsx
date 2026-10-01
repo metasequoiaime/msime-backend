@@ -16,7 +16,7 @@ export function Shell() {
     <nav id="admin-navigation" aria-label="后台导航" className={`${menuOpen ? "grid" : "hidden"} mt-5 gap-5 md:grid`}>{([
       ["数据与用户", ["overview", "users", "downloads", "crashes"]],
       ["社区内容", ["skins", "dictionaries", "replies"]],
-      ["系统管理", ["admins", "audit", "system"]],
+      ["系统管理", ["admins", "site-settings", "audit", "system"]],
     ] as const).map(([group, keys]) => <div className="nav-group" key={group}><p className="mb-2 mt-4 px-3 text-[11px] font-bold uppercase tracking-[1px] text-[#73998a]">{group}</p>{keys.filter(key => key !== "admins" || session?.can_manage_admins).map(key => {
       const [title, , icon] = pages[key]; const active = key === "overview" ? path === "/" : path === `/${key}`;
       return <Link key={key} to={key === "overview" ? "/" : "/$section"} params={{ section: key }} className={`my-0.5 flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 text-[13px] no-underline transition ${active ? "bg-[#d8f1e0] font-semibold text-[#164c35] shadow-md" : "text-[#aac4b8] hover:bg-[#1b4336] hover:text-[#e8f5ed]"}`} aria-current={active ? "page" : undefined} onClick={() => setMenuOpen(false)}><Icon className="h-5 w-5 shrink-0" name={icon} /><span>{title}</span></Link>;

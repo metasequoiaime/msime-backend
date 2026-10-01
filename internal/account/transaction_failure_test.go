@@ -111,7 +111,7 @@ func testUserDataTransactions(t *testing.T, native bool) {
 	snapshot := func(t *testing.T, uid string) string {
 		t.Helper()
 		var all strings.Builder
-		for _, table := range []string{"auth_users", "user_dictionary_state", "user_dictionary_entries", "user_dictionary_changes", "user_dictionary_overlay", "user_candidate_positions", "user_candidate_selections", "user_clipboard_settings", "user_clipboard", "user_preferences", "auth_sessions", "community_skins", "community_resources", "community_skin_downloads", "community_resource_saves", "community_candidate_skins", "community_candidate_skin_files", "community_candidate_skin_downloads", "community_candidate_skin_ratings", "admin_members", "admin_sessions", "admin_audit"} {
+		for _, table := range []string{"auth_users", "user_dictionary_state", "user_dictionary_entries", "user_dictionary_changes", "user_dictionary_overlay", "user_candidate_positions", "user_candidate_selections", "user_clipboard_settings", "user_clipboard", "user_preferences", "auth_sessions", "community_skins", "community_resources", "community_skin_downloads", "community_resource_saves", "community_candidate_skins", "community_candidate_skin_files", "community_candidate_skin_downloads", "community_candidate_skin_ratings", "admin_members", "admin_sessions", "admin_audit", "site_settings"} {
 			var raw string
 			column := "user_id"
 			if table == "auth_users" {
@@ -125,7 +125,7 @@ func testUserDataTransactions(t *testing.T, native bool) {
 				where = ` WHERE skin_id IN (SELECT id FROM community_candidate_skins WHERE owner_id=$1)`
 			}
 			args := []any{uid}
-			if strings.HasPrefix(table, "admin_") {
+			if strings.HasPrefix(table, "admin_") || table == "site_settings" {
 				where = ""
 				args = nil
 			}
@@ -244,6 +244,14 @@ func testUserDataTransactions(t *testing.T, native bool) {
 	operations["admin add member"] = func(s *Store, f fixture) error {
 		w := httptest.NewRecorder()
 		(&Service{store: s}).AdminMembersHTTP(w, jsonRequest("POST", "/api/admins", `{"action":"add","email":"`+f.user.User.ID+`@example.test"}`, ""), nil)
+		if w.Code != 200 {
+			return fmt.Errorf("HTTP %d: %s", w.Code, w.Body.String())
+		}
+		return nil
+	}
+	operations["admin set lanzou url"] = func(s *Store, f fixture) error {
+		w := httptest.NewRecorder()
+		(&Service{store: s}).adminSiteSettings(w, jsonRequest("POST", "/api/site-settings", `{"lanzou_url":"https://example.com/`+f.user.User.ID+`"}`, ""))
 		if w.Code != 200 {
 			return fmt.Errorf("HTTP %d: %s", w.Code, w.Body.String())
 		}

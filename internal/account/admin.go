@@ -58,6 +58,10 @@ func (a *Service) Telemetry(w http.ResponseWriter, r *http.Request) {
 // AdminHTTP must only be called after the independent admin authentication gate.
 func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/")
+	if path == "site-settings" {
+		a.adminSiteSettings(w, r)
+		return
+	}
 	if r.Method == "POST" && path == "actions" {
 		a.adminAction(w, r)
 		return

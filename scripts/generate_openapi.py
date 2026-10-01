@@ -311,6 +311,11 @@ paths['/v1/community/stats']={'get':{'summary':'社区内容统计','tags':['创
     'description':'公开只读，供官网展示。只统计社区作品与去重后的下载、收藏人次，不含用户数和安装包上报；注销账号的作品与互动随之移除。响应禁用缓存，调用方自行缓存。',
     'responses':{'200':{'description':'成功','content':{'application/json':{'schema':community_stats}}},'429':{'description':'请求过多','headers':{'Retry-After':{'description':'重试等待秒数','schema':{'type':'integer'}}}},'503':{'description':'用户体系未启用或数据库不可用'}}}}
 
+site_mirrors=obj({'lanzou_url':string(maxLength=512,description='蓝奏云盘分享链接（https 绝对地址）；未设置或已清空时为空字符串。'),'updated_at':string(description='链接最近更新时间（UTC，RFC 3339）；lanzou_url 为空时为空字符串。')},['lanzou_url','updated_at'])
+paths['/v1/site/download-mirrors']={'get':{'summary':'官网下载镜像链接','tags':['官网'],'security':[],
+    'description':'公开只读，供官网下载页展示 Windows 安装包的蓝奏云盘链接，由管理员在后台「站点设置」中修改。按 IP 每分钟 120 次限流；成功响应带 Cache-Control: public, max-age=60，允许官网和边缘缓存短时缓存。用户体系未启用时返回 503。',
+    'responses':{'200':{'description':'成功','content':{'application/json':{'schema':site_mirrors}}},'429':{'description':'请求过多','headers':{'Retry-After':{'description':'重试等待秒数','schema':{'type':'integer'}}}},'503':{'description':'用户体系未启用或数据库不可用'}}}}
+
 # Anonymous website word form (msime-web#213). Errors here use a plain-string error plus code, which the website form reads.
 word_error=obj({'error':string(description='可直接展示给用户的中文说明。'),'code':string()},['error','code'])
 word_rejected=obj({'error':string(),'code':string(enum=['invalid_entries']),'rejected':{'type':'array','items':obj({'index':{'type':'integer','minimum':0,'description':'entries 中的下标。'},'code':string(enum=['word_required','invalid_word','word_too_long','pinyin_required','invalid_pinyin','invalid_syllable','syllable_count_mismatch','display_required','invalid_display','display_too_long','source_required','invalid_source','source_too_long','gloss_required','invalid_gloss','gloss_too_long','duplicate_entry','already_listed'],description='words 类型用 word_*、pinyin_*、*_syllable*；english 类型用 word_*、display_*；translations 类型用 source_*、gloss_*；duplicate_entry 与 already_listed 各类型通用。'),'reason':string(description='可直接展示在该行旁的中文说明。')},['index','code','reason'])}},['error','code'])

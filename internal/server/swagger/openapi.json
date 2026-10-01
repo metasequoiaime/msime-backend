@@ -14366,6 +14366,57 @@
         }
       }
     },
+    "/v1/site/download-mirrors": {
+      "get": {
+        "summary": "官网下载镜像链接",
+        "tags": [
+          "官网"
+        ],
+        "security": [],
+        "description": "公开只读，供官网下载页展示 Windows 安装包的蓝奏云盘链接，由管理员在后台「站点设置」中修改。按 IP 每分钟 120 次限流；成功响应带 Cache-Control: public, max-age=60，允许官网和边缘缓存短时缓存。用户体系未启用时返回 503。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "lanzou_url": {
+                      "type": "string",
+                      "maxLength": 512,
+                      "description": "蓝奏云盘分享链接（https 绝对地址）；未设置或已清空时为空字符串。"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "description": "链接最近更新时间（UTC，RFC 3339）；lanzou_url 为空时为空字符串。"
+                    }
+                  },
+                  "required": [
+                    "lanzou_url",
+                    "updated_at"
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "请求过多",
+            "headers": {
+              "Retry-After": {
+                "description": "重试等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "用户体系未启用或数据库不可用"
+          }
+        }
+      }
+    },
     "/v1/community/word-submissions": {
       "get": {
         "summary": "查询官网词条提交是否开放",

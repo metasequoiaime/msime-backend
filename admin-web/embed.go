@@ -15,7 +15,7 @@ var assets embed.FS
 
 var pagePaths = map[string]bool{
 	"/admins": true, "/": true, "/users": true, "/downloads": true, "/crashes": true,
-	"/skins": true, "/dictionaries": true, "/replies": true, "/audit": true,
+	"/skins": true, "/dictionaries": true, "/replies": true, "/audit": true, "/system": true, "/site-settings": true,
 }
 
 func IsPath(path string) bool { return pagePaths[path] || strings.HasPrefix(path, "/assets/") }

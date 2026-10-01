@@ -9,10 +9,11 @@ export const pages = {
   replies: ["回复模板", "管理社区公开的快捷回复模板。", "replies"],
   audit: ["操作日志", "管理员操作记录，按操作时间倒序排列。", "audit"],
   system: ["系统状态", "查看当前版本、引擎和上游能力配置。", "system"],
+  "site-settings": ["站点设置", "管理官网展示的下载镜像链接，修改会记录审计日志。", "site-settings"],
 } as const;
 export type Page = keyof typeof pages;
-export type ListPage = Exclude<Page, "overview" | "admins" | "system">;
-export function isListPage(value: string): value is ListPage { return value !== "overview" && value !== "admins" && Object.hasOwn(pages, value); }
+export type ListPage = Exclude<Page, "overview" | "admins" | "system" | "site-settings">;
+export function isListPage(value: string): value is ListPage { return value !== "overview" && value !== "admins" && value !== "site-settings" && Object.hasOwn(pages, value); }
 export const columns: Record<ListPage, readonly (readonly [string, string])[]> = {
   users: [["display_name", "用户"], ["id", "用户 ID"], ["created_at", "注册时间"], ["sessions", "有效会话"]],
   downloads: [["platform", "平台"], ["version", "版本"], ["id", "事件 ID"], ["created_at", "上报时间"]],
@@ -22,4 +23,4 @@ export const columns: Record<ListPage, readonly (readonly [string, string])[]> =
   replies: [["name", "模板名称"], ["prompt", "内容"], ["revision", "修订版本"], ["created_at", "发布时间"], ["updated_at", "更新时间"]],
   audit: [["actor", "管理员"], ["action", "操作"], ["target", "目标 ID"], ["created_at", "操作时间"]],
 };
-export const actionLabels: Record<string, string> = { admin_add: "添加管理员", admin_enable: "启用管理员", admin_disable: "停用管理员", admin_revoke: "撤销管理员会话", revoke_session: "撤销单个用户会话", revoke_sessions: "撤销会话", delete_skin: "删除皮肤", delete_dictionary: "删除词库", delete_reply: "删除模板", resolve_crash: "标记已处理", reopen_crash: "重新打开" };
+export const actionLabels: Record<string, string> = { admin_add: "添加管理员", admin_enable: "启用管理员", admin_disable: "停用管理员", admin_revoke: "撤销管理员会话", revoke_session: "撤销单个用户会话", revoke_sessions: "撤销会话", delete_skin: "删除皮肤", delete_dictionary: "删除词库", delete_reply: "删除模板", resolve_crash: "标记已处理", reopen_crash: "重新打开", set_lanzou_url: "设置蓝奏云盘链接", clear_lanzou_url: "清空蓝奏云盘链接" };

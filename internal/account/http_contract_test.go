@@ -100,8 +100,8 @@ func TestEveryAccountRouteAuthenticationAndDisabledService(t *testing.T) {
 			}
 			n++
 			expected := 401
-			// Community reads are public, except the author's own sync listing.
-			if method == "get" && strings.HasPrefix(path, "/v1/community/") && path != "/v1/community/candidate-skins/sync" {
+			// Community and website reads are public, except the author's own sync listing.
+			if method == "get" && (strings.HasPrefix(path, "/v1/community/") || path == siteDownloadMirrorsPath) && path != "/v1/community/candidate-skins/sync" {
 				if strings.Contains(path, "{id}") {
 					expected = 404
 				} else {

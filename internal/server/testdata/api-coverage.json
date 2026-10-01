@@ -235,6 +235,9 @@
     "GET /v1/community/stats": [
       "internal/account/community_stats_test.go::TestCommunityStatsCountsPublicContentAnonymously"
     ],
+    "GET /v1/site/download-mirrors": [
+      "internal/account/site_settings_test.go::TestSiteDownloadMirrorAdminEditAndPublicRead"
+    ],
     "GET /v1/community/skins": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
     ],
@@ -428,6 +431,12 @@
       "internal/account/admin_contract_test.go::TestAdminHTTPValidationAndAuditAtomicity",
       "internal/account/admin_user_test.go::TestAdminUserDetailsAndSessionRevocation",
       "internal/account/community_plugins_test.go::TestCommunityPluginModeration"
+    ],
+    "GET /api/site-settings": [
+      "internal/account/site_settings_test.go::TestSiteDownloadMirrorAdminEditAndPublicRead"
+    ],
+    "POST /api/site-settings": [
+      "internal/account/site_settings_test.go::TestSiteDownloadMirrorAdminEditAndPublicRead"
     ],
     "GET /api/admins": [
       "internal/account/admin_members_test.go::TestAdminMemberLifecycle",
