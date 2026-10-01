@@ -169,7 +169,15 @@ export default function NoticePage() {
     toast(draft ? "草稿已丢弃" : "公告已归档");
   };
 
-  const edit = (notice: Notice) => {
+  // edit loads a draft into the editor; unsaved changes to whatever is open there are only dropped after a confirm.
+  const edit = async (notice: Notice) => {
+    if (form.id === notice.id) return;
+    const loaded = form.id ? items?.find(n => n.id === form.id) : undefined;
+    const saved = loaded ? formFromNotice(loaded) : emptyForm;
+    if (JSON.stringify(formValue(form)) !== JSON.stringify(formValue(saved))) {
+      const ok = await confirm({ title: "放弃未保存的修改？", description: "编辑器里有还没保存的内容，打开这条草稿会丢弃它们。", okLabel: "放弃修改" });
+      if (ok === null) return;
+    }
     setForm(formFromNotice(notice));
     document.getElementById("notice-title")?.focus();
   };
@@ -177,7 +185,7 @@ export default function NoticePage() {
   const titleEmpty = !form.title.trim();
   let list = <ul className="m-0 list-none p-0">
     {visible?.map(n => <NoticeRow key={n.id} notice={n} open={expanded === n.id} editing={form.id === n.id}
-      onToggle={() => setExpanded(expanded === n.id ? null : n.id)} onEdit={() => edit(n)}
+      onToggle={() => setExpanded(expanded === n.id ? null : n.id)} onEdit={() => void edit(n)}
       onArchive={() => onArchive(n)} canArchive={canPublish} busy={archive.isPending} />)}
   </ul>;
   if (query.isPending) list = <SkeletonRows rows={4} />;

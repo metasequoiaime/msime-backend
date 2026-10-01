@@ -251,4 +251,4 @@ GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and
 
 ## 管理后台
 
-新增内嵌 Go 的 [Admin Web 项目](admin-web/README.md)，随同一镜像、同一端口启动，通过 `admin.msime.app` 独立 Host 提供服务。支持用户与会话管理、下载及崩溃统计、社区皮肤/词库/回复模板管理和操作审计。默认关闭，需要 PostgreSQL 迁移及 Google 管理员白名单（或独立管理员密钥）。配置、域名接入与客户端上报协议见 [管理后台文档](docs/admin.md)。
+新增内嵌 Go 的 [Admin Web 项目](admin-web/README.md)，随同一镜像、同一端口启动，通过 `admin.msime.app` 独立 Host 提供服务。共 14 个页面：数据概览、词库 PR 审核、社区事后审核与举报、GitHub Issue 分诊、敏感词库、用户与封禁、下载记录、公告推送（含 Telegram）、发布管理、云端监控、崩溃分组、系统状态与故障事件、角色权限与操作日志、个人中心与个人访问令牌。默认关闭，需要 PostgreSQL 12 及以上、后台迁移和 Google 管理员白名单（或独立管理员密钥）；GitHub、上游服务额度和 Telegram 渠道按需配置。角色权限、配置项、公开接口（`/v1/notices`、`/v1/community/reports`、遥测）以及需要客户端配合的改动见 [管理后台文档](docs/admin.md)。
