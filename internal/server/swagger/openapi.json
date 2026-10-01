@@ -15150,6 +15150,153 @@
           }
         }
       }
+    },
+    "/v1/notices": {
+      "get": {
+        "summary": "公告列表",
+        "tags": [
+          "公告"
+        ],
+        "security": [],
+        "description": "公开只读，无需鉴权，供 App 与官网展示管理后台已发布的公告，按发布时间倒序最多 20 条；草稿和已归档的公告不会出现。响应允许缓存 60 秒（Cache-Control: public, max-age=60），发布或归档最多 60 秒后可见。",
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "query",
+            "required": false,
+            "description": "只返回投放到该平台（或全部平台）的公告",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "windows",
+                "macos",
+                "linux",
+                "android",
+                "ios",
+                "harmony"
+              ]
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "description": "只返回包含该渠道的公告",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "site",
+                "app",
+                "telegram"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "公告 ID"
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 200,
+                            "description": "标题"
+                          },
+                          "body": {
+                            "type": "string",
+                            "maxLength": 20000,
+                            "description": "正文，支持简单 Markdown"
+                          },
+                          "targets": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "all",
+                                "windows",
+                                "macos",
+                                "linux",
+                                "android",
+                                "ios",
+                                "harmony"
+                              ]
+                            },
+                            "description": "投放平台；all 表示全部平台"
+                          },
+                          "channels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "site",
+                                "app",
+                                "telegram"
+                              ]
+                            },
+                            "description": "展示渠道：site 官网横幅，app App 内通知，telegram 已推送到 Telegram"
+                          },
+                          "published_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "发布时间（UTC）"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "body",
+                          "targets",
+                          "channels",
+                          "published_at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "platform 或 channel 不在取值范围内（invalid_platform / invalid_channel）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "请求过多",
+            "headers": {
+              "Retry-After": {
+                "description": "重试等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "用户体系未启用或数据库不可用"
+          }
+        }
+      }
     }
   },
   "components": {

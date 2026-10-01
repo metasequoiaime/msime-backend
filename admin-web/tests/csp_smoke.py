@@ -38,6 +38,10 @@ FIXTURES = {
     "/api/notifications/read": {"ok": True},
     "/api/search": {"items": [{"kind": "user", "id": "u1", "title": "smoke-user", "where": "用户账号", "target": "users"}]},
     "/api/auth/logout": {"ok": True},
+    "/api/notices": {"telegram": False, "items": [
+        {"id": "2", "title": "词库共建上线：打不出来的词直接提交", "body": "官网新增词条提交入口。", "targets": ["all"], "channels": ["site"], "status": "live", "created_by": "google:1:owner@example.com", "author": "owner@example.com", "created_at": "2026-09-27T01:30:00Z", "published_at": "2026-09-27T01:30:00Z", "updated_at": "2026-09-27T01:30:00Z"},
+        {"id": "3", "title": "Windows 10 工具栏图标方框的临时处理办法", "body": "", "targets": ["windows"], "channels": ["app"], "status": "draft", "created_by": "legacy-token", "author": "legacy-token", "created_at": "2026-09-30T08:00:00Z", "published_at": None, "updated_at": "2026-09-30T08:00:00Z"},
+    ]},
 }
 
 
@@ -190,6 +194,14 @@ def main() -> int:
                 page.wait_for_url(base + "/status")
                 page.set_viewport_size({"width": 1280, "height": 860})
                 violations("mobile nav")
+
+                page.goto(base + "/notice")
+                expect(page.get_by_text("词库共建上线：打不出来的词直接提交")).to_be_visible()
+                expect(page.get_by_role("button", name=re.compile("Telegram"))).to_be_disabled()
+                page.get_by_text("Windows 10 工具栏图标方框的临时处理办法").click()
+                page.get_by_role("button", name="编辑").click()
+                expect(page.get_by_label("标题")).to_have_value("Windows 10 工具栏图标方框的临时处理办法")
+                violations("notice")
 
                 page.goto(base + "/me")
                 page.get_by_role("button", name="退出登录").click()
