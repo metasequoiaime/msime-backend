@@ -54,6 +54,7 @@ export const crashIssueTargetSchema = z.object({
   target: z.object({ platform: z.string(), name: z.string(), repo: z.string() }).nullable(),
   issue_url: z.string().nullable(),
 });
+export type CrashIssueTarget = z.infer<typeof crashIssueTargetSchema>;
 
 // POST /api/crash-groups/{signature}/issue.
 export const crashIssueCreatedSchema = z.object({ ok: z.literal(true), status: z.literal("known"), issue_url: z.string(), number: z.number(), repo: z.string() });

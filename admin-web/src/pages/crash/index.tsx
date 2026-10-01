@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useMemo, useState } from "react";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { errorMessage, isGithubDisabled, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
 import { comparePlatforms, crashGroupsSchema, crashIssueTargetSchema, crashStatusLabel, crashStatusTone, crashTrend, platformName } from "../../api/crash";
-import type { CrashGroup, CrashStatus } from "../../api/crash";
+import type { CrashGroup, CrashIssueTarget, CrashStatus } from "../../api/crash";
 import { PageIntro } from "../../shell/page-intro";
 import { usePageSearch, useSetPageSearch } from "../../shell/page-search";
 import { noPermissionHint, usePermissions } from "../../shell/permissions";
@@ -42,16 +42,32 @@ export default function CrashPage() {
     return status ? { ...group, status } : group;
   }), [list.data, overrides]);
 
-  // Where an issue goes is answered per group, so the target of the first open group tells whether admin.github is configured at all.
-  const probe = list.data?.items.find(group => group.status === "open")?.signature ?? list.data?.items[0]?.signature;
-  const github = useQuery({
-    queryKey: keys.page("crash", "issue-target", probe),
-    queryFn: ({ signal }) => api.get(`crash-groups/${probe}/issue`, crashIssueTargetSchema, { signal }),
-    enabled: Boolean(probe),
-    retry: false,
-    staleTime: 60_000,
+  // Where an issue goes depends only on the group's platform, so one group per platform is asked (GET .../issue), preferring the groups a row could create an issue for; any answer also tells whether admin.github is configured at all.
+  const probes = useMemo(() => {
+    const byPlatform = new Map<string, string>();
+    const items = list.data?.items ?? [];
+    for (const group of items) if (group.status === "open" && !group.issue_url && !byPlatform.has(group.platform)) byPlatform.set(group.platform, group.signature);
+    if (byPlatform.size === 0 && items[0]) byPlatform.set(items[0].platform, items[0].signature);
+    return [...byPlatform];
+  }, [list.data]);
+  // configured[platform] is true when the platform has an issue repository, false when it has none, and absent while unknown (loading or failed); only true enables 建 Issue, so a row never shows a success toast for a request that is bound to fail. combine is memoized so the combined result stays the same object while the query results do not change.
+  const combine = useCallback((results: readonly { data?: CrashIssueTarget; error: unknown }[]) => {
+    const configured: Record<string, boolean> = {};
+    results.forEach((result, i) => {
+      const platform = probes[i]?.[0];
+      if (platform !== undefined && result.data) configured[platform] = result.data.target !== null;
+    });
+    return { githubDisabled: results.some(result => isGithubDisabled(result.error)), configured };
+  }, [probes]);
+  const { githubDisabled, configured } = useQueries({
+    queries: probes.map(([, signature]) => ({
+      queryKey: keys.page("crash", "issue-target", signature),
+      queryFn: ({ signal }: { signal: AbortSignal }) => api.get(`crash-groups/${signature}/issue`, crashIssueTargetSchema, { signal }),
+      retry: false,
+      staleTime: 60_000,
+    })),
+    combine,
   });
-  const githubDisabled = isGithubDisabled(github.error);
   const canTriage = can("triage_issues");
 
   // ?focus=<signature> comes from global search and crash spike notifications.
@@ -98,11 +114,12 @@ export default function CrashPage() {
       id: "actions", header: "", width: "150px", align: "right",
       // An open group that already has an issue (reopened after 已知问题) gets 查看堆栈, since a second issue would be refused.
       cell: group => group.status === "open" && !group.issue_url
-        ? <Button size="sm" variant="primary" disabled={!canTriage || githubDisabled} title={!canTriage ? noPermissionHint : githubDisabled ? "未配置 GitHub 集成" : undefined}
+        ? <Button size="sm" variant="primary" disabled={!canTriage || githubDisabled || configured[group.platform] !== true}
+          title={!canTriage ? noPermissionHint : githubDisabled ? "未配置 GitHub 集成" : configured[group.platform] === false ? "该平台未配置 Issue 仓库" : configured[group.platform] === undefined ? "正在确认该平台的 Issue 仓库…" : undefined}
           onClick={event => { event.stopPropagation(); createIssue(group); }}>建 Issue</Button>
         : <Button size="sm" variant="outline" onClick={event => { event.stopPropagation(); setSelected(group.signature); }}>查看堆栈</Button>,
     },
-  ], [max, canTriage, githubDisabled, createIssue]);
+  ], [max, canTriage, githubDisabled, configured, createIssue]);
 
   const onStatus = (group: CrashGroup, to: CrashStatus, text: string) => {
     setStatus(group, to, text).catch((error: unknown) => toast(`操作失败：${errorMessage(error)}`));
