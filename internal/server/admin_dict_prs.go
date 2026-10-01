@@ -647,7 +647,7 @@ func (s *Server) openDictPull(w http.ResponseWriter, ctx context.Context, gh *gi
 	return "", p, false
 }
 
-// trimFiles rewrites the pull request branch so that only the kept entries remain, one commit per changed file, each a compare-and-swap on the file's blob SHA as in wordSubmitter.submit, then retitles the pull request after what it now adds. It returns the new head SHA, the title and the number of entries removed; after a partial failure the removed count still covers the files already rewritten.
+// trimFiles rewrites the pull request branch so that only the kept entries remain, one commit per changed file, each a compare-and-swap on the file's blob SHA as in wordSubmitter.submit and checked to sit directly on the previous head, then retitles the pull request after what it now adds. It returns the new head SHA, the title and the number of entries removed; after a partial failure the removed count still covers the files already rewritten.
 func (s *Server) trimFiles(ctx context.Context, gh *githubapp.Client, token string, p dictPull, files []dictFile, keep map[int]bool) (string, string, int, error) {
 	repo := "/repos/" + s.dictRepo()
 	head, removed, index := p.Head.SHA, 0, 0
@@ -688,12 +688,20 @@ func (s *Server) trimFiles(ctx context.Context, gh *githubapp.Client, token stri
 		}
 		var commit struct {
 			Commit struct {
-				SHA string `json:"sha"`
+				SHA     string `json:"sha"`
+				Parents []struct {
+					SHA string `json:"sha"`
+				} `json:"parents"`
 			} `json:"commit"`
 		}
 		removed += len(drop)
 		if res.Decode(&commit) != nil || commit.Commit.SHA == "" {
 			return head, p.Title, removed, phaseError(errWordsUncertain, "commit "+f.kind.file, githubResponse{status: res.Status}, errors.New("missing commit SHA"))
+		}
+		// The blob SHA only guards this one file, and GitHub stacks the commit on whatever the branch tip is now. A commit whose parent is not the head this trim started from means something else landed on the branch (a website submission to another file), so the branch now holds entries nobody reviewed: stop before any further write or merge.
+		if len(commit.Commit.Parents) != 1 || commit.Commit.Parents[0].SHA != head {
+			slog.Warn("dictionary pull requests: branch moved during trim", "pull", p.Number, "expected_parent", head, "commit", commit.Commit.SHA)
+			return commit.Commit.SHA, p.Title, removed, errDictPRConflict
 		}
 		head = commit.Commit.SHA
 	}
@@ -846,7 +854,7 @@ func (s *Server) approveDictPR(w http.ResponseWriter, r *http.Request, gh *githu
 			return
 		}
 	}
-	// The head SHA makes the merge a compare-and-swap too: a submission that lands meanwhile is never merged unreviewed.
+	// The head SHA makes the merge a compare-and-swap too: trimFiles refuses a branch that moved under its commits, and the merge refuses one that moved after them, so a submission that lands meanwhile is never merged unreviewed.
 	res, err := gh.Do(ctx, token, "PUT", repo+"/pulls/"+strconv.Itoa(number)+"/merge", map[string]string{"merge_method": "squash", "sha": head, "commit_title": title + " (#" + strconv.Itoa(number) + ")"})
 	gh.Invalidate(repo + "/pulls")
 	switch {
@@ -869,10 +877,16 @@ func (s *Server) approveDictPR(w http.ResponseWriter, r *http.Request, gh *githu
 }
 
 func (s *Server) rejectDictPR(w http.ResponseWriter, r *http.Request, gh *githubapp.Client, number int) {
+	// HeadSHA is the head the reviewer saw: website submissions keep landing on the rolling branch, so a pull request that moved since answers 409 pr_changed instead of rejecting entries nobody reviewed.
 	var body struct {
-		Reason string `json:"reason"`
+		Reason  string `json:"reason"`
+		HeadSHA string `json:"head_sha"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	if body.HeadSHA == "" || len(body.HeadSHA) > 64 {
+		fail(w, 400, "invalid_head_sha")
 		return
 	}
 	reason := strings.TrimSpace(body.Reason)
@@ -884,7 +898,7 @@ func (s *Server) rejectDictPR(w http.ResponseWriter, r *http.Request, gh *github
 	st := s.dictPRState()
 	st.writes.Lock()
 	defer st.writes.Unlock()
-	token, _, ok := s.openDictPull(w, ctx, gh, number, "")
+	token, _, ok := s.openDictPull(w, ctx, gh, number, body.HeadSHA)
 	if !ok {
 		return
 	}

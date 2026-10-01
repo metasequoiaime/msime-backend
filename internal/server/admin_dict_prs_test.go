@@ -52,6 +52,8 @@ type fakeDictRepo struct {
 	seq     int
 	calls   []string
 	status  map[string]int
+	// beforePut, when set, runs before a contents write is applied, standing in for a commit that lands on the branch between the console's read and its write.
+	beforePut func(p *fakeDictPull)
 }
 
 func blobSHA(content string) string {
@@ -232,6 +234,9 @@ func (f *fakeDictRepo) serve(w http.ResponseWriter, r *http.Request) {
 			f.reply(w, 404, map[string]string{"message": "Not Found"})
 			return
 		}
+		if f.beforePut != nil {
+			f.beforePut(p)
+		}
 		if blobSHA(f.commits[p.head][file]) != str("sha") {
 			f.reply(w, 409, map[string]string{"message": "sha does not match"})
 			return
@@ -244,8 +249,9 @@ func (f *fakeDictRepo) serve(w http.ResponseWriter, r *http.Request) {
 			files[k] = v
 		}
 		files[file] = string(raw)
+		parent := p.head
 		f.commits[next], p.head = files, next
-		f.reply(w, 200, map[string]any{"commit": map[string]any{"sha": next}})
+		f.reply(w, 200, map[string]any{"commit": map[string]any{"sha": next, "parents": []map[string]any{{"sha": parent}}}})
 	default:
 		f.reply(w, 404, map[string]string{"message": "Not Found"})
 	}
@@ -608,22 +614,67 @@ func TestDictPRApprove(t *testing.T) {
 	}
 }
 
+// A website submission that lands on another file of the rolling branch between the review read and the trim commit leaves the file's blob SHA unchanged, so GitHub accepts the trim on top of it; the console must notice the moved branch and neither merge nor report the unreviewed head as trimmed.
+func TestDictPRTrimRefusesMovedBranch(t *testing.T) {
+	for _, path := range []string{"/api/dict-prs/12/approve", "/api/dict-prs/12/trim"} {
+		s, f, conn, schema := dictPRServer(t, "")
+		landed := false
+		f.beforePut = func(p *fakeDictPull) {
+			if landed {
+				return
+			}
+			landed = true
+			files := map[string]string{}
+			for k, v := range f.commits[p.head] {
+				files[k] = v
+			}
+			files["custom/english.txt"] += "spam\tSPAM\t1\n"
+			f.commits["submitted"], p.head = files, "submitted"
+		}
+		w := dictCall(s, "POST", path, `{"keep":[0,4,6],"head_sha":"head12"}`)
+		if w.Code != 409 || !strings.Contains(w.Body.String(), "pr_changed") {
+			t.Fatal(path, w.Code, w.Body.String())
+		}
+		p := f.pull(12)
+		if p.merged || p.state != "open" {
+			t.Fatalf("%s merged an unreviewed submission: %+v", path, p)
+		}
+		// The first trim commit landed before the move was seen; nothing after it is written.
+		if puts := slices.DeleteFunc(f.wrote(), func(c string) bool { return !strings.Contains(c, "/contents/") }); len(puts) != 1 {
+			t.Fatalf("%s: %v", path, puts)
+		}
+		if !strings.Contains(f.commits[p.head]["custom/english.txt"], "spam") {
+			t.Fatalf("%q", f.commits[p.head])
+		}
+		if rows := dictAudit(t, conn, schema); len(rows) != 1 || rows[0].action != "dict_pr_trim" {
+			t.Fatalf("%s: %+v", path, rows)
+		}
+	}
+}
+
 func TestDictPRReject(t *testing.T) {
 	s, f, conn, schema := dictPRServer(t, "")
-	for _, body := range []string{`{}`, `{"reason":"  "}`, `{"reason":"` + strings.Repeat("长", 501) + `"}`, `{"reason":"a\u0000b"}`} {
+	for _, body := range []string{`{"head_sha":"head12"}`, `{"reason":"  ","head_sha":"head12"}`, `{"reason":"` + strings.Repeat("长", 501) + `","head_sha":"head12"}`, `{"reason":"a\u0000b","head_sha":"head12"}`, `{"reason":"拼音不规范"}`, `{"reason":"拼音不规范","head_sha":"` + strings.Repeat("a", 65) + `"}`} {
 		if w := dictCall(s, "POST", "/api/dict-prs/12/reject", body); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_") {
 			t.Fatal(body, w.Code, w.Body.String())
 		}
 	}
 	f.status["POST /repos/"+dictTestRepo+"/issues/12/comments"] = 500
-	if w := dictCall(s, "POST", "/api/dict-prs/12/reject", `{"reason":"拼音不规范"}`); w.Code != 502 {
+	if w := dictCall(s, "POST", "/api/dict-prs/12/reject", `{"reason":"拼音不规范","head_sha":"head12"}`); w.Code != 502 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if p := f.pull(12); p.state != "open" || len(dictAudit(t, conn, schema)) != 0 {
 		t.Fatalf("%+v", p)
 	}
 	delete(f.status, "POST /repos/"+dictTestRepo+"/issues/12/comments")
-	if w := dictCall(s, "POST", "/api/dict-prs/12/reject", `{"reason":"含敏感或导流内容：第 3 条"}`); w.Code != 200 {
+	// A submission that landed after the reviewer read the pull request is never rejected unseen.
+	if w := dictCall(s, "POST", "/api/dict-prs/12/reject", `{"reason":"拼音不规范","head_sha":"head11"}`); w.Code != 409 || !strings.Contains(w.Body.String(), "pr_changed") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if p := f.pull(12); p.state != "open" || len(p.comments) != 0 || len(dictAudit(t, conn, schema)) != 0 {
+		t.Fatalf("%+v", p)
+	}
+	if w := dictCall(s, "POST", "/api/dict-prs/12/reject", `{"reason":"含敏感或导流内容：第 3 条","head_sha":"head12"}`); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if p := f.pull(12); p.state != "closed" || p.merged || len(p.comments) != 1 || p.comments[0] != "审核未通过：含敏感或导流内容：第 3 条" {
@@ -637,7 +688,7 @@ func TestDictPRReject(t *testing.T) {
 	if body := decodeDict[dictListBody](t, dictCall(s, "GET", "/api/dict-prs", "")); body.Counts["open"] != 0 || body.Counts["closed"] != 2 {
 		t.Fatalf("%+v", body.Counts)
 	}
-	if w := dictCall(s, "POST", "/api/dict-prs/12/reject", `{"reason":"x"}`); w.Code != 409 {
+	if w := dictCall(s, "POST", "/api/dict-prs/12/reject", `{"reason":"x","head_sha":"head12"}`); w.Code != 409 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
@@ -699,7 +750,7 @@ func TestDictPRGitHubFailuresAtEveryCall(t *testing.T) {
 		{"POST", "/api/dict-prs/12/trim", `{"keep":[0,2,4],"head_sha":"head12"}`},
 		{"POST", "/api/dict-prs/12/approve", `{"keep":[0,2,4],"head_sha":"head12"}`},
 		{"POST", "/api/dict-prs/12/approve", `{}`},
-		{"POST", "/api/dict-prs/12/reject", `{"reason":"拼音不规范"}`},
+		{"POST", "/api/dict-prs/12/reject", `{"reason":"拼音不规范","head_sha":"head12"}`},
 	}
 	for _, tc := range cases {
 		f := newFakeDictRepo(t)

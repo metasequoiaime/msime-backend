@@ -4,7 +4,7 @@ import { z } from "zod";
 export type Method = "GET" | "POST" | "PATCH" | "DELETE";
 
 // Server errors arrive as {"error":{"code","message"}} from fail() or as {"error":"code"} from newer handlers; both carry a stable machine code.
-const errorBodySchema = z.object({ error: z.union([z.string(), z.object({ code: z.string(), message: z.string().optional() })]) });
+const errorBodySchema = z.looseObject({ error: z.union([z.string(), z.object({ code: z.string(), message: z.string().optional() })]) });
 
 // codeMessages is the single place where server error codes become console copy; pages show errorMessage(error) and only override a code when their context needs different wording.
 const codeMessages: Record<string, string> = {
@@ -92,7 +92,7 @@ const codeMessages: Record<string, string> = {
   issue_exists: "这个分组已经建过 Issue。",
   issue_in_progress: "另一个请求正在为这个分组建 Issue，请稍后刷新。",
   platform_not_configured: "该平台未在 admin.github.platforms 中配置仓库，无法建 Issue。",
-  issue_not_recorded: "Issue 已在 GitHub 创建，但未能写回分组，请刷新后手动标记。",
+  issue_not_recorded: "Issue 已在 GitHub 创建，但未能写回分组，请勿重复创建，稍后将分组标记为已知。",
 };
 
 // codeMessage returns the console copy for a server error code that arrives as data rather than as a failed request, such as a per-platform error inside a listing.
@@ -113,10 +113,13 @@ function statusMessage(status: number): string {
 export class APIError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, code: string) {
+  // details is the rest of the error body, for the few errors that carry data the caller must not lose (issue_not_recorded's issue_url).
+  readonly details: Readonly<Record<string, unknown>>;
+  constructor(status: number, code: string, details: Readonly<Record<string, unknown>> = {}) {
     super(codeMessage(code) ?? statusMessage(status));
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -140,16 +143,20 @@ export async function requestAPI<S extends z.ZodType>(path: string, schema: S, o
   });
   if (!response.ok) {
     let code = "";
+    let details: Record<string, unknown> = {};
     const text = await response.text();
     if (text) {
       try {
         const parsed = errorBodySchema.safeParse(JSON.parse(text));
-        if (parsed.success) code = typeof parsed.data.error === "string" ? parsed.data.error : parsed.data.error.code;
+        if (parsed.success) {
+          code = typeof parsed.data.error === "string" ? parsed.data.error : parsed.data.error.code;
+          details = parsed.data;
+        }
       } catch {
         code = "";
       }
     }
-    throw new APIError(response.status, code);
+    throw new APIError(response.status, code, details);
   }
   const text = await response.text();
   return schema.parse(text ? JSON.parse(text) : null);

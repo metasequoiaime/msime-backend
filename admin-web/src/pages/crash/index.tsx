@@ -29,7 +29,7 @@ export default function CrashPage() {
   const { can } = usePermissions();
   const { platform = ALL, focus } = usePageSearch();
   const setSearch = useSetPageSearch();
-  const { overrides, setStatus, createIssue } = useCrashActions();
+  const { overrides, issueURLs, setStatus, createIssue } = useCrashActions();
   const [selected, setSelected] = useState<string | null>(null);
   const filter = platform === ALL ? "" : platform;
 
@@ -39,8 +39,9 @@ export default function CrashPage() {
   });
   const rows = useMemo(() => list.data?.items.map(group => {
     const status = overrides[group.signature];
-    return status ? { ...group, status } : group;
-  }), [list.data, overrides]);
+    const issueURL = group.issue_url ? undefined : issueURLs[group.signature];
+    return status || issueURL ? { ...group, status: status ?? group.status, issue_url: issueURL ?? group.issue_url } : group;
+  }), [list.data, overrides, issueURLs]);
 
   // Where an issue goes depends only on the group's platform, so one group per platform is asked (GET .../issue), preferring the groups a row could create an issue for; any answer also tells whether admin.github is configured at all.
   const probes = useMemo(() => {
@@ -152,7 +153,7 @@ export default function CrashPage() {
       emptyText={filter ? "这个平台还没有崩溃分组" : "还没有崩溃分组，客户端上报崩溃后会按签名自动分组。"}
       minWidth="880px"
     />
-    <CrashDrawer signature={openSignature} override={openSignature ? overrides[openSignature] : undefined} canTriage={canTriage}
+    <CrashDrawer signature={openSignature} override={openSignature ? overrides[openSignature] : undefined} issueURL={openSignature ? issueURLs[openSignature] : undefined} canTriage={canTriage}
       onClose={closeDrawer} onStatus={onStatus} onCreateIssue={createIssue} />
   </>;
 }

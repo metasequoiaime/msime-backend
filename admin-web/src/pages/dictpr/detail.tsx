@@ -97,7 +97,9 @@ export function PRDetailCard({ pr, repo, overrides, setOverrides, onNext, onPrev
     if (!data || !open || !allowed || trim.isPending) return;
     const reason = await confirm({ title: `驳回 #${number}？`, description: "提交者会收到驳回通知，PR 将被关闭。", okLabel: "驳回", reasons: rejectReasons });
     if (reason === null) return;
-    delayed(`#${number} 已驳回：${reason}`, "closed", keepalive => api.post(`dict-prs/${number}/reject`, rejectSchema, { reason }, { keepalive }));
+    // The head the reviewer saw: a submission that lands on the rolling branch meanwhile makes the server answer pr_changed instead of rejecting it unseen.
+    const body = { reason, head_sha: data.head_sha };
+    delayed(`#${number} 已驳回：${reason}`, "closed", keepalive => api.post(`dict-prs/${number}/reject`, rejectSchema, body, { keepalive }));
   };
 
   const canTrim = open && allowed && keep.length > 0 && keep.length < entries.length && !trim.isPending;

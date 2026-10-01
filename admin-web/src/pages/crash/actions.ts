@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { useAPI } from "../../api/client";
+import { APIError, useAPI } from "../../api/client";
 import type { API } from "../../api/client";
 import { keys } from "../../api/keys";
 import { crashIssueCreatedSchema, crashStatusSchema } from "../../api/crash";
@@ -16,6 +16,8 @@ function createCrashIssue(api: API, signature: string, keepalive: boolean) {
 export type CrashActions = {
   // overrides are optimistic statuses shown until the server confirms (or the toast's undo cancels) a change.
   overrides: Readonly<Record<string, CrashStatus>>;
+  // issueURLs are issues opened on GitHub that the server could not write back to their group (issue_not_recorded); the page shows them so 建 Issue is not offered again for a group that already has one.
+  issueURLs: Readonly<Record<string, string>>;
   setStatus: (group: CrashGroup, to: CrashStatus, text: string) => Promise<void>;
   createIssue: (group: CrashGroup) => void;
 };
@@ -26,6 +28,7 @@ export function useCrashActions(): CrashActions {
   const client = useQueryClient();
   const toast = useToast();
   const [overrides, setOverrides] = useState<Record<string, CrashStatus>>({});
+  const [issueURLs, setIssueURLs] = useState<Record<string, string>>({});
   const clear = useCallback((signature: string) => setOverrides(previous => {
     const next = { ...previous };
     delete next[signature];
@@ -54,11 +57,19 @@ export function useCrashActions(): CrashActions {
       text: "已创建 Issue 并标记为已知问题",
       delayCommit: ({ keepalive }) => createCrashIssue(api, group.signature, keepalive).then(refresh).finally(() => clear(group.signature)),
       undo: () => clear(group.signature),
-      onCommitError: () => clear(group.signature),
+      onCommitError: error => {
+        clear(group.signature);
+        // The issue exists on GitHub but the group does not point at it: keep its link, or the group would offer 建 Issue again and open a duplicate.
+        const url = error instanceof APIError && error.code === "issue_not_recorded" ? error.details.issue_url : undefined;
+        if (typeof url === "string" && url.startsWith("https://")) {
+          setIssueURLs(previous => ({ ...previous, [group.signature]: url }));
+          toast(`Issue 已创建但未写回分组，请勿重复创建：${url}`);
+        }
+      },
     });
   }, [api, clear, refresh, toast]);
 
-  return { overrides, setStatus, createIssue };
+  return { overrides, issueURLs, setStatus, createIssue };
 }
 
 export function formatCount(value: number): string {

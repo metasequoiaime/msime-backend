@@ -14,6 +14,8 @@ export type CrashDrawerProps = {
   signature: string | null;
   // override is the optimistic status while a change is pending.
   override?: CrashStatus;
+  // issueURL is an issue opened on GitHub that was not written back to the group.
+  issueURL?: string;
   canTriage: boolean;
   onClose: () => void;
   onStatus: (group: CrashGroup, to: CrashStatus, text: string) => void;
@@ -21,7 +23,7 @@ export type CrashDrawerProps = {
 };
 
 // CrashDrawer is the 查看堆栈 view: the group's counts, where its issue goes, and the latest 5 crashes with their stacks.
-export function CrashDrawer({ signature, override, canTriage, onClose, onStatus, onCreateIssue }: CrashDrawerProps) {
+export function CrashDrawer({ signature, override, issueURL, canTriage, onClose, onStatus, onCreateIssue }: CrashDrawerProps) {
   const api = useAPI();
   const detail = useQuery({
     queryKey: keys.page("crash", "group", signature),
@@ -37,7 +39,7 @@ export function CrashDrawer({ signature, override, canTriage, onClose, onStatus,
   });
 
   const loaded = detail.data?.group;
-  const group = loaded && override ? { ...loaded, status: override } : loaded;
+  const group = loaded && (override || (issueURL && !loaded.issue_url)) ? { ...loaded, status: override ?? loaded.status, issue_url: loaded.issue_url ?? issueURL ?? null } : loaded;
   const githubDisabled = isGithubDisabled(target.error);
   const repo = target.data?.target?.repo;
 

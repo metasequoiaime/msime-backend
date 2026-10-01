@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 )
 
 func TestConfigurationBoundaries(t *testing.T) {
@@ -224,6 +226,49 @@ func TestAdminConsoleConfigBoundaries(t *testing.T) {
 				t.Fatal("invalid admin console configuration accepted")
 			}
 		})
+	}
+}
+
+// word_submissions rows carry only the pull request number, so the console must review the repository the website submits to: a blank dictionary_repo follows word_submissions, and a different one stops the server from starting.
+func TestAdminDictionaryRepoFollowsWordSubmissions(t *testing.T) {
+	t.Setenv("CONSOLE_ADMIN_TOKEN", strings.Repeat("a", 40))
+	t.Setenv("CONSOLE_GITHUB_KEY", wordsKeyPEM(t, false))
+	t.Setenv("TEST_TURNSTILE_SECRET", "turnstile-secret")
+	t.Setenv("TEST_WORDS_APP_KEY", wordsKeyPEM(t, false))
+	t.Setenv("CONSOLE_DATABASE_URL", "postgres://unused")
+	t.Setenv("CONSOLE_PEPPER", strings.Repeat("p", 32))
+	base := func(dictionaryRepo string) Config {
+		return Config{
+			Auth:           account.Config{Enabled: true, DatabaseEnv: "CONSOLE_DATABASE_URL", PepperEnv: "CONSOLE_PEPPER"},
+			AllowedOrigins: []string{"https://msime.app"},
+			Admin:          AdminConfig{Enabled: true, TokenEnv: "CONSOLE_ADMIN_TOKEN", GitHub: AdminGitHubConfig{AppID: 1, InstallationID: 2, PrivateKeyEnv: "CONSOLE_GITHUB_KEY", DictionaryRepo: dictionaryRepo}},
+			WordSubmissions: WordSubmissionsConfig{
+				Turnstile: TurnstileConfig{SiteKey: "site-key", SecretEnv: "TEST_TURNSTILE_SECRET"},
+				GitHub:    WordsGitHubConfig{AppID: 3, InstallationID: 4, PrivateKeyEnv: "TEST_WORDS_APP_KEY", Repository: "example/staging-dictionary"},
+			},
+		}
+	}
+	c := base("")
+	if err := c.Validate(); err != nil || c.Admin.GitHub.DictionaryRepo != "example/staging-dictionary" {
+		t.Fatal(err, c.Admin.GitHub.DictionaryRepo)
+	}
+	if c = base("Example/Staging-Dictionary"); c.Validate() != nil {
+		t.Fatal("repository names are case-insensitive")
+	}
+	if c = base("metasequoiaime/msime-dictionary"); c.Validate() == nil {
+		t.Fatal("a console reviewing another repository than the website submits to was accepted")
+	}
+	// A malformed website repository is reported as the word_submissions setting it is, not as a dictionary_repo nobody wrote.
+	c = base("")
+	c.WordSubmissions.GitHub.Repository = "not-a-repo"
+	if err := c.Validate(); err == nil || !strings.HasPrefix(err.Error(), "word_submissions github repository") {
+		t.Fatal(err)
+	}
+	// Without the website form the console's own default still applies.
+	c = base("")
+	c.WordSubmissions = WordSubmissionsConfig{}
+	if err := c.Validate(); err != nil || c.Admin.GitHub.DictionaryRepo != defaultAdminDictionaryRepo {
+		t.Fatal(err, c.Admin.GitHub.DictionaryRepo)
 	}
 }
 
