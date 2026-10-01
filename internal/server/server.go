@@ -300,7 +300,15 @@ func (s *Server) upstream(r *http.Request, e Endpoint, method, contentType strin
 	return s.doUpstream(req)
 }
 
+// doUpstream sends req and returns its validated JSON body. A request whose context was tagged by metered is recorded in the console's service metrics: latency, and whether the call failed (transport error, non-2xx status or invalid body).
 func (s *Server) doUpstream(req *http.Request) ([]byte, error) {
+	started := time.Now()
+	b, err := s.sendUpstream(req)
+	s.observeTagged(req.Context(), started, err)
+	return b, err
+}
+
+func (s *Server) sendUpstream(req *http.Request) ([]byte, error) {
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err

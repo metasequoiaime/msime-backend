@@ -38,6 +38,24 @@ FIXTURES = {
     "/api/notifications/read": {"ok": True},
     "/api/search": {"items": [{"kind": "user", "id": "u1", "title": "smoke-user", "where": "用户账号", "target": "users"}]},
     "/api/auth/logout": {"ok": True},
+    # U10 cloud and status pages, shaped like internal/server/admin_cloud.go and admin_status.go.
+    "/api/cloud": {"generated_at": "2026-10-01T00:00:00Z", "since": "2026-09-30T01:00:00Z", "month_start": "2026-10-01T00:00:00Z", "services": [
+        {"key": "chat", "name": "AI 联想", "provider": "账号通道", "state": "degraded", "calls_24h": 38204, "errors_24h": 497, "error_rate": 0.013, "p95_ms": 1840, "slow_ms": 3000,
+         "hourly": [{"hour": f"2026-09-30T{h:02d}:00:00Z", "calls": 1000 + h * 40, "errors": h} for h in range(24)],
+         "month": {"calls": 24800, "errors": 300, "usage": 0, "meter": "calls"}, "quota": {"limit": 2000, "unit": "cny", "used": 1240, "pct": 62}, "cost_cny": 1240},
+        {"key": "translation", "name": "在线翻译", "provider": "腾讯 TMT", "state": "idle", "calls_24h": 0, "errors_24h": 0, "error_rate": None, "p95_ms": None, "slow_ms": 3000,
+         "hourly": [{"hour": f"2026-09-30T{h:02d}:00:00Z", "calls": 0, "errors": 0} for h in range(24)],
+         "month": {"calls": 0, "errors": 0, "usage": 0, "meter": "chars"}, "quota": None, "cost_cny": None},
+    ]},
+    "/api/status": {"checked_at": "2026-10-01T00:00:00Z", "state": "degraded", "services": [
+        {"key": "database", "name": "数据库", "desc": "PostgreSQL", "state": "ok", "p95_ms": 3, "uptime_60d": 1,
+         "days": [{"day": f"d{i}", "state": "ok" if i > 30 else "none", "uptime": 1 if i > 30 else None} for i in range(60)]},
+        {"key": "chat", "name": "AI 联想", "desc": "账号通道", "state": "degraded", "p95_ms": 1800, "uptime_60d": 0.987,
+         "days": [{"day": f"d{i}", "state": "down" if i == 12 else "degraded" if i == 59 else "ok", "uptime": 0.98} for i in range(60)]},
+    ], "incidents": [
+        {"id": 7, "service": "chat", "service_name": "AI 联想", "title": "AI 联想响应变慢", "description": "最近 5 分钟 40 次调用，失败 0 次（0.0%），P95 4.2s，阈值 3.0s。", "state": "open", "started_at": "2026-10-01T00:00:00Z", "resolved_at": None, "auto": True},
+        {"id": 6, "service": "cloud", "service_name": "云候选", "title": "云候选间歇超时", "description": "", "state": "resolved", "started_at": "2026-09-03T01:00:00Z", "resolved_at": "2026-09-03T01:38:00Z", "auto": False},
+    ]},
 }
 
 
@@ -138,6 +156,16 @@ def main() -> int:
                     expect(page.get_by_role("complementary", name="后台导航")).to_be_visible()
                     expect(page.locator("header h1")).to_have_text(title)
                     violations(path)
+
+                page.goto(base + "/cloud")
+                expect(page.get_by_text("62% · ¥ 1,240 / 2,000")).to_be_visible()
+                expect(page.get_by_text("近 24 小时无调用")).to_be_visible()
+                violations("/cloud data")
+                page.goto(base + "/status?focus=7")
+                expect(page.get_by_role("img", name="AI 联想近 60 天可用性")).to_be_visible()
+                expect(page.get_by_text("1 项服务正常，AI 联想响应变慢或出错")).to_be_visible()
+                expect(page.get_by_text("云候选间歇超时")).to_be_visible()
+                violations("/status data")
 
                 for old, new in REDIRECTS.items():
                     page.goto(base + old)

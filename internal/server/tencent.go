@@ -53,7 +53,7 @@ func (s *Server) translateTencent(w http.ResponseWriter, r *http.Request, v tran
 	var fresh []string
 	if len(missing) > 0 {
 		var ok bool
-		if fresh, ok = s.translateTencentUpstream(w, r, source, target, missing, e); !ok {
+		if fresh, ok = s.translateTencentUpstream(w, metered(r, "translation", textChars(missing)), source, target, missing, e); !ok {
 			return
 		}
 		s.storeTranslations(r.Context(), source, target, missing, fresh)

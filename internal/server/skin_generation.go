@@ -45,18 +45,27 @@ func (s *Server) generateSkinArtwork(w http.ResponseWriter, r *http.Request) {
 	}
 	client := *s.client
 	client.Timeout = 180 * time.Second
+	started := time.Now()
 	response, err := client.Do(req)
 	if err != nil {
+		s.observe("images", started, err, 0)
 		upstreamError(w, r, err)
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		upstreamError(w, r, errors.New("image generation rejected"))
+		err = errors.New("image generation rejected")
+		s.observe("images", started, err, 0)
+		upstreamError(w, r, err)
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 12*1024*1024+1))
-	if err != nil || len(raw) > 12*1024*1024 {
+	if err == nil && len(raw) > 12*1024*1024 {
+		err = errors.New("image generation response too large")
+	}
+	// The console's images metric covers the upstream exchange; the artwork checks below are this server's own validation.
+	s.observe("images", started, err, 0)
+	if err != nil {
 		fail(w, 502, "invalid_skin_artwork")
 		return
 	}

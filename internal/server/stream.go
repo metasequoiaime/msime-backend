@@ -74,16 +74,24 @@ func (s *Server) streamTranscription(w http.ResponseWriter, r *http.Request) {
 	headers.Set("X-Api-Request-Id", fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:]))
 	dialCtx, stopDial := context.WithCancel(r.Context())
 	stopShutdown := context.AfterFunc(ctx, stopDial)
+	dialStarted := time.Now()
 	upstream, response, err := websocket.Dial(dialCtx, dialURL, &websocket.DialOptions{HTTPClient: s.client, HTTPHeader: headers})
+	handshake := time.Since(dialStarted)
 	stopShutdown()
 	stopDial()
 	if err != nil {
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
+		s.observe("streaming", dialStarted, err, 0)
 		upstreamError(w, r, err)
 		return
 	}
+	// A session is one call: its latency is the upstream handshake, its usage the session's length in seconds, and it failed when the relay broke with a read or write error (a client's oversized or non-binary message is not an upstream failure).
+	sessionStatus := websocket.StatusNormalClosure
+	defer func() {
+		s.observeCall("streaming", time.Now(), handshake, sessionStatus == websocket.StatusInternalError, time.Since(dialStarted).Seconds())
+	}()
 	defer upstream.CloseNow()
 	// 中间件已按管理员配置的精确来源白名单验证 Origin。
 	downstream, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
@@ -124,6 +132,7 @@ func (s *Server) streamTranscription(w http.ResponseWriter, r *http.Request) {
 	go relay(upstream, downstream)
 	go relay(downstream, upstream)
 	status := <-results
+	sessionStatus = status
 	// 不向客户端透传供应商关闭说明、HTTP 错误正文或凭据。
 	_ = downstream.Close(status, "stream ended")
 	cancel()

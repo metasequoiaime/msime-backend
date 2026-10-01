@@ -99,7 +99,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	if v.MaxTokens == 0 {
 		v.MaxTokens = contract.ChatDefaultTokens
 	}
-	s.proxyJSON(w, r, s.config.Chat, v, func(b []byte) bool {
+	s.proxyJSON(w, metered(r, "chat", 0), s.config.Chat, v, func(b []byte) bool {
 		var result struct {
 			Choices []struct {
 				Message message `json:"message"`
@@ -186,7 +186,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		rr := httptest.NewRecorder()
-		s.translateEndpoint(rr, r, v, e)
+		s.translateEndpoint(rr, metered(r, "translation", textChars(v.list())), v, e)
 		last = rr
 		if rr.Code < 500 {
 			copyResponse(w, rr)
@@ -271,7 +271,7 @@ func (s *Server) cloud(w http.ResponseWriter, r *http.Request) {
 	q.Set("oe", "utf-8")
 	u.RawQuery = q.Encode()
 	e.URL = u.String()
-	b, err := s.upstream(r, e, "GET", "", nil)
+	b, err := s.upstream(metered(r, "cloud", 0), e, "GET", "", nil)
 	var root []json.RawMessage
 	var status string
 	var groups [][]json.RawMessage
@@ -396,7 +396,7 @@ func (s *Server) transcribe(w http.ResponseWriter, r *http.Request) {
 		_ = writer.WriteField("language", languageValue)
 	}
 	_ = writer.Close()
-	b, err := s.upstream(r, s.config.Transcription, "POST", writer.FormDataContentType(), &body)
+	b, err := s.upstream(metered(r, "transcription", wavSeconds(audio)), s.config.Transcription, "POST", writer.FormDataContentType(), &body)
 	var result struct {
 		Text          string `json:"text"`
 		Transcription string `json:"transcription"`
