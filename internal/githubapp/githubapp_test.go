@@ -188,3 +188,73 @@ func TestDoSendsJSONAndBoundsResponses(t *testing.T) {
 		t.Fatal("oversized response accepted")
 	}
 }
+
+// Concurrent cache misses for the same repository and permissions share one token request, and a caller that gives up does not fail the others waiting on it.
+func TestTokenMintIsShared(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const callers = 8
+	var mu sync.Mutex
+	mints := 0
+	arrived := make(chan struct{}, callers)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		mints++
+		mu.Unlock()
+		arrived <- struct{}{}
+		<-release
+		w.WriteHeader(201)
+		_ = json.NewEncoder(w).Encode(map[string]any{"token": "shared-token", "expires_at": time.Now().Add(time.Hour)})
+	}))
+	t.Cleanup(server.Close)
+	c := Client{AppID: 42, InstallationID: 7, Key: key, APIURL: server.URL, UserAgent: "test-agent", HTTP: server.Client(), Cache: &Cache{}}
+	perms := map[string]string{"contents": "write"}
+
+	// The first caller starts the request and then gives up while it is in flight.
+	impatient, cancel := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() {
+		_, err := c.Token(impatient, "metasequoiaime/msime-dictionary", perms)
+		first <- err
+	}()
+	<-arrived
+	var wait sync.WaitGroup
+	tokens := make(chan string, callers)
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			token, err := c.Token(context.Background(), "metasequoiaime/msime-dictionary", perms)
+			if err != nil {
+				t.Error(err)
+			}
+			tokens <- token
+		}()
+	}
+	cancel()
+	if err := <-first; !errors.Is(err, ErrUnavailable) {
+		t.Fatal("a canceled caller must stop waiting", err)
+	}
+	// Without sharing, every caller would have reached the server by now; give them the chance before releasing the one request.
+	select {
+	case <-arrived:
+		t.Fatal("a second token request was sent while the first was in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	wait.Wait()
+	close(tokens)
+	for token := range tokens {
+		if token != "shared-token" {
+			t.Fatal(token)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if mints != 1 {
+		t.Fatal("token requests", mints)
+	}
+}

@@ -18,6 +18,7 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"golang.org/x/sync/singleflight"
 )
 
 // DefaultAPIURL is the public GitHub REST endpoint.
@@ -61,6 +62,8 @@ type Cache struct {
 	mu     sync.Mutex
 	tokens map[string]cachedToken
 	reads  map[string]cachedRead
+	// mints shares one in-flight token request per repository and permission set, so concurrent callers that all miss the cache (for example several word submissions arriving together) cause a single mint.
+	mints singleflight.Group
 }
 
 type cachedToken struct {
@@ -101,18 +104,52 @@ func (c Client) apiURL() string {
 	return c.APIURL
 }
 
-// Token returns an installation token restricted to repo ("owner/name") and exactly perms (for example {"contents":"write"}), whatever else the installation may have been granted. Tokens are cached per repository and permission set until five minutes before they expire. Errors wrap ErrUnavailable or ErrRejected.
+// tokenMintTimeout bounds a shared token request, which no longer follows any single caller's context.
+const tokenMintTimeout = 30 * time.Second
+
+// Token returns an installation token restricted to repo ("owner/name") and exactly perms (for example {"contents":"write"}), whatever else the installation may have been granted. Tokens are cached per repository and permission set until five minutes before they expire, and concurrent misses for the same key share one request. Errors wrap ErrUnavailable or ErrRejected.
 func (c Client) Token(ctx context.Context, repo string, perms map[string]string) (string, error) {
 	key := tokenKey(repo, perms)
-	now := c.now()
-	if c.Cache != nil {
-		c.Cache.mu.Lock()
-		cached, ok := c.Cache.tokens[key]
-		c.Cache.mu.Unlock()
-		if ok && now.Before(cached.expires.Add(-5*time.Minute)) {
-			return cached.token, nil
-		}
+	if c.Cache == nil {
+		return c.mint(ctx, key, repo, perms)
 	}
+	if token, ok := c.cachedToken(key); ok {
+		return token, nil
+	}
+	// The shared request outlives a caller that gives up, so one canceled request cannot fail the others waiting on it; each caller still stops waiting when its own context ends.
+	result := c.Cache.mints.DoChan(key, func() (any, error) {
+		if token, ok := c.cachedToken(key); ok {
+			return token, nil
+		}
+		mintCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenMintTimeout)
+		defer cancel()
+		return c.mint(mintCtx, key, repo, perms)
+	})
+	select {
+	case r := <-result:
+		if r.Err != nil {
+			return "", r.Err
+		}
+		return r.Val.(string), nil
+	case <-ctx.Done():
+		return "", fmt.Errorf("%w: installation token: %s", ErrUnavailable, ctx.Err().Error())
+	}
+}
+
+// cachedToken returns the cached token for key while it has more than five minutes left.
+func (c Client) cachedToken(key string) (string, bool) {
+	c.Cache.mu.Lock()
+	cached, ok := c.Cache.tokens[key]
+	c.Cache.mu.Unlock()
+	if ok && c.now().Before(cached.expires.Add(-5*time.Minute)) {
+		return cached.token, true
+	}
+	return "", false
+}
+
+// mint requests a new installation token from GitHub and caches it under key.
+func (c Client) mint(ctx context.Context, key, repo string, perms map[string]string) (string, error) {
+	now := c.now()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: c.Key}, (&jose.SignerOptions{}).WithType("JWT"))
 	if err != nil {
 		return "", err
