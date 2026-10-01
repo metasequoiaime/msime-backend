@@ -748,7 +748,9 @@ func TestApproveWaitsForConcurrentBan(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-a"}`) }()
+	go func() {
+		result <- call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-a"}`)
+	}()
 	for deadline := time.Now().Add(10 * time.Second); ; {
 		var waiting bool
 		if err = db.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT u.banned_at IS NOT NULL%')`).Scan(&waiting); err != nil {
@@ -785,7 +787,9 @@ func TestUserDataTransactionRefusesBannedUser(t *testing.T) {
 	if _, err := db.pool.Exec(ctx, `UPDATE auth_users SET banned_at=now() WHERE id=$1`, owner.User.ID); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.pool.Exec(context.Background(), `UPDATE auth_users SET banned_at=NULL WHERE id=$1`, owner.User.ID) })
+	t.Cleanup(func() {
+		db.pool.Exec(context.Background(), `UPDATE auth_users SET banned_at=NULL WHERE id=$1`, owner.User.ID)
+	})
 	if tx, err := db.userDataTransaction(ctx, owner.User.ID); !errors.Is(err, ErrBanned) {
 		if tx != nil {
 			tx.Rollback(ctx)
