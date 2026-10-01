@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS community_plugins (
  id text PRIMARY KEY CHECK(id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
  owner_id text NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
- kind text NOT NULL CHECK(kind IN ('sound','music','command_table')),
+ kind text NOT NULL CONSTRAINT community_plugins_kind_known CHECK(kind IN ('sound','music','command_table','effect')),
  plugin_id text NOT NULL CHECK(plugin_id ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
  name text NOT NULL,
  description text NOT NULL DEFAULT '',
@@ -16,6 +16,14 @@ CREATE TABLE IF NOT EXISTS community_plugins (
  request_sha256 text NOT NULL CHECK(request_sha256 ~ '^[0-9a-f]{64}$'),
  created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Tables created before effect packs carry the column's auto-named check, which lacks 'effect'; replace it with the named one.
+ALTER TABLE community_plugins DROP CONSTRAINT IF EXISTS community_plugins_kind_check;
+DO $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='community_plugins'::regclass AND conname='community_plugins_kind_known') THEN
+  ALTER TABLE community_plugins ADD CONSTRAINT community_plugins_kind_known CHECK(kind IN ('sound','music','command_table','effect'));
+ END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS community_plugins_newest ON community_plugins(created_at DESC,id);
 CREATE INDEX IF NOT EXISTS community_plugins_kind_newest ON community_plugins(kind,created_at DESC,id);
 CREATE INDEX IF NOT EXISTS community_plugins_owner ON community_plugins(owner_id,created_at DESC);

@@ -12712,7 +12712,8 @@
                 "",
                 "sound",
                 "music",
-                "command_table"
+                "command_table",
+                "effect"
               ],
               "default": ""
             }
@@ -12752,7 +12753,8 @@
                             "enum": [
                               "sound",
                               "music",
-                              "command_table"
+                              "command_table",
+                              "effect"
                             ]
                           },
                           "plugin_id": {
@@ -12850,7 +12852,7 @@
           }
         ],
         "parameters": [],
-        "description": "请求最多 11,300,000 字节。zip 包不超过 8 MiB、最多 64 个成员和 16 个文件，解压总量不超过 24 MiB 且不超过包体 100 倍加 1 MiB；拒绝绝对路径、..、反斜杠、符号链接、加密成员和嵌套压缩包。包内恰好一个 plugin.toml（schema_version = 1，严格解析，未知键拒绝），kind 与 plugin_id、version 须与请求一致，permissions 必须为空；引用的音频须存在且为 .wav/.ogg 并匹配文件头（sound 采样只能是 .wav），其余文件只能是 .txt/.md 说明。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 个插件、包体合计不超过 32 MiB，每小时最多发布 10 次；同一账号的发布逐个处理，同一进程最多同时接收 4 个发布，排队超时返回 503 plugin_busy。 详见 docs/plugin-community.md。",
+        "description": "请求最多 11,300,000 字节。zip 包不超过 8 MiB、最多 64 个成员和 16 个文件，解压总量不超过 24 MiB 且不超过包体 100 倍加 1 MiB；拒绝绝对路径、..、反斜杠、符号链接、加密成员和嵌套压缩包。包内恰好一个 plugin.toml（schema_version = 1，严格解析，未知键拒绝），kind 与 plugin_id、version 须与请求一致，permissions 必须为空；引用的音频须存在且为 .wav/.ogg 并匹配文件头（sound 采样只能是 .wav），effect 只含 [effect] 参数表、不带任何音频；其余文件只能是 .txt/.md 说明。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 个插件、包体合计不超过 32 MiB，每小时最多发布 10 次；同一账号的发布逐个处理，同一进程最多同时接收 4 个发布，排队超时返回 503 plugin_busy。 详见 docs/plugin-community.md。",
         "responses": {
           "201": {
             "description": "成功",
@@ -12868,7 +12870,8 @@
                       "enum": [
                         "sound",
                         "music",
-                        "command_table"
+                        "command_table",
+                        "effect"
                       ]
                     },
                     "plugin_id": {
@@ -12963,7 +12966,8 @@
                       "enum": [
                         "sound",
                         "music",
-                        "command_table"
+                        "command_table",
+                        "effect"
                       ]
                     },
                     "plugin_id": {
@@ -13044,7 +13048,8 @@
                     "enum": [
                       "sound",
                       "music",
-                      "command_table"
+                      "command_table",
+                      "effect"
                     ]
                   },
                   "plugin_id": {
@@ -13114,7 +13119,8 @@
                       "enum": [
                         "sound",
                         "music",
-                        "command_table"
+                        "command_table",
+                        "effect"
                       ]
                     },
                     "plugin_id": {
@@ -13300,7 +13306,8 @@
                       "enum": [
                         "sound",
                         "music",
-                        "command_table"
+                        "command_table",
+                        "effect"
                       ]
                     },
                     "plugin_id": {
@@ -14359,107 +14366,53 @@
         }
       }
     },
-    "/v1/community/reports": {
-      "post": {
-        "summary": "举报社区内容",
+    "/v1/site/download-mirrors": {
+      "get": {
+        "summary": "官网下载镜像链接",
         "tags": [
-          "创作社区"
+          "官网"
         ],
-        "security": [
-          {
-            "userSession": []
-          }
-        ],
-        "description": "登录用户举报一项社区内容，由管理后台复核。kind 取 skins、candidate-skins、plugins、dictionaries、replies；只能举报自己可见的内容（已下架内容与私有候选皮肤返回 404）。同一账号重复举报同一内容不会新增记录，返回 200；每个账号每小时最多 30 次。",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "enum": [
-                      "skins",
-                      "candidate-skins",
-                      "plugins",
-                      "dictionaries",
-                      "replies"
-                    ]
-                  },
-                  "item_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128
-                  },
-                  "reason": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64,
-                    "description": "举报原因，不含控制字符"
-                  },
-                  "detail": {
-                    "type": "string",
-                    "maxLength": 1000,
-                    "description": "补充说明，可含换行"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "item_id",
-                  "reason"
-                ],
-                "additionalProperties": false
-              }
-            }
-          }
-        },
+        "security": [],
+        "description": "公开只读，供官网下载页展示 Windows 安装包的蓝奏云盘链接，由管理员在后台「站点设置」中修改。按 IP 每分钟 120 次限流；成功响应带 Cache-Control: public, max-age=60，允许官网和边缘缓存短时缓存。用户体系未启用时返回 503。",
         "responses": {
           "200": {
-            "description": "已举报过，未新增记录",
+            "description": "成功",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "reported": {
-                      "type": "boolean"
+                    "lanzou_url": {
+                      "type": "string",
+                      "maxLength": 512,
+                      "description": "蓝奏云盘分享链接（https 绝对地址）；未设置或已清空时为空字符串。"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "description": "链接最近更新时间（UTC，RFC 3339）；lanzou_url 为空时为空字符串。"
                     }
-                  }
+                  },
+                  "required": [
+                    "lanzou_url",
+                    "updated_at"
+                  ]
                 }
               }
             }
-          },
-          "201": {
-            "description": "已记录举报",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "reported": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "参数无效"
-          },
-          "401": {
-            "description": "需要用户登录"
-          },
-          "404": {
-            "description": "内容不存在或不可见"
           },
           "429": {
-            "description": "请求过多"
+            "description": "请求过多",
+            "headers": {
+              "Retry-After": {
+                "description": "重试等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           },
           "503": {
-            "description": "服务不可用"
+            "description": "用户体系未启用或数据库不可用"
           }
         }
       }
@@ -15043,6 +14996,258 @@
         }
       }
     },
+    "/v1/community/reports": {
+      "post": {
+        "summary": "举报社区内容",
+        "tags": [
+          "创作社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "description": "登录用户举报一项社区内容，由管理后台复核。kind 取 skins、candidate-skins、plugins、dictionaries、replies；只能举报自己可见的内容（已下架内容与私有候选皮肤返回 404）。同一账号重复举报同一内容不会新增记录，返回 200；每个账号每小时最多 30 次。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "skins",
+                      "candidate-skins",
+                      "plugins",
+                      "dictionaries",
+                      "replies"
+                    ]
+                  },
+                  "item_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "举报原因，不含控制字符"
+                  },
+                  "detail": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "补充说明，可含换行"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已举报过，未新增记录",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reported": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "已记录举报",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reported": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "404": {
+            "description": "内容不存在或不可见"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用"
+          }
+        }
+      }
+    },
+    "/v1/notices": {
+      "get": {
+        "summary": "公告列表",
+        "tags": [
+          "公告"
+        ],
+        "security": [],
+        "description": "公开只读，无需鉴权，供 App 与官网展示管理后台已发布的公告，按发布时间倒序最多 20 条；草稿和已归档的公告不会出现。响应允许缓存 60 秒（Cache-Control: public, max-age=60），发布或归档最多 60 秒后可见。",
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "query",
+            "required": false,
+            "description": "只返回投放到该平台（或全部平台）的公告",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "windows",
+                "macos",
+                "linux",
+                "android",
+                "ios",
+                "harmony"
+              ]
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "description": "只返回包含该渠道的公告",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "site",
+                "app",
+                "telegram"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "公告 ID"
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 200,
+                            "description": "标题"
+                          },
+                          "body": {
+                            "type": "string",
+                            "maxLength": 20000,
+                            "description": "正文，支持简单 Markdown"
+                          },
+                          "targets": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "all",
+                                "windows",
+                                "macos",
+                                "linux",
+                                "android",
+                                "ios",
+                                "harmony"
+                              ]
+                            },
+                            "description": "投放平台；all 表示全部平台"
+                          },
+                          "channels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "site",
+                                "app",
+                                "telegram"
+                              ]
+                            },
+                            "description": "展示渠道：site 官网横幅，app App 内通知，telegram 已推送到 Telegram"
+                          },
+                          "published_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "发布时间（UTC）"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "body",
+                          "targets",
+                          "channels",
+                          "published_at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "platform 或 channel 不在取值范围内（invalid_platform / invalid_channel）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "请求过多",
+            "headers": {
+              "Retry-After": {
+                "description": "重试等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "用户体系未启用或数据库不可用"
+          }
+        }
+      }
+    },
     "/v1/skins/generate": {
       "post": {
         "summary": "生成原创皮肤插画背景",
@@ -15283,153 +15488,6 @@
           }
         }
       }
-    },
-    "/v1/notices": {
-      "get": {
-        "summary": "公告列表",
-        "tags": [
-          "公告"
-        ],
-        "security": [],
-        "description": "公开只读，无需鉴权，供 App 与官网展示管理后台已发布的公告，按发布时间倒序最多 20 条；草稿和已归档的公告不会出现。响应允许缓存 60 秒（Cache-Control: public, max-age=60），发布或归档最多 60 秒后可见。",
-        "parameters": [
-          {
-            "name": "platform",
-            "in": "query",
-            "required": false,
-            "description": "只返回投放到该平台（或全部平台）的公告",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "windows",
-                "macos",
-                "linux",
-                "android",
-                "ios",
-                "harmony"
-              ]
-            }
-          },
-          {
-            "name": "channel",
-            "in": "query",
-            "required": false,
-            "description": "只返回包含该渠道的公告",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "site",
-                "app",
-                "telegram"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "成功",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "id": {
-                            "type": "string",
-                            "description": "公告 ID"
-                          },
-                          "title": {
-                            "type": "string",
-                            "maxLength": 200,
-                            "description": "标题"
-                          },
-                          "body": {
-                            "type": "string",
-                            "maxLength": 20000,
-                            "description": "正文，支持简单 Markdown"
-                          },
-                          "targets": {
-                            "type": "array",
-                            "items": {
-                              "type": "string",
-                              "enum": [
-                                "all",
-                                "windows",
-                                "macos",
-                                "linux",
-                                "android",
-                                "ios",
-                                "harmony"
-                              ]
-                            },
-                            "description": "投放平台；all 表示全部平台"
-                          },
-                          "channels": {
-                            "type": "array",
-                            "items": {
-                              "type": "string",
-                              "enum": [
-                                "site",
-                                "app",
-                                "telegram"
-                              ]
-                            },
-                            "description": "展示渠道：site 官网横幅，app App 内通知，telegram 已推送到 Telegram"
-                          },
-                          "published_at": {
-                            "type": "string",
-                            "format": "date-time",
-                            "description": "发布时间（UTC）"
-                          }
-                        },
-                        "required": [
-                          "id",
-                          "title",
-                          "body",
-                          "targets",
-                          "channels",
-                          "published_at"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "items"
-                  ]
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "platform 或 channel 不在取值范围内（invalid_platform / invalid_channel）",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "请求过多",
-            "headers": {
-              "Retry-After": {
-                "description": "重试等待秒数",
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "用户体系未启用或数据库不可用"
-          }
-        }
-      }
     }
   },
   "components": {
@@ -15442,7 +15500,7 @@
       "userSession": {
         "type": "http",
         "scheme": "bearer",
-        "description": "登录返回的 access_token，不是 refresh_token 或供应商密钥。账号被管理员封禁后，该账号的会话调用任何接口（包括刷新令牌）都返回 403，code 为 account_banned，客户端应提示用户而不是重新登录。"
+        "description": "登录返回的 access_token，不是 refresh_token 或供应商密钥。"
       }
     },
     "schemas": {

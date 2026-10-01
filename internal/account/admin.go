@@ -40,6 +40,10 @@ SELECT repo,tag,asset,day,download_count FROM release_asset_snapshots WHERE fals
 // AdminHTTP must only be called after the independent admin authentication gate, with the caller's AdminAccess in the context.
 func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/")
+	if path == "site-settings" {
+		a.adminSiteSettings(w, r)
+		return
+	}
 	if r.Method == "POST" && path == "actions" {
 		a.adminAction(w, r)
 		return

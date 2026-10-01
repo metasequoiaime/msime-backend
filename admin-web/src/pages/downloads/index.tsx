@@ -5,6 +5,7 @@ import { channelLabel, downloadsSummarySchema, platformKey, platformLabel, platf
 import type { DownloadRow, DownloadsSummary } from "../../api/downloads";
 import { keys } from "../../api/keys";
 import { PageIntro } from "../../shell/page-intro";
+import { MirrorSettings } from "./mirror";
 import { usePageSearch, useSetPageSearch } from "../../shell/page-search";
 import { Banner } from "../../ui/card";
 import { CellText, DataTable } from "../../ui/data-table";
@@ -120,6 +121,7 @@ export default function DownloadsPage() {
         minWidth="720px"
       />
       <p className="m-0 text-xs leading-relaxed text-muted">按 UTC 自然日统计。客户端与官网镜像的下载来自遥测上报，安装包和渠道需要上报方带上 artifact / channel；GitHub Release 渠道取每日下载快照的差值，不依赖客户端。</p>
+      <MirrorSettings />
     </div>
   </>;
 }

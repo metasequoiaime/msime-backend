@@ -61,6 +61,8 @@ const codeMessages: Record<string, string> = {
   already_archived: "这条公告已经归档。",
   invalid_targets: "请选择投放范围。",
   invalid_channels: "请至少选择一个渠道。",
+  // Site settings.
+  invalid_lanzou_url: "链接无效：需要以 https:// 开头、带主机名、不含账号密码，最长 512 字节。",
   // Service incidents.
   already_resolved: "该故障已经恢复。",
   // GitHub integration shared by dictionary PRs, issues, releases and crash issues.

@@ -102,7 +102,7 @@ export const resourceContentSchema = z.object({ entries: z.array(entrySchema).op
 
 export const sensitiveLevelLabels: Record<string, string> = { block: "拦截", review: "需复核" };
 export const sensitiveCategoryLabels: Record<string, string> = { ad: "广告导流", vulgar: "低俗", abuse: "辱骂", illegal: "违法", custom: "自定义" };
-export const pluginKindLabels: Record<string, string> = { sound: "按键音", music: "音乐", command_table: "命令表" };
+export const pluginKindLabels: Record<string, string> = { sound: "按键音", music: "音乐", command_table: "命令表", effect: "打字特效" };
 
 // Reason presets of the 驳回 / 下架 confirm dialog.
 export const removeReasons = ["侵犯版权或商标", "含导流或广告", "内容低俗", "质量不达标"] as const;

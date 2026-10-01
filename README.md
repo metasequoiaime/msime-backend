@@ -243,6 +243,8 @@ GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and
 
 `GET /v1/community/stats` 公开返回社区内容总量 `{skins,skin_downloads,dictionaries,replies,resource_saves,generated_at}`，供官网服务端拉取后自行缓存。下载与收藏按账号去重，注销账号的作品和互动随之移除；不含用户数和安装包上报（这两项只在管理后台概览提供）。与其他社区接口一样免令牌、按 IP 每分钟 120 次限流、响应禁用缓存，用户体系未启用时返回 503。
 
+`GET /v1/site/download-mirrors` 公开返回官网下载页使用的镜像链接 `{lanzou_url,updated_at}`（未设置时均为空字符串），由管理员在后台「站点设置」中修改。同样免令牌、按 IP 每分钟 120 次限流，但成功响应允许 60 秒公共缓存；详见 [管理后台](docs/admin.md)。
+
 ### 各平台设置同步
 
 用户设置支持 `platform.ios.*` 字段：`nine_key`、`sound_enabled`、`haptics_enabled`、`haptic_strength`、`dictionary_learning`、`keyboard_skin` 和 `custom_keyboard_skin`。自定义皮肤是最长 768 KiB 的 JSON 字符串（支持 512 KB 的照片背景）；完整设置请求上限为 1 MiB；客户端按本地皮肤模型解码并校验。公共输入方案与简繁体继续使用 `input.schema`、`input.shuangpin_schema` 和 `input.character_set`。

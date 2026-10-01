@@ -43,7 +43,7 @@
    ```
 
 4. Google 登录模式不需要 `MSIME_ADMIN_TOKEN`。保留它时，登录页额外提供「管理员密钥登录」作为兼容入口；不配置 Google 时仍需要至少 32 字节的独立随机管理员密钥。管理员密钥不能以 `msime_pat_` 开头，这个前缀留给个人访问令牌，配置校验会拒绝。不要把任何密钥放进前端源码、安装包或版本库。
-5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表或列，会自动执行 `internal/account/admin_schema.sql` 和 `internal/account/admin_ops_schema.sql`，两者都是幂等的追加式迁移。运行账号按最小权限只有 DML 时，先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`，再给运行角色授予新表的 `SELECT, INSERT, UPDATE, DELETE` 以及 bigserial 序列的 `USAGE, SELECT`。新表包括 `admin_roles`、`admin_role_permissions`、`admin_tokens`、`admin_notifications`、`admin_notification_reads`、`admin_preferences`、`admin_notices`、`admin_crash_groups`、`admin_service_metrics`、`admin_service_daily`、`admin_incidents`、`admin_sensitive_words`、`admin_sensitive_hits`、`release_asset_snapshots`、`community_reports` 和 `word_submissions`；已有的 `admin_members`、`admin_sessions`、`admin_audit`、`admin_events` 和四张社区表新增了列。后台启用而表既不存在又补不上时，服务拒绝启动并在错误里说明原因。
+5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表或列，会自动执行 `internal/account/admin_schema.sql` 和 `internal/account/admin_ops_schema.sql`，两者都是幂等的追加式迁移。运行账号按最小权限只有 DML 时，先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`，再给运行角色授予新表的 `SELECT, INSERT, UPDATE, DELETE` 以及 bigserial 序列的 `USAGE, SELECT`。新表包括 `admin_roles`、`admin_role_permissions`、`admin_tokens`、`admin_notifications`、`admin_notification_reads`、`admin_preferences`、`admin_notices`、`admin_crash_groups`、`admin_service_metrics`、`admin_service_daily`、`admin_incidents`、`admin_sensitive_words`、`admin_sensitive_hits`、`release_asset_snapshots`、`community_reports`、`word_submissions` 和 `site_settings`；已有的 `admin_members`、`admin_sessions`、`admin_audit`、`admin_events` 和四张社区表新增了列。后台启用而表既不存在又补不上时，服务拒绝启动并在错误里说明原因。
 6. 正常启动镜像，容器中的 `listen` 应为 `0.0.0.0:8080`。把 `admin.msime.app` 的 DNS 指向入口，在入口终止 HTTPS，把该域名的请求转发到相同的 Go 端口，并保留原始 Host。Go 不信任 `X-Forwarded-Host`。
 
 示例 Nginx HTTPS 虚拟主机（证书路径、后端地址按部署调整）：
@@ -113,7 +113,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 | `review_community` | 社区内容的通过、下架、恢复和删除；敏感词库的增删改 |
 | `triage_issues` | Issue 分诊与回复；崩溃分组状态和为崩溃分组建 Issue；旧崩溃列表的处理；故障事件的开启、更新和恢复 |
 | `ban_users` | 封禁、解封用户，吊销用户会话 |
-| `publish_notices` | 发布、归档公告 |
+| `publish_notices` | 发布、归档公告；修改官网下载镜像链接（`POST /api/site-settings`） |
 | `trigger_release` | 触发发布流水线、编辑发布说明、撤回版本 |
 | `view_cloud_usage` | 读取云端监控（`GET /api/cloud`），这是唯一受权限限制的读接口 |
 | `manage_permissions` | 修改权限矩阵 |
@@ -168,7 +168,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 | 问题分诊 | `/issues` | `GET /api/issues`、`/api/issues/{owner}/{repo}/{n}`（GitHub） | `triage_issues` |
 | 敏感词库 | `/words` | `GET /api/sensitive-words` | `review_community` |
 | 用户账号 | `/users` | `GET /api/users`、`/api/users/stats`、`/api/users/{id}` | `ban_users` |
-| 下载记录 | `/downloads` | `GET /api/downloads/summary` | — |
+| 下载记录 | `/downloads` | `GET /api/downloads/summary`、`GET /api/site-settings` | 修改官网下载镜像 `publish_notices` |
 | 公告推送 | `/notice` | `GET /api/notices` | 草稿无要求，发布与归档 `publish_notices` |
 | 发布管理 | `/release` | `GET /api/releases`、`/api/releases/{platform}`（GitHub） | `trigger_release` |
 | 云端监控 | `/cloud` | `GET /api/cloud` | 读取即需要 `view_cloud_usage` |
@@ -183,7 +183,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 - **问题分诊**：遍历 `admin.github.issue_repos`，按平台 label 归类。状态映射：open 且无 `triaged` 标签为「新」，有 `triaged` 为「已分类」，closed 为「已关闭」，closed 且有 `duplicate` 标签为「重复」。可以分类（加 `triaged` 并指派给平台的 `assignee`）、标记重复、关闭、重新打开、取消分类和回复，每个操作都能撤销。每个仓库最多读 3 页共 300 个 open Issue，以及最近更新的 100 个 closed Issue。
 - **敏感词库**：规则是普通词或 RE2 正则（不超过 200 个字符，不能匹配空文本），分类为广告导流、低俗、辱骂、违法、自定义，处理方式为「拦截」或「需复核」，并显示近 7 天命中次数。只在大小写、全半角或空白上不同的普通词视为重复（409 `exists`）。匹配器缓存在内存中，修改最多 30 秒后在所有副本生效；词库 PR 审核这类只读预览不计入命中次数；命中计数批量写回，进程退出时可能丢失最近 30 秒的计数。规则作用于词库投稿和社区上传，见下文。
 - **用户账号**：搜索、按角色筛选（已验证邮箱是所有者或管理员成员时显示对应角色，所有者显示为维护者）、统计卡（总数、本周新增、开启设置同步的比例、已封禁数），详情抽屉显示脱敏的联系方式、登录设备（从 User-Agent 解析的平台，不显示地理位置）、作品和会话。`ban_user` 需要原因，在同一事务里封禁、吊销全部会话，并把该用户的社区内容以 `owner_banned` 下架；被封禁的账号登录、刷新令牌和会话鉴权都返回 403 `account_banned`，直接在数据库里写入的封禁也一样。`unban_user` 只恢复因 `owner_banned` 下架的内容。
-- **下载记录**：按平台、版本、安装包、渠道分组，显示今日和近 7 天下载量以及国内镜像占比，均按 UTC 自然日计。客户端和官网镜像的数据来自遥测下载事件；GitHub Release 渠道取每日资产下载量快照的差值，不依赖客户端上报，但每个资产的第一次快照计为 0，快照之前的下载不计入。
+- **下载记录**：按平台、版本、安装包、渠道分组，显示今日和近 7 天下载量以及国内镜像占比，均按 UTC 自然日计。客户端和官网镜像的数据来自遥测下载事件；GitHub Release 渠道取每日资产下载量快照的差值，不依赖客户端上报，但每个资产的第一次快照计为 0，快照之前的下载不计入。页面底部的「官网下载镜像」维护官网下载页上 Windows 安装包的蓝奏云盘链接（旧路径 `/site-settings` 重定向到这里）：`GET /api/site-settings` 返回 `{"lanzou_url","updated_at","updated_by"}`，`POST /api/site-settings {"lanzou_url"}` 保存，空字符串表示清空。链接必须是带主机名的 `https://` 绝对地址，不含账号密码，最长 512 字节，否则返回 400 `invalid_lanzou_url`。修改与审计（`set_lanzou_url` / `clear_lanzou_url`）同事务写入，清空后仍保留最近修改时间和操作者。
 - **公告推送**：标题（不超过 200 字）、正文、投放平台（全部，或 windows、macos、linux、android、ios、harmony）和渠道（官网横幅 `site`、App 内通知 `app`、Telegram）。正文最多 20000 字，页面在发送前检查。草稿可以反复编辑，切换到另一条草稿前会提示放弃未保存的修改。发布时勾选了 Telegram 的，先调用 Bot API `sendMessage`，失败则整条公告不发布。归档没有撤销。「触达人数」需要客户端回执，显示「—」。
 - **发布管理**：每个平台一张卡片，显示最新版本、状态和检查清单。「CI 全部通过」取自 tag 所在提交的 check run；「签名与公证」只有 workflow 里存在名为 `sign` 的 check run 时才显示；「更新日志已填写」看 release 说明是否为空；需要商店 API 的平台，商店一项显示「需手动」。历史版本从每个仓库最近 100 个 release 中按 `tag_prefix` 过滤：草稿为「待发布」，prerelease 为「公开测试」，正式版为「已发布」，带撤回标记的为「已撤回」。说明按 `### 新增 / 修复 / 改进 / 说明 / 待办` 分类显示。可以触发发布流水线、编辑说明和撤回版本；撤回会改为 prerelease、在说明开头加撤回标记，并把上一个正式版设为 latest。
 - **云端监控**：每个上游服务的今日调用数、P95、错误率、24 小时曲线，以及本月（UTC）用量与 `admin.services` 中额度的对比；金额按用量乘以 `unit_price` 估算。只记录服务、耗时和状态类别，不记录请求内容。
@@ -296,6 +296,10 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 - `channel` 为 `site`、`app` 或 `telegram`。
 - 参数非法返回 400 `invalid_platform` 或 `invalid_channel`。
 - 响应带 `Cache-Control: public, max-age=60`，发布和归档最多 60 秒后可见。该接口与登录共用每个 IP 每分钟 120 次的限额，客户端应遵守缓存头，不要频繁轮询。
+
+### `GET /v1/site/download-mirrors`
+
+不需要认证，供官网下载页读取：`{"lanzou_url","updated_at"}`，未设置或已清空时两个字段都是空字符串。与登录共用每个 IP 每分钟 120 次的限额，响应带 `Cache-Control: public, max-age=60`；官网侧再缓存约 10 分钟，所以修改后最多约 10 分钟生效。
 
 ### `POST /v1/community/reports`
 

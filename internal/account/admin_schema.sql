@@ -216,3 +216,11 @@ CREATE TABLE IF NOT EXISTS admin_sensitive_hits (
  count bigint NOT NULL DEFAULT 0 CHECK(count>=0),
  PRIMARY KEY(word_id,day)
 );
+
+-- Website settings edited in the admin console and read publicly by the official site (for example the Lanzou mirror link on the download page). Clearing a setting keeps the row with an empty value so the last editor stays visible.
+CREATE TABLE IF NOT EXISTS site_settings (
+ key text PRIMARY KEY,
+ value text NOT NULL,
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ updated_by text NOT NULL
+);

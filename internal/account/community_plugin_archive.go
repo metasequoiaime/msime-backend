@@ -56,8 +56,17 @@ const (
 	maxCommandTemplate  = 199
 )
 
+// Effect pack bounds, from effect_pack.rs.
+const (
+	maxEffectIntensity = 100
+	maxEffectColors    = 4
+	minEffectDuration  = 60
+	maxEffectDuration  = 1500
+	maxEffectParticles = 64
+)
+
 // pluginKinds is the kind whitelist, the client's PluginKind::ALL.
-var pluginKinds = []string{"sound", "music", "command_table"}
+var pluginKinds = []string{"sound", "music", "command_table", "effect"}
 
 // builtinPluginIDs are the ids the client bundles for a kind; it refuses to import a pack over one of them.
 var builtinPluginIDs = map[string][]string{
@@ -329,6 +338,13 @@ type pluginManifest struct {
 		Title    *string `toml:"title"`
 		Template *string `toml:"template"`
 	} `toml:"commands"`
+	Effect *struct {
+		Style      *string   `toml:"style"`
+		Intensity  *int64    `toml:"intensity"`
+		Colors     *[]string `toml:"colors"`
+		DurationMS *int64    `toml:"duration_ms"`
+		Particles  *int64    `toml:"particles"`
+	} `toml:"effect"`
 }
 
 var pluginCommonKeys = []string{"schema_version", "kind", "id", "name", "version", "license", "author", "description", "permissions"}
@@ -337,6 +353,7 @@ var pluginKindKeys = map[string][]string{
 	"sound":         {"mode", "sounds", "sequence"},
 	"music":         {"music"},
 	"command_table": {"commands"},
+	"effect":        {"effect"},
 }
 
 // validPluginArchive runs every server-side check on an uploaded pack and returns what is stored, or the error code. It never decodes audio beyond its magic bytes and never executes anything.
@@ -398,6 +415,8 @@ func validPluginArchive(archive []byte) (pluginPack, string) {
 		fileLimit, totalLimit, countLimit = maxMusicTrackBytes, maxMusicPackBytes, maxMusicTracks
 	case "command_table":
 		ok = validPluginCommands(table, m)
+	case "effect":
+		ok = validPluginEffect(table, m)
 	}
 	if !ok {
 		return pluginPack{}, "invalid_plugin_manifest"
@@ -560,6 +579,47 @@ func validPluginCommands(table map[string]any, m pluginManifest) bool {
 		}
 		template := *row.Template
 		if strings.TrimSpace(template) == "" || len(utf16.Encode([]rune(template))) > maxCommandTemplate || strings.ContainsFunc(template, unicode.IsControl) || !validCommandTemplate(template) {
+			return false
+		}
+	}
+	return true
+}
+
+// validPluginEffect follows effect_pack.rs: a built-in style and optional hints within fixed bounds. The pack names no files, so validPluginFiles then admits only the manifest and notices.
+func validPluginEffect(table map[string]any, m pluginManifest) bool {
+	effect, _ := table["effect"].(map[string]any)
+	if m.Effect == nil || !pluginKeys(effect, "style", "intensity", "colors", "duration_ms", "particles") || m.Effect.Style == nil {
+		return false
+	}
+	e := m.Effect
+	if !slices.Contains([]string{"flash", "sparks", "power_mode"}, *e.Style) {
+		return false
+	}
+	inRange := func(v *int64, low, high int64) bool { return v == nil || *v >= low && *v <= high }
+	if !inRange(e.Intensity, 0, maxEffectIntensity) || !inRange(e.DurationMS, minEffectDuration, maxEffectDuration) || !inRange(e.Particles, 0, maxEffectParticles) {
+		return false
+	}
+	if e.Colors != nil {
+		colors := *e.Colors
+		if len(colors) < 1 || len(colors) > maxEffectColors {
+			return false
+		}
+		for _, c := range colors {
+			if !validEffectColor(c) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validEffectColor is the client's is_color: "#" and exactly six hexadecimal digits, either case.
+func validEffectColor(c string) bool {
+	if len(c) != 7 || c[0] != '#' {
+		return false
+	}
+	for i := 1; i < 7; i++ {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", rune(c[i])) {
 			return false
 		}
 	}

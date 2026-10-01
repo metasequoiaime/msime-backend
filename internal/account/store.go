@@ -179,6 +179,7 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_plugins cpl ON cpl.owner_id=u.id
  LEFT JOIN community_plugin_downloads cpd ON cpd.user_id=u.id
  LEFT JOIN community_plugin_ratings cpr ON cpr.user_id=u.id
+ LEFT JOIN site_settings ss ON false
  LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture='' AND ai.updated_at IS NULL
  LEFT JOIN auth_challenges ch ON false AND ch.code_verifier||ch.redirect_uri=''
  LEFT JOIN auth_provider_tokens pt ON false WHERE false`).Scan(&n); e != nil {

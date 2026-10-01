@@ -69,6 +69,7 @@ export const legacyRedirects: Readonly<Record<string, string>> = {
   "/skins": "/community",
   "/dictionaries": "/community",
   "/replies": "/community",
+  "/site-settings": "/downloads",
 };
 
 // pageForTarget turns a server-side target (a page key such as "users", or a path) into a route path; unknown targets fall back to the overview.

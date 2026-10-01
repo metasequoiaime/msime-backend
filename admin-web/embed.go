@@ -20,7 +20,7 @@ var pagePaths = map[string]bool{
 	"/crash": true, "/status": true, "/perm": true, "/me": true,
 	// Pre-console paths that the client router redirects to their replacements.
 	"/admins": true, "/audit": true, "/system": true, "/crashes": true,
-	"/skins": true, "/dictionaries": true, "/replies": true,
+	"/skins": true, "/dictionaries": true, "/replies": true, "/site-settings": true,
 }
 
 func IsPath(path string) bool { return pagePaths[path] || strings.HasPrefix(path, "/assets/") }

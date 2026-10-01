@@ -67,3 +67,22 @@ export function channelLabel(row: Pick<DownloadRow, "source" | "channel">): stri
   if (!row.channel) return "未上报渠道";
   return channelLabels[row.channel] ?? row.channel;
 }
+
+// GET/POST /api/site-settings: the Lanzou cloud link the official website's download page offers for the Windows installer. updated_at and updated_by stay set after the link is cleared.
+export const siteSettingsSchema = z.object({ lanzou_url: z.string(), updated_at: z.string(), updated_by: z.string() });
+export type SiteSettings = z.infer<typeof siteSettingsSchema>;
+
+// lanzouURLError mirrors the server rule (empty, or an absolute https URL with a host, no credentials, at most 512 bytes) so obvious mistakes are caught before a request; the server stays authoritative.
+export function lanzouURLError(value: string): string | null {
+  if (value === "") return null;
+  if (new TextEncoder().encode(value).length > 512) return "链接不能超过 512 字节。";
+  if (!value.startsWith("https://") || /[\s\p{Cc}]/u.test(value)) return "请输入以 https:// 开头的完整链接。";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.hostname === "") return "请输入以 https:// 开头的完整链接。";
+    if (url.username !== "" || url.password !== "") return "链接不能包含账号密码。";
+  } catch {
+    return "请输入以 https:// 开头的完整链接。";
+  }
+  return null;
+}
