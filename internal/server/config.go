@@ -92,6 +92,9 @@ type Config struct {
 	WordSubmissions      WordSubmissionsConfig `json:"word_submissions"`
 	// Replicas is how many server processes share the fleet-wide request budget; the main token bucket lives in each process's memory, so every replica enforces its share of each limit.
 	Replicas int `json:"replicas"`
+	// RequestLog 控制每个请求一行的请求日志，省略时开启，写 false 关闭。见 request_log.go。
+	RequestLog  *bool `json:"request_log,omitempty"`
+	logRequests bool
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -148,6 +151,7 @@ func (c *Config) Validate() error {
 	if c.Replicas == 0 {
 		c.Replicas = 1
 	}
+	c.logRequests = c.RequestLog == nil || *c.RequestLog
 	if c.Replicas < 1 || c.Replicas > maxReplicas {
 		return errors.New("replicas must be 1..64")
 	}

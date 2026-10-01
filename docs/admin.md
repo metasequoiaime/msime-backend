@@ -38,12 +38,16 @@
      "telegram": {
        "bot_token_env": "MSIME_ADMIN_TELEGRAM_TOKEN",
        "chat_id": "@msime_news"
+     },
+     "logs": {
+       "loki_url": "http://loki.loki.svc.cluster.local:3100",
+       "selector": "{namespace=\"app\",container=\"msime-backend\"}"
      }
    }
    ```
 
 4. Google 登录模式不需要 `MSIME_ADMIN_TOKEN`。保留它时，登录页额外提供「管理员密钥登录」作为兼容入口；不配置 Google 时仍需要至少 32 字节的独立随机管理员密钥。管理员密钥不能以 `msime_pat_` 开头，这个前缀留给个人访问令牌，配置校验会拒绝。不要把任何密钥放进前端源码、安装包或版本库。
-5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表或列，会自动执行 `internal/account/admin_schema.sql` 和 `internal/account/admin_ops_schema.sql`，两者都是幂等的追加式迁移。运行账号按最小权限只有 DML 时，先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`，再给运行角色授予新表的 `SELECT, INSERT, UPDATE, DELETE` 以及 bigserial 序列的 `USAGE, SELECT`。新表包括 `admin_roles`、`admin_role_permissions`、`admin_tokens`、`admin_notifications`、`admin_notification_reads`、`admin_preferences`、`admin_notices`、`admin_crash_groups`、`admin_service_metrics`、`admin_service_daily`、`admin_service_minutes`、`admin_service_verdicts`、`admin_incidents`、`admin_sensitive_words`、`admin_sensitive_hits`、`release_asset_snapshots`、`community_reports`、`word_submissions` 和 `site_settings`；已有的 `admin_members`、`admin_sessions`、`admin_audit`、`admin_events` 和四张社区表新增了列。后台启用而表既不存在又补不上时，服务拒绝启动并在错误里说明原因。
+5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表或列，会自动执行 `internal/account/admin_schema.sql` 和 `internal/account/admin_ops_schema.sql`，两者都是幂等的追加式迁移。运行账号按最小权限只有 DML 时，先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`，再给运行角色授予新表的 `SELECT, INSERT, UPDATE, DELETE` 以及 bigserial 序列的 `USAGE, SELECT`。新表包括 `admin_roles`、`admin_role_permissions`、`admin_tokens`、`admin_notifications`、`admin_notification_reads`、`admin_preferences`、`admin_notices`、`admin_crash_groups`、`admin_service_metrics`、`admin_service_daily`、`admin_service_minutes`、`admin_service_verdicts`、`admin_incidents`、`admin_sensitive_words`、`admin_sensitive_hits`、`release_asset_snapshots`、`community_reports`、`word_submissions` 和 `site_settings`；已有的 `admin_members`、`admin_sessions`、`admin_audit`、`admin_events` 和四张社区表新增了列。`admin_role_permissions` 的权限 CHECK 约束随服务日志权限 `view_logs` 一起更新（同时给维护者授予一次 `view_logs`），这同样需要 DDL 权限。后台启用而表、列或约束既不存在又补不上时，服务拒绝启动并在错误里说明原因。
 6. 正常启动镜像，容器中的 `listen` 应为 `0.0.0.0:8080`。把 `admin.msime.app` 的 DNS 指向入口，在入口终止 HTTPS，把该域名的请求转发到相同的 Go 端口，并保留原始 Host。Go 不信任 `X-Forwarded-Host`。
 
 示例 Nginx HTTPS 虚拟主机（证书路径、后端地址按部署调整）：
@@ -116,7 +120,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 
 ## 角色与权限
 
-权限共 8 项，与「权限日志」页的矩阵一一对应：
+权限共 9 项，与「权限日志」页的矩阵一一对应：
 
 | 权限键 | 含义 |
 | --- | --- |
@@ -126,7 +130,8 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 | `ban_users` | 封禁、解封用户，吊销用户会话 |
 | `publish_notices` | 发布、归档公告；修改官网下载镜像链接（`POST /api/site-settings`） |
 | `trigger_release` | 触发发布流水线、编辑发布说明、撤回版本 |
-| `view_cloud_usage` | 读取云端监控（`GET /api/cloud`），这是唯一受权限限制的读接口 |
+| `view_cloud_usage` | 读取云端监控（`GET /api/cloud`） |
+| `view_logs` | 读取服务日志（`GET /api/logs`、`GET /api/logs/stream`） |
 | `manage_permissions` | 修改权限矩阵 |
 
 内置 4 个角色，默认矩阵如下（✓ 为拥有）：
@@ -140,11 +145,13 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 | `publish_notices` | ✓ | | ✓ | |
 | `trigger_release` | ✓ | | | |
 | `view_cloud_usage` | ✓ | | ✓ | ✓ |
+| `view_logs` | ✓ | | | |
 | `manage_permissions` | ✓ | | | |
 
 规则：
 
-- 除 `GET /api/cloud` 外，所有 GET 请求对所有角色开放，「只读」角色就是靠这一点成立的。缺少权限的写操作返回 403 `permission_denied`，前端对应按钮置灰并提示所需权限，云端监控在侧栏和搜索中对没有 `view_cloud_usage` 的角色隐藏。
+- 除云端监控（`view_cloud_usage`）和服务日志（`view_logs`）外，所有 GET 请求对所有角色开放，「只读」角色就是靠这一点成立的。缺少权限的写操作返回 403 `permission_denied`，前端对应按钮置灰并提示所需权限；云端监控和服务日志在侧栏和搜索中对没有对应权限的角色隐藏。
+- `view_logs` 默认只有维护者拥有（所有者恒为维护者，旧版管理员密钥拥有除 `manage_permissions` 外的全部权限），需要时可以在权限矩阵里授予其他角色。已有部署升级时，迁移只在替换旧约束的那一次给维护者授予 `view_logs`，之后在后台收回不会被重跑的迁移补回。
 - 维护者的 `manage_permissions` 不能收回（409 `protected`），迁移也会在它缺失时补回。权限矩阵通过 `POST /api/permissions {action: grant|revoke, role, permission}` 修改。
 - 所有者恒为维护者，不能在后台修改、停用或撤销（403 `protected_owner`），恢复入口始终在部署配置里。
 - 成员的增删、启停和改角色走 `GET/POST /api/admins`，只有所有者能调用。请求体为 `{"email","action":"add|enable|disable|revoke|set_role","role"?}`：`add` 可带 `role`（默认维护者），`set_role` 必须带 `role`。最多 100 个成员（409 `admin_limit`），重复添加返回 409 `admin_exists`。停用不删除记录，重新启用后需重新登录。添加、启用、停用和撤销都会删除该邮箱已有的后台会话和个人访问令牌，所以从配置中移除的前所有者被重新添加为成员时，旧凭据不会复活。成员记录不创建输入法用户账户，也不发送邀请邮件，被添加者直接用 Google 账号登录。
@@ -163,7 +170,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 
 ## 外壳
 
-外壳由 `GET /api/shell` 一次性提供，每 60 秒刷新：版本号、环境标签（`admin.environment`）、本人邮箱、名字、角色和权限、侧栏待处理角标（词库 PR、社区待复核、待分诊 Issue）、未读通知数和后端状态（`ok`、`degraded`、`down`；前端也接受 `unknown` 并显示「状态未知」）。
+外壳由 `GET /api/shell` 一次性提供，每 60 秒刷新：版本号、环境标签（`admin.environment`）、本人邮箱、名字、角色和权限、侧栏待处理角标（词库 PR、社区待复核、待分诊 Issue）、未读通知数、后端状态（`ok`、`degraded`、`down`；前端也接受 `unknown` 并显示「状态未知」），以及部署配置启用的可选功能 `features`（目前只有 `logs`，即是否配置了 `admin.logs.loki_url`，未启用时侧栏不显示服务日志页）。
 
 - 全局搜索（按 `/` 聚焦）：前端匹配页面名，`GET /api/search?q=` 最多返回 8 条，覆盖用户、社区内容、崩溃分组、敏感词、公告，以及内存缓存中的 GitHub PR、Issue 和 Release。结果通过 `?focus=<id>` 打开对应页面的详情。
 - 通知：`GET /api/notifications?limit=20`，`POST /api/notifications/read {ids}|{all:true,up_to_id?}`。「全部已读」带上列表中最新一条通知的 `up_to_id`，只把创建时间不晚于它的通知标为已读，打开列表之后才到的通知仍是未读；不带 `up_to_id` 时标记到服务端当前时间。通知列表每次打开都重新加载；角标在弹层关闭时跟随外壳的 60 秒轮询，在个人中心切换通知偏好后立即刷新。来源包括新举报（与举报同事务写入）、新词库 PR、崩溃分组 7 天环比上升超过 20%（每小时检查，同一分组 7 天内只提醒一次）、自动开启的故障事件、Release 状态变化和新 Issue。个人中心可以按类型关闭词库 PR、举报和崩溃提醒。新加入的管理员会看到全部历史通知为未读。
@@ -186,6 +193,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 | 云端监控 | `/cloud` | `GET /api/cloud` | 读取即需要 `view_cloud_usage` |
 | 崩溃上报 | `/crash` | `GET /api/crash-groups`、`/api/crash-groups/{signature}` | `triage_issues` |
 | 系统状态 | `/status` | `GET /api/status` | 故障事件需要 `triage_issues` |
+| 服务日志 | `/logs` | `GET /api/logs/stream`（`GET /api/logs` 供命令行和脚本使用） | 读取即需要 `view_logs`；只在配置了 `admin.logs.loki_url` 时出现 |
 | 权限日志 | `/perm` | `GET /api/permissions`、`/api/audit` | `manage_permissions`；成员管理仅限所有者 |
 | 个人中心 | `/me` | `GET /api/me` | 只作用于本人 |
 
@@ -201,6 +209,13 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 - **云端监控**：每个上游服务近 24 小时（按整点滚动，不是 UTC 自然日）的调用数、P95、错误率和逐小时曲线，以及本月（UTC）用量与 `admin.services` 中额度的对比；金额按用量乘以 `unit_price` 估算。只记录服务、耗时和状态类别，不记录请求内容。
 - **崩溃上报**：按签名分组（平台、规范化后的错误信息和第一个非系统栈帧，取 SHA-256 的前 16 位）。同一问题出现在不同平台时分成各自的分组，分别在对应平台的仓库跟进；平台先归一（win 归 windows，mac、darwin 归 macos，ipados 归 ios，harmony、ohos 归 harmonyos，其余转小写），所以同一平台的不同写法仍在一组，分组的平台创建后不再变化。列表显示 7 天次数、与前 7 天的环比、新出现标记和影响设备数（按 `install_id` 去重）。状态为未处理、已知问题、已修复；可以在平台对应的仓库建 Issue，状态随之改为已知问题并记录链接。Issue 已在 GitHub 创建但链接写不回数据库时，服务返回 503 `issue_not_recorded` 并带上 `issue_url`，页面在提示条中显示这个链接，并在本次打开页面期间把该分组当作已有 Issue，不再提供「建 Issue」，以免重复创建；刷新后链接只能从服务日志中找回，应先把分组标记为已知问题。已修复的分组再次崩溃时不会自动重新打开。
 - **系统状态**：每 60 秒探测数据库，并汇总最近 5 个完整分钟的上游指标，错误率或 P95 超过 `slow_ms` 判为降级；每日可用分钟数保留 60 天。连续 3 次判为降级或不可用时自动开启故障事件，之后连续 5 次正常时自动关闭；同一段异常里自动事件被管理员手动关闭后不会再自动开启。也可以通过 `open_incident`、`update_incident`、`resolve_incident` 手动管理。只展示数据库和已配置的上游服务。多副本部署时的分工见下方「系统状态的多副本行为」。
+- **服务日志**：后端各副本的实时日志，从集群的 Loki 读取（见「配置」中的 `admin.logs`）。顶部按钮按副本筛选（全部或某一个副本，每个副本一种颜色），级别筛选为全部、INFO 及以上、WARN 及以上和 ERROR，搜索框按包含的文字筛选（区分大小写，在 Loki 侧以 `|=` 过滤）。打开时先回填最近 15 分钟内最新的 500 行，之后每 2 秒追加新行；停在底部时自动滚动，向上滚动后停止自动滚动并显示「回到最新」。暂停时连接保持，新行先缓冲，继续时一并显示。页面最多保留最近 2000 行。每行显示时间（CRI 前缀里的时间）、副本、级别和去掉 CRI 前缀与 slog 时间级别后的内容。级别取自 slog 默认格式（`2026/10/01 14:47:01 INFO …`）；筛选 WARN 或 ERROR 时排除的是低于该级别的行，所以无法识别级别的行（panic、标准库 `log` 的输出）在这两个筛选下也会显示。读取日志不写审计（后台的读操作都不写审计）。
+
+  `GET /api/logs?since=&limit=&pod=&level=&q=` 返回窗口内最新的 `limit` 行（按时间升序，最新的在最后）：`{"lines":[{"ts","time","pod","stream","level","message"}],"pods":[…],"truncated","cursor","since","until"}`。`since` 为 Go 时长写法，1 分钟到 24 小时，默认 `15m`；`limit` 为 1–2000，默认 500；`pod` 为副本全名；`level` 为 `INFO`、`WARN` 或 `ERROR`（不区分大小写），表示该级别及以上；`q` 最多 200 字节，不能含换行等控制字符。`ts` 是 Loki 的纳秒时间戳（字符串），`cursor` 是读到的位置（窗口终点，纳秒），可以交给日志流的 `cursor` 从这里继续；`pods` 是窗口内有日志的全部副本，不受其他筛选影响（用 `count_over_time` 即时查询统计，不用标签值接口，后者会带上一两个小时前已下线的副本）。行内容超过 4 KiB 的部分截断。
+
+  `GET /api/logs/stream` 接受同样的 `pod`、`level`、`q`、`since`，另有 `backfill`（0–1000，默认 200）和 `cursor`，返回 Server-Sent Events（`text/event-stream`）。不带 `cursor`（也没有 `Last-Event-ID` 请求头）时先回填 `since` 窗口内最新的 `backfill` 行；带上时从它之后继续，最早回到一小时前。事件：`lines`（`{"lines":[…]}`，事件 `id` 是续传游标，即服务端已经读到的位置）、`pods`（`since` 窗口内有日志的副本，连接时和之后每 30 秒一次）、`gap`（`{"from","to"}`，日志产生得比速率上限快，用满读取页数后仍落后超过 60 秒时跳到最新位置）、`error`（`{"code":"logs_unavailable"}`，Loki 暂时不可用，连续失败 5 次后关闭连接）和 `end`（`{"reason":"max_duration"}`，连接满 30 分钟后关闭，客户端带游标重连）；没有新行时每 15 秒发一行注释作为心跳。服务端每 2 秒查询一次 Loki，每次回看 5 秒并按（时间戳、副本、内容）去重，所以不同节点上 promtail 晚到 5 秒以内的行不会漏也不会重复；单个连接每次最多读 2 页、每页 500 行，即每 2 秒最多 1000 行。每个管理员最多同时打开 2 个日志流，每个副本合计最多 10 个，超出返回 429 `too_many_streams` 并带 `Retry-After: 30`。日志流不受后台 15 秒请求超时限制，打开时照常经过鉴权、来源检查和每分钟 300 次的限流（只计一次）。浏览器的 `EventSource` 不能带 `Authorization` 请求头，前端用 `fetch` 读取事件流，所以管理员密钥登录同样可用。
+
+  两个接口的错误：功能未配置时 404 `logs_disabled`，没有 `view_logs` 时 403 `permission_denied`，参数无效时 400 `invalid_since`、`invalid_limit`、`invalid_pod`、`invalid_level`、`invalid_query`、`invalid_backfill` 或 `invalid_cursor`，Loki 不可达或返回错误时 502 `logs_unavailable`（Loki 的响应正文不透传）。用户输入只以转义后的字符串字面量进入 LogQL（`strconv.Quote`，与 Loki 解析字符串用的 `strconv.Unquote` 互逆），不能改变查询结构。
 - **权限日志**：角色与权限矩阵、成员列表（所有者排在最前，显示会话数和最近活动），以及操作日志（`/api/audit`，可按 `action` 精确筛选、按 `actor` 模糊筛选，文案由 `action` 和 `detail` 生成）。
 - **个人中心**：资料、本月处理量（词库 PR、社区审核、Issue）、社区审核的平均处理时长、通知偏好、最近 6 条本人操作、登录会话（可吊销其他会话）和个人访问令牌。「每周摘要」邮件尚未接入，开关置灰。
 
@@ -276,6 +291,19 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 | `quota.period` | 只支持 `month`（UTC 自然月） |
 | `quota.unit_price` | 每个计量单位的估算人民币价格，0 表示不估算费用 |
 | `slow_ms` | P95 超过此值判为降级，默认 3000，范围 1–120000 |
+
+### `admin.logs`
+
+服务日志页读取的 Loki，按需配置：
+
+| 字段 | 说明 |
+| --- | --- |
+| `loki_url` | Loki 的 HTTP 地址，例如集群内的 `http://loki.loki.svc.cluster.local:3100`。可以是 `http` 或 `https`，可以带路径前缀，不能带账号密码、查询串或片段。为空（或不写整个 `logs` 块）时功能关闭：侧栏不显示服务日志页，两个接口返回 404 `logs_disabled` |
+| `selector` | LogQL 流选择器，选出后端各副本的日志流，默认 `{namespace="app",container="msime-backend"}`。只能是 `{标签="值",…}` 形式的选择器（支持 `=`、`!=`、`=~`、`!~`），最多 512 字节，不能带管道。选出的流必须有 `pod` 标签（promtail 的 `kubernetes-pods` 任务默认带）。`loki_url` 为空时不校验，可以先写好 |
+
+服务端请求 Loki 时不带租户头（`X-Scope-OrgID`），适用于 `auth_enabled: false` 的单租户 Loki；每次请求超时 10 秒，响应体最多读 16 MiB，不跟随重定向。
+
+上线顺序：旧版本不认识 `admin.logs`，而配置中的未知字段会让服务拒绝启动。先让所有副本都运行包含此功能的版本，再在配置里加入 `admin.logs` 并滚动重启；回退到旧版本之前，先从配置中删除 `admin.logs`。Kubernetes 部署还要确认后端所在命名空间能访问 Loki 的 3100 端口（Loki 所在命名空间的 NetworkPolicy 需要放行来自后端副本的入站流量）。
 
 ### `admin.telegram`
 
@@ -381,7 +409,7 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 
 ## 审计
 
-所有写操作都写入 `admin_audit`，包括 `actor`、`action`、`target` 和 `detail`（原因、条数、新旧值等 JSON）。数据库变更与审计在同一事务里，失败不部分生效。GitHub 和 Telegram 这类外部副作用无法与数据库放在同一事务里，做法是外部调用成功后再写审计，失败则不写；因此极少数情况下会出现外部动作已生效、而审计或数据库提交失败的情况，例如 Telegram 消息已发出但公告没有标记为已发布。标记通知已读只改本人的已读记录，不写审计。
+读取（包括服务日志）不写审计。所有写操作都写入 `admin_audit`，包括 `actor`、`action`、`target` 和 `detail`（原因、条数、新旧值等 JSON）。数据库变更与审计在同一事务里，失败不部分生效。GitHub 和 Telegram 这类外部副作用无法与数据库放在同一事务里，做法是外部调用成功后再写审计，失败则不写；因此极少数情况下会出现外部动作已生效、而审计或数据库提交失败的情况，例如 Telegram 消息已发出但公告没有标记为已发布。标记通知已读只改本人的已读记录，不写审计。
 
 ## 本地开发与验证
 

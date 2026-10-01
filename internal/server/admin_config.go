@@ -136,7 +136,10 @@ func (c *AdminConfig) validateConsole() error {
 			return fmt.Errorf("admin service %s: slow_ms must be 1..120000", v.Key)
 		}
 	}
-	return c.Telegram.validate()
+	if err := c.Telegram.validate(); err != nil {
+		return err
+	}
+	return c.Logs.validate()
 }
 
 func (g *AdminGitHubConfig) enabled() bool { return g.AppID != 0 }

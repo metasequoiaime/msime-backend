@@ -35,13 +35,19 @@ type adminShellPending struct {
 	Issues    int `json:"issues"`
 }
 
+// adminShellFeatures 告诉前端哪些可选功能已在部署配置中启用，未启用的页面不出现在侧栏。
+type adminShellFeatures struct {
+	Logs bool `json:"logs"`
+}
+
 type adminShellResponse struct {
-	Version             string            `json:"version"`
-	Environment         string            `json:"environment"`
-	Me                  adminShellMe      `json:"me"`
-	Pending             adminShellPending `json:"pending"`
-	UnreadNotifications int               `json:"unread_notifications"`
-	Status              string            `json:"status"`
+	Version             string             `json:"version"`
+	Environment         string             `json:"environment"`
+	Me                  adminShellMe       `json:"me"`
+	Pending             adminShellPending  `json:"pending"`
+	UnreadNotifications int                `json:"unread_notifications"`
+	Status              string             `json:"status"`
+	Features            adminShellFeatures `json:"features"`
 }
 
 // adminShell serves GET /api/shell: everything the console frame needs in one request, polled once a minute. Every source is read concurrently; one that fails is logged and counted as 0 so the frame still renders, and the status then reports degraded. Until the status probe has run once (adminHealth answers unknown), the status is ok when the database-backed sources answered, since this very request was served by a working backend.
@@ -56,6 +62,7 @@ func (s *Server) adminShell(w http.ResponseWriter, r *http.Request) {
 		Version:     msimebackend.Version(),
 		Environment: s.config.Admin.Environment,
 		Me:          adminShellMe{Email: access.Email, Role: access.Role, Permissions: access.Permissions},
+		Features:    adminShellFeatures{Logs: s.config.Admin.Logs.enabled()},
 	}
 	if response.Me.Permissions == nil {
 		response.Me.Permissions = []string{}

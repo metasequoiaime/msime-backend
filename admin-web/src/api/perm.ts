@@ -11,6 +11,7 @@ export const permissionLabels: Record<Permission, string> = {
   publish_notices: "发布公告",
   trigger_release: "触发发布流水线",
   view_cloud_usage: "查看云服务用量",
+  view_logs: "查看服务日志",
   manage_permissions: "管理权限",
 };
 

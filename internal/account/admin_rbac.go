@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Permission keys, one per row of the console's permission matrix. Every GET under /api/ is open to every admin role; these gate the writes.
+// 权限键，与后台权限矩阵的每一行一一对应。/api/ 下的 GET 对所有角色开放，只有云端监控（view_cloud_usage）和服务日志（view_logs）的读取受权限限制；其余权限控制写操作。
 const (
 	PermReviewDictPR      = "review_dict_pr"
 	PermReviewCommunity   = "review_community" // also covers the sensitive word list
@@ -20,6 +20,7 @@ const (
 	PermPublishNotices    = "publish_notices"
 	PermTriggerRelease    = "trigger_release"
 	PermViewCloudUsage    = "view_cloud_usage"
+	PermViewLogs          = "view_logs" // 读取服务日志（GET /api/logs、/api/logs/stream），默认只有维护者拥有
 	PermManagePermissions = "manage_permissions"
 )
 
@@ -28,7 +29,7 @@ const RoleMaintainer = "maintainer"
 
 // AllAdminPermissions returns every permission key in matrix order.
 func AllAdminPermissions() []string {
-	return []string{PermReviewDictPR, PermReviewCommunity, PermTriageIssues, PermBanUsers, PermPublishNotices, PermTriggerRelease, PermViewCloudUsage, PermManagePermissions}
+	return []string{PermReviewDictPR, PermReviewCommunity, PermTriageIssues, PermBanUsers, PermPublishNotices, PermTriggerRelease, PermViewCloudUsage, PermViewLogs, PermManagePermissions}
 }
 
 // AdminAccess is who is calling an admin endpoint and what they may do. The server builds it once per request, after authentication, and every handler reads it from the context.

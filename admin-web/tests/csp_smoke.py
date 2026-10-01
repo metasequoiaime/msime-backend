@@ -27,7 +27,7 @@ ADMIN_GO = ROOT / "internal" / "server" / "admin.go"
 PAGES = {
     "/": "数据概览", "/dictpr": "词库审核", "/community": "社区审核", "/issues": "问题分诊", "/words": "敏感词库",
     "/users": "用户账号", "/downloads": "下载记录", "/notice": "公告推送", "/release": "发布管理", "/cloud": "云端监控",
-    "/crash": "崩溃上报", "/status": "系统状态", "/perm": "权限日志", "/me": "个人中心",
+    "/crash": "崩溃上报", "/status": "系统状态", "/logs": "服务日志", "/perm": "权限日志", "/me": "个人中心",
 }
 REDIRECTS = {"/admins": "/perm", "/audit": "/perm", "/system": "/status", "/crashes": "/crash", "/skins": "/community?tab=skins", "/dictionaries": "/community?tab=dictionaries", "/replies": "/community?tab=replies", "/site-settings": "/downloads"}
 
@@ -127,8 +127,8 @@ FIXTURES = {
     },
     "/api/permissions": {
         "roles": [{"key": "maintainer", "name": "维护者", "builtin": True}, {"key": "reviewer", "name": "审核志愿者", "builtin": True}, {"key": "operator", "name": "运营/客服", "builtin": True}, {"key": "readonly", "name": "只读", "builtin": True}],
-        "permissions": ["review_dict_pr", "review_community", "triage_issues", "ban_users", "publish_notices", "trigger_release", "view_cloud_usage", "manage_permissions"],
-        "matrix": {"maintainer": ["review_dict_pr", "review_community", "triage_issues", "ban_users", "publish_notices", "trigger_release", "view_cloud_usage", "manage_permissions"], "reviewer": ["review_dict_pr", "review_community", "triage_issues"], "operator": ["triage_issues", "ban_users", "publish_notices", "view_cloud_usage"], "readonly": ["view_cloud_usage"]},
+        "permissions": ["review_dict_pr", "review_community", "triage_issues", "ban_users", "publish_notices", "trigger_release", "view_cloud_usage", "view_logs", "manage_permissions"],
+        "matrix": {"maintainer": ["review_dict_pr", "review_community", "triage_issues", "ban_users", "publish_notices", "trigger_release", "view_cloud_usage", "view_logs", "manage_permissions"], "reviewer": ["review_dict_pr", "review_community", "triage_issues"], "operator": ["triage_issues", "ban_users", "publish_notices", "view_cloud_usage"], "readonly": ["view_cloud_usage"]},
         "members": [{"email": "owner@example.com", "role": "maintainer", "enabled": True, "owner": True, "sessions": 1, "last_seen_at": "2026-10-01T00:00:00Z", "created_at": None},
                     {"email": "helper@example.com", "role": "reviewer", "enabled": False, "owner": False, "sessions": 0, "last_seen_at": None, "created_at": "2026-09-01T00:00:00Z"}],
     },
@@ -174,6 +174,23 @@ FIXTURES.update({
 })
 
 
+# 服务日志页的日志流，形如 internal/server/admin_logs.go 的 Server-Sent Events。首次连接回填两行并发送副本列表；带 cursor 的重连没有新行。
+LOG_PODS = ["app-msime-backend-77f98747f9-4nlh4", "app-msime-backend-77f98747f9-hkxbc"]
+LOG_LINES = [
+    {"ts": "1790866019178204841", "time": "2026-10-01T14:46:54.755845624Z", "pod": LOG_PODS[1], "stream": "stderr", "level": "INFO", "message": "MSIME service listening address=0.0.0.0:8080"},
+    {"ts": "1790866021452052720", "time": "2026-10-01T14:47:01.378828677Z", "pod": LOG_PODS[0], "stream": "stderr", "level": "WARN", "message": "http request method=GET route=\"GET /v1/cloud/candidates\" status=502 duration_ms=31 bytes=60"},
+]
+
+
+def log_stream(query: str) -> bytes:
+    frames = ["retry: 5000\n\n"]
+    if "cursor=" not in query:
+        frames.append(f"id: {LOG_LINES[-1]['ts']}\nevent: lines\ndata: {json.dumps({'lines': LOG_LINES})}\n\n")
+        frames.append(f"event: pods\ndata: {json.dumps({'pods': LOG_PODS})}\n\n")
+    frames.append(": ping\n\n")
+    return "".join(frames).encode()
+
+
 def production_csp() -> str:
     match = re.search(r'Header\(\)\.Set\("Content-Security-Policy", "([^"]+)"\)', ADMIN_GO.read_text())
     if not match:
@@ -202,7 +219,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def api(self):
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
+        if path == "/api/logs/stream":
+            return self.send(200, log_stream(query), "text/event-stream; charset=utf-8")
         if path == "/api/auth/logout":
             Handler.logged_out = True
         body = FIXTURES.get(path)
@@ -311,6 +330,21 @@ def main() -> int:
                 expect(page.get_by_text("云候选间歇超时")).to_be_visible()
                 violations("/status data")
 
+                # 服务日志：功能已启用且角色有 view_logs 时，页面连上日志流，显示两个副本的行和副本按钮，可以暂停。
+                shell_fixture = FIXTURES["/api/shell"]
+                FIXTURES["/api/shell"] = {**shell_fixture, "features": {"logs": True}, "me": {**shell_fixture["me"], "permissions": [*shell_fixture["me"]["permissions"], "view_logs"]}}
+                page.goto(base + "/logs")
+                log = page.get_by_role("log", name="服务日志")
+                expect(log).to_contain_text("MSIME service listening")
+                expect(log).to_contain_text("GET /v1/cloud/candidates")
+                expect(page.get_by_role("radio", name="77f98747f9-hkxbc")).to_be_visible()
+                expect(page.get_by_role("complementary", name="后台导航").get_by_role("link", name="服务日志")).to_be_visible()
+                page.get_by_role("button", name="暂停").click()
+                expect(page.get_by_text("已暂停")).to_be_visible()
+                page.get_by_role("button", name="继续").click()
+                violations("/logs data")
+                FIXTURES["/api/shell"] = shell_fixture
+
                 for old, new in REDIRECTS.items():
                     page.goto(base + old)
                     page.wait_for_url(base + new)
@@ -408,6 +442,8 @@ def main() -> int:
                 expect(page.get_by_text("部分服务降级")).to_be_visible()
                 # The fixture role lacks view_cloud_usage, so 云端监控 is hidden from the sidebar.
                 expect(page.get_by_role("complementary", name="后台导航").get_by_role("link", name="云端监控")).to_have_count(0)
+                # 外壳没有报告 features.logs，服务日志同样不出现在侧栏。
+                expect(page.get_by_role("complementary", name="后台导航").get_by_role("link", name="服务日志")).to_have_count(0)
 
                 page.get_by_role("button", name=re.compile("^外观")).click()
                 page.get_by_role("radio", name="深色").click()

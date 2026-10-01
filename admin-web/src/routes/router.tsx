@@ -33,6 +33,7 @@ const releaseRoute = page("/release", () => import("../pages/release"));
 const cloudRoute = page("/cloud", () => import("../pages/cloud"));
 const crashRoute = page("/crash", () => import("../pages/crash"));
 const statusRoute = page("/status", () => import("../pages/status"));
+const logsRoute = page("/logs", () => import("../pages/logs"));
 const permRoute = page("/perm", () => import("../pages/perm"));
 const meRoute = page("/me", () => import("../pages/me"));
 
@@ -43,7 +44,7 @@ const moved = <P extends string>(path: P, to: "/perm" | "/status" | "/crash" | "
   } });
 
 const routeTree = rootRoute.addChildren([
-  overviewRoute, dictprRoute, communityRoute, issuesRoute, wordsRoute, usersRoute, downloadsRoute, noticeRoute, releaseRoute, cloudRoute, crashRoute, statusRoute, permRoute, meRoute,
+  overviewRoute, dictprRoute, communityRoute, issuesRoute, wordsRoute, usersRoute, downloadsRoute, noticeRoute, releaseRoute, cloudRoute, crashRoute, statusRoute, logsRoute, permRoute, meRoute,
   moved("/admins", "/perm"), moved("/audit", "/perm"), moved("/system", "/status"), moved("/crashes", "/crash"), moved("/skins", "/community", "skins"), moved("/dictionaries", "/community", "dictionaries"), moved("/replies", "/community", "replies"), moved("/site-settings", "/downloads"),
 ]);
 

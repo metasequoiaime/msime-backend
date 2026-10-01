@@ -48,9 +48,17 @@ CREATE TABLE IF NOT EXISTS admin_roles (
 );
 CREATE TABLE IF NOT EXISTS admin_role_permissions (
  role text NOT NULL REFERENCES admin_roles(key) ON DELETE CASCADE,
- permission text NOT NULL CHECK(permission IN ('review_dict_pr','review_community','triage_issues','ban_users','publish_notices','trigger_release','view_cloud_usage','manage_permissions')),
+ permission text NOT NULL CONSTRAINT admin_role_permissions_permission_check CHECK(permission IN ('review_dict_pr','review_community','triage_issues','ban_users','publish_notices','trigger_release','view_cloud_usage','view_logs','manage_permissions')),
  PRIMARY KEY(role,permission)
 );
+-- 服务日志权限 view_logs 是后加的：旧库的 CHECK 约束不认识它。只在约束还是旧版时替换约束并给维护者授予一次，之后在后台收回也不会被重跑的迁移补回。
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='admin_role_permissions'::regclass AND conname='admin_role_permissions_permission_check' AND pg_get_constraintdef(oid) LIKE '%view_logs%') THEN
+  ALTER TABLE admin_role_permissions DROP CONSTRAINT IF EXISTS admin_role_permissions_permission_check;
+  ALTER TABLE admin_role_permissions ADD CONSTRAINT admin_role_permissions_permission_check CHECK(permission IN ('review_dict_pr','review_community','triage_issues','ban_users','publish_notices','trigger_release','view_cloud_usage','view_logs','manage_permissions'));
+  INSERT INTO admin_role_permissions(role,permission) SELECT 'maintainer','view_logs' WHERE EXISTS (SELECT 1 FROM admin_roles WHERE key='maintainer') ON CONFLICT DO NOTHING;
+ END IF;
+END $$;
 -- A built-in role gets its default permissions only in the statement that creates the role row, so a matrix edited later through the console is never reset by a re-run migration.
 WITH created AS (
  INSERT INTO admin_roles(key,name,builtin) VALUES ('maintainer','维护者',true),('reviewer','审核志愿者',true),('operator','运营/客服',true),('readonly','只读',true)
@@ -58,7 +66,7 @@ WITH created AS (
 )
 INSERT INTO admin_role_permissions(role,permission)
 SELECT d.role,d.permission FROM created c JOIN (VALUES
- ('maintainer','review_dict_pr'),('maintainer','review_community'),('maintainer','triage_issues'),('maintainer','ban_users'),('maintainer','publish_notices'),('maintainer','trigger_release'),('maintainer','view_cloud_usage'),('maintainer','manage_permissions'),
+ ('maintainer','review_dict_pr'),('maintainer','review_community'),('maintainer','triage_issues'),('maintainer','ban_users'),('maintainer','publish_notices'),('maintainer','trigger_release'),('maintainer','view_cloud_usage'),('maintainer','view_logs'),('maintainer','manage_permissions'),
  ('reviewer','review_dict_pr'),('reviewer','review_community'),('reviewer','triage_issues'),
  ('operator','triage_issues'),('operator','ban_users'),('operator','publish_notices'),('operator','view_cloud_usage'),
  ('readonly','view_cloud_usage')

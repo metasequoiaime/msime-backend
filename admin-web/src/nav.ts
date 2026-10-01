@@ -1,6 +1,6 @@
 import type { Permission, Shell } from "./api/shell";
 
-export type PageKey = "overview" | "dictpr" | "community" | "issues" | "words" | "users" | "downloads" | "notice" | "release" | "cloud" | "crash" | "status" | "perm" | "me";
+export type PageKey = "overview" | "dictpr" | "community" | "issues" | "words" | "users" | "downloads" | "notice" | "release" | "cloud" | "crash" | "status" | "logs" | "perm" | "me";
 
 export type NavItem = {
   key: PageKey;
@@ -12,6 +12,8 @@ export type NavItem = {
   badge?: keyof Shell["pending"];
   // permission hides the item from the sidebar and global search for roles without it, for pages whose reads are permission-gated on the server (GET /api/cloud requires view_cloud_usage).
   permission?: Permission;
+  // feature 是页面依赖的可选功能（/api/shell 的 features），未在部署配置中启用时侧栏和全局搜索都不显示该页。
+  feature?: keyof NonNullable<Shell["features"]>;
 };
 
 export const navGroups: readonly { title: string; items: readonly NavItem[] }[] = [
@@ -36,6 +38,7 @@ export const navGroups: readonly { title: string; items: readonly NavItem[] }[] 
   ] },
   { title: "系统", items: [
     { key: "status", label: "系统状态", path: "/status", description: "后端各服务的可用性与事件。", icon: "M3 12h4l2.5-6 5 12 2.5-6h4" },
+    { key: "logs", label: "服务日志", path: "/logs", description: "后端各副本的实时日志，来自集群的 Loki。", icon: "M4 5h16M4 10h10M4 15h16M4 20h7", permission: "view_logs", feature: "logs" },
     { key: "perm", label: "权限日志", path: "/perm", description: "管理员角色、权限矩阵与操作日志。", icon: "M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6zM9 12l2 2 4-4" },
   ] },
 ];

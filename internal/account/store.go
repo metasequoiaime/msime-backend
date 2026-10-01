@@ -240,6 +240,13 @@ SELECT word_id,day,count FROM admin_sensitive_hits WHERE false`); e != nil {
 	if !current {
 		return errors.New("admin_events kind constraint predates the active and session kinds")
 	}
+	// 权限键同样在 CHECK 约束里；旧约束会让授予 view_logs 失败。
+	if e := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='admin_role_permissions'::regclass AND conname='admin_role_permissions_permission_check' AND pg_get_constraintdef(oid) LIKE '%view_logs%')`).Scan(&current); e != nil {
+		return e
+	}
+	if !current {
+		return errors.New("admin_role_permissions permission constraint predates view_logs")
+	}
 	return nil
 }
 func (s *Store) Rate(ctx context.Context, key string, limit int, window time.Duration) error {
