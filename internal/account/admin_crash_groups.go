@@ -156,6 +156,8 @@ func (a *Service) adminCrashGroups(w http.ResponseWriter, r *http.Request, _ str
 		writeError(w, 400, "invalid_filter")
 		return
 	}
+	// Groups store the canonical platform; the tiles map each event's reported platform the same way, so an alias such as darwin counts under macos.
+	platform = crashPlatform(platform)
 	ctx := r.Context()
 	// One snapshot for the rows, the chip counts and the tiles, so they agree with each other.
 	tx, err := a.store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -201,7 +203,7 @@ ORDER BY COALESCE(c.c7,0) DESC,g.last_seen DESC,g.signature LIMIT $3`, "", platf
  CASE WHEN count(install_id) FILTER (WHERE kind='crash')=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE kind='crash') END,
  CASE WHEN count(install_id)=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE created_at>=date_trunc('day',now(),'UTC')) END,
  round(count(*) FILTER (WHERE kind='session')::numeric/NULLIF(count(*) FILTER (WHERE kind IN ('session','session_crash')),0),4)::float8
-FROM admin_events WHERE kind IN ('download','crash','active','session','session_crash') AND created_at>=now()-interval '7 days' AND ($1='' OR platform=$1)`, platform).Scan(&summary.Groups, &summary.Crashes7d, &summary.Devices7d, &summary.InstallsToday, &summary.CrashFreeRate)
+FROM admin_events WHERE kind IN ('download','crash','active','session','session_crash') AND created_at>=now()-interval '7 days' AND ($1='' OR `+overviewPlatform("platform")+`=$1)`, platform).Scan(&summary.Groups, &summary.Crashes7d, &summary.Devices7d, &summary.InstallsToday, &summary.CrashFreeRate)
 	if err != nil {
 		a.error(w, err)
 		return
@@ -525,8 +527,23 @@ func crashFirstLine(text string) string {
 // crashStackLines bounds how many stack lines are searched for the first non-system frame.
 const crashStackLines = 256
 
-// crashSignature groups a crash: the first 16 hex digits of sha256 over the normalized message and the first non-system stack frame. Empty means the crash is not grouped.
-func crashSignature(message, stack string) string {
+// crashPlatform maps a client-reported platform name to the canonical key that overviewPlatform computes in SQL: windows (also win), macos (also mac, darwin), linux, android, ios (also ipados), harmonyos (also harmony, ohos); any other name is kept lowercased.
+func crashPlatform(platform string) string {
+	switch platform = strings.ToLower(platform); platform {
+	case "win":
+		return "windows"
+	case "mac", "darwin":
+		return "macos"
+	case "ipados":
+		return "ios"
+	case "harmony", "ohos":
+		return "harmonyos"
+	}
+	return platform
+}
+
+// crashSignature groups a crash: the first 16 hex digits of sha256 over the canonical platform, the normalized message and the first non-system stack frame. The same failure on two platforms is two groups, because each platform's crash is fixed and tracked in its own repository; a group's platform therefore never changes. Empty means the crash is not grouped.
+func crashSignature(platform, message, stack string) string {
 	normalized := normalizeCrashMessage(message)
 	frame := ""
 	lines := strings.Split(stack, "\n")
@@ -542,7 +559,7 @@ func crashSignature(message, stack string) string {
 	if normalized == "" && frame == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(normalized + "\n" + frame))
+	sum := sha256.Sum256([]byte(crashPlatform(platform) + "\n" + normalized + "\n" + frame))
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -555,13 +572,13 @@ func crashGroupTitle(message string) string {
 	return line
 }
 
-// upsertCrashGroup records a crash with a non-empty signature in its group, inside the telemetry insert's transaction: a new group starts open, an existing one moves its last sighting, platform and version forward.
+// upsertCrashGroup records a crash with a non-empty signature in its group, inside the telemetry insert's transaction: a new group starts open with the crash's canonical platform, an existing one moves its last sighting and version forward. The platform is part of the signature, so it is never updated.
 func (a *Service) upsertCrashGroup(ctx context.Context, tx pgx.Tx, signature, platform, version, title string) error {
 	if signature == "" {
 		return nil
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO admin_crash_groups(signature,platform,version,title) VALUES($1,$2,$3,$4)
-ON CONFLICT(signature) DO UPDATE SET platform=EXCLUDED.platform,version=EXCLUDED.version,last_seen=GREATEST(admin_crash_groups.last_seen,EXCLUDED.last_seen)`, signature, platform, version, title)
+ON CONFLICT(signature) DO UPDATE SET version=EXCLUDED.version,last_seen=GREATEST(admin_crash_groups.last_seen,EXCLUDED.last_seen)`, signature, crashPlatform(platform), version, title)
 	return err
 }
 
@@ -618,18 +635,18 @@ WHERE kind='crash' AND signature IS NULL AND (created_at,id)>($1,$2) ORDER BY cr
 	var ids, signatures []string
 	groups := map[string]*crashBackfillGroup{}
 	for _, e := range events {
-		signature := crashSignature(e.message, e.stack)
+		signature := crashSignature(e.platform, e.message, e.stack)
 		if signature == "" {
 			continue
 		}
 		ids, signatures = append(ids, e.id), append(signatures, signature)
 		group := groups[signature]
 		if group == nil {
-			group = &crashBackfillGroup{title: crashGroupTitle(e.message), first: e.created}
+			group = &crashBackfillGroup{platform: crashPlatform(e.platform), title: crashGroupTitle(e.message), first: e.created}
 			groups[signature] = group
 		}
-		// Events arrive oldest first, so the latest platform and version win.
-		group.platform, group.version, group.last = e.platform, e.version, e.created
+		// Events arrive oldest first, so the latest version wins.
+		group.version, group.last = e.version, e.created
 	}
 	if len(ids) > 0 {
 		if _, err = tx.Exec(ctx, `UPDATE admin_events e SET signature=v.signature FROM unnest($1::text[],$2::text[]) v(id,signature) WHERE e.id=v.id AND e.signature IS NULL`, ids, signatures); err != nil {
@@ -647,7 +664,6 @@ WHERE kind='crash' AND signature IS NULL AND (created_at,id)>($1,$2) ORDER BY cr
 SELECT * FROM unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::timestamptz[],$6::timestamptz[])
 ON CONFLICT(signature) DO UPDATE SET first_seen=LEAST(admin_crash_groups.first_seen,EXCLUDED.first_seen),
  last_seen=GREATEST(admin_crash_groups.last_seen,EXCLUDED.last_seen),
- platform=CASE WHEN EXCLUDED.last_seen>admin_crash_groups.last_seen THEN EXCLUDED.platform ELSE admin_crash_groups.platform END,
  version=CASE WHEN EXCLUDED.last_seen>admin_crash_groups.last_seen THEN EXCLUDED.version ELSE admin_crash_groups.version END`, keys, platforms, versions, titles, firsts, lasts); err != nil {
 			return false, afterTime, afterID, err
 		}

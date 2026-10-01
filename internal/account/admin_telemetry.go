@@ -80,7 +80,7 @@ func (a *Service) Telemetry(w http.ResponseWriter, r *http.Request) {
 	}
 	signature := ""
 	if v.Kind == "crash" {
-		signature = crashSignature(v.Message, v.Stack)
+		signature = crashSignature(v.Platform, v.Message, v.Stack)
 	}
 	ctx := r.Context()
 	tx, err := a.store.pool.Begin(ctx)

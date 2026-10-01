@@ -80,7 +80,7 @@ func TestTelemetryDeviceActivityAndDownloadDimensions(t *testing.T) {
 	if err := db.pool.QueryRow(ctx, `SELECT signature FROM admin_events WHERE id='dimension-crash-00001'`).Scan(&signature); err != nil {
 		t.Fatal(err)
 	}
-	want := crashSignature("  boom\nsecond line", "frame")
+	want := crashSignature("macos", "  boom\nsecond line", "frame")
 	if (want == "") != (signature == nil) || (signature != nil && *signature != want) {
 		t.Fatal("crash signature not stored", signature, want)
 	}
