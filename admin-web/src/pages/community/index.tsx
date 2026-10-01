@@ -56,7 +56,7 @@ export default function CommunityPage() {
   const [typed, setTyped] = useState("");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<{ section: Section; id: string } | null>(null);
-  const { approve, remove, restore } = useModeration();
+  const { approve, remove, restore, setCategory } = useModeration();
   const canReview = can("review_community");
 
   // The server search runs on what was typed after a short pause, not on every keystroke, and starts again from the first page.
@@ -155,6 +155,6 @@ export default function CommunityPage() {
     </nav>}
 
     <ContentDrawer target={open} onClose={() => { setOpen(null); if (focus) setSearch({ focus: undefined }); }}
-      onApprove={approve} onRemove={remove} onRestore={restore} />
+      onApprove={approve} onRemove={remove} onRestore={restore} onCategory={setCategory} />
   </>;
 }
