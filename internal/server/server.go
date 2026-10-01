@@ -261,7 +261,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 	})
 }
 
-// allowPrincipal charges a main API principal (a configured client or a signed-in "user:" principal) against this replica's share of its limit. Requests are spread round-robin without sticky sessions, so each of the configured replicas enforcing ceil(limit/replicas) keeps the fleet-wide rate close to the configured one without a database write per request. Only the main API goes through here; the admin and word-submission keys call allow directly with their own limits.
+// allowPrincipal charges a main API principal (a configured client or a signed-in "user:" principal) against this replica's share of its limit. Requests are spread round-robin without sticky sessions, so each of the configured replicas enforcing ceil(limit/replicas) keeps the fleet-wide rate close to the configured one without a database write per request. Only the main API goes through here; the admin and word-submission limits go through limitShared, which counts in auth_rates across replicas and falls back to allow with the full limit only without a database.
 func (s *Server) allowPrincipal(c Client, now time.Time) bool {
 	c.RequestsPerMinute = replicaShare(c.RequestsPerMinute, s.config.Replicas)
 	return s.allow(c, now)
