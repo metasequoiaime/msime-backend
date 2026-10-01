@@ -71,6 +71,8 @@ curl -G -H "Authorization: Bearer $MSIME_CLIENT_TOKEN" \
 - 新增的配置字段 `admin.logs` 和 `request_log` 与 `replicas` 一样：先让所有副本运行新版本，再写进配置；回退前先删除。新版本启动时会替换 `admin_role_permissions` 的权限约束（加入 `view_logs`），旧版本副本不受影响；按最小权限部署时这一步也要先用有 DDL 权限的账号执行 `-migrate-users`。
 - 滚动升级时新旧版本短暂并存：旧版本副本仍在本进程内保存 AI 插画任务（新旧副本互相看不到对方的任务，客户端可能收到 404 后重新生成）、不取词条投稿锁、按旧逻辑各自判定系统状态（当天可用分钟数可能多计）。所有副本升级完成后恢复。旧版本不认识顶层 `replicas`，而配置中的未知字段会让服务拒绝启动：先让所有副本都运行新版本，再在配置里加入 `replicas` 并滚动重启；回退到旧版本（如 `kubectl rollout undo`，它不会回退单独管理的 ConfigMap）之前，先从配置中删除 `replicas`，否则重启的旧版本副本会反复启动失败。按最小权限部署时，先用有 DDL 权限的账号执行 `-migrate-users`，再给运行角色授予新表 `skin_jobs`、`admin_service_minutes`、`admin_service_verdicts` 的 `SELECT, INSERT, UPDATE, DELETE`。
 - 顶层 `client_ip_header` 同理：旧版本不认识它。上线顺序是先让所有副本运行新版本，再在配置里加入 `"client_ip_header": "CF-Connecting-IP"` 并滚动重启；回退到旧版本之前先删除它。过渡期也可以继续只写旧的 `word_submissions.client_ip_header`，新旧版本都接受，新版本会把它用于所有按地址的限额。生产经 Cloudflare Tunnel 和 traefik 转发，TCP 对端始终是 traefik，不设置这一项时匿名遥测、匿名开户和账号接口的按地址限额由全体用户共用一份。
+- 顶层 `site_proxy_secret_env`（官网 BFF 的共享密钥所在的环境变量名，见 [用户体系](docs/user-auth.md)）同理：旧版本不认识它。上线顺序是先让所有副本运行新版本，再把密钥写进部署的 Secret（与其他密钥一样以环境变量注入，例如 `MSIME_SITE_PROXY_SECRET`，值用 `openssl rand -hex 32` 生成，并在官网 Pages 设为同值的 Secret `SITE_PROXY_SECRET`），然后在配置里加入 `"site_proxy_secret_env": "MSIME_SITE_PROXY_SECRET"` 并滚动重启；配置了变量名但读不到 32–256 个可见 ASCII 字符时服务拒绝启动。回退到旧版本之前先删除这一项。轮换密钥时先改后端 Secret 并滚动重启、再改官网，中间官网请求只是退回按 Cloudflare 出口地址计额度，不会失败。
+- 社区收藏和刷新令牌宽限期（`community_skin_saves`、`community_candidate_skin_saves`、`community_plugin_saves` 三张新表，`auth_used_refresh` 新增 `used_at` 列）：运行角色有 DDL 权限时启动会自动迁移；按最小权限部署时先用有 DDL 权限的账号执行 `-migrate-users`，再给运行角色授予三张新表的 `SELECT, INSERT, UPDATE, DELETE`。旧版本副本不读新表，插入 `auth_used_refresh` 时由 `used_at` 的默认值补上时间，滚动升级期间可以并存；落到旧副本的 30 秒内重放仍按旧规则撤销会话。
 - 按副本计算：主接口 token bucket（设备令牌和登录用户），每个副本执行 ⌈额度 / `replicas`⌉；`max_concurrent` 并发槽（实时语音会话也各占所在副本的一个）；插件发布 4 个、下载 8 个名额，原生 Engine 查询 4 路，候选皮肤图片解码 2 路，词库快照恢复 1 路；管理后台服务日志的日志流每个管理员 2 个、合计 10 个（同一个管理员的两个连接落在不同副本时可以各开 2 个）。这些上限的总量随副本数增加，设置时按单个副本的资源计算。
 - 可容忍的短暂不一致：敏感词改动最多 30 秒后在所有副本生效；管理后台的全局搜索索引在各副本内存里分别建立，可能短时不同；一个副本写 GitHub 后，其他副本的 GitHub 读缓存最多 60 秒后才看到变化；上游调用指标先在内存中累积、每分钟写回数据库，副本被强制终止时最多丢失最近约 1 分钟的计数。
 
@@ -270,7 +272,7 @@ GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and
 
 ## 用户皮肤社区
 
-用户可发布自定义键盘设计、下载使用和评分，使用 Apple 登录与 PostgreSQL 共享存储，支持 K8s 多副本。接口、迁移和上线说明见 [皮肤社区](docs/skin-community.md)。
+用户可发布自定义键盘设计、下载使用、收藏和评分（登录即可评分，不能评自己的作品），使用 Apple 登录与 PostgreSQL 共享存储，支持 K8s 多副本。接口、迁移和上线说明见 [皮肤社区](docs/skin-community.md)。
 
 用户也可以分享候选窗皮肤包（skin.toml 加 PNG/JPEG，服务器重新编码图片），接口 `/v1/community/candidate-skins` 与限制见 [皮肤社区 · 候选窗皮肤包分享](docs/skin-community.md#候选窗皮肤包分享)。`auth.community.official_skin_publishers`（用户 ID 列表，64 位小写十六进制，默认为空，最多 50 个）指定官方发布账号，它们不受公开 20 款和每小时 10 次公开发布的限制，仍走审核和包校验。旧版本不认识这个配置项，会因未知字段拒绝启动：先让所有副本升级到新版本，再把它写进生产配置；回退版本前先删除它。
 

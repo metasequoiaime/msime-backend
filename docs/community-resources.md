@@ -8,7 +8,7 @@ Authenticated `POST` accepts a stable UUID, kind, name (1–32 characters), desc
 
 Dictionary content contains 1–128 explicit `{kind,code,word,weight}` entries. Kinds are pinyin, wubi, english and quick. The fixed Engine validates and normalizes each entry; normalized duplicates are rejected. No personal dictionary or learning history is read implicitly. Reply content contains a prompt of 1–2000 characters; dictionaries cannot carry prompts and replies cannot carry entries. Unknown fields are rejected. No code, remote assets or provider credentials are part of either format.
 
-`PUT /{id}/save` accepts `{saved:bool}` and is idempotent. `PUT /{id}/rating` accepts 1–5 stars; saving is required and self-rating is forbidden. Reading a saved work returns its latest revision. Clients explicitly preview and apply updates; the server never overwrites a subscriber's personal words.
+`PUT /{id}/save` accepts `{saved:bool}` and is idempotent. `PUT /{id}/rating` accepts 1–5 stars from any signed-in user; saving first is no longer required. Rating one's own work is still 403 `save_before_rating_or_own_resource` (the code keeps its old name and now only means "your own work"), and a missing or removed work is 404 `resource_not_found`. Reading a saved work returns its latest revision. Clients explicitly preview and apply updates; the server never overwrites a subscriber's personal words.
 
 Deploy the additive `internal/account/community_schema.sql` migration before the new image. Production tables belong to the existing owner role; grant runtime DML on the three new `community_resource*` tables, not schema CREATE. Older images ignore the added tables and can roll back without removing them.
 
