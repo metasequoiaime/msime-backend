@@ -422,7 +422,7 @@ func TestPublicNoticesPollingDoesNotStarveAccountRoutes(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	Mount(mux, a)
-	mux.HandleFunc("GET /v1/notices", Route(a, "GET /v1/notices", (*Service).PublicNotices))
+	mux.HandleFunc("GET "+NoticesPath, Route(a, "GET "+NoticesPath, (*Service).PublicNotices))
 	call := func(path string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", path, nil)
 		r.RemoteAddr = "198.51.100.7:443"

@@ -51,8 +51,8 @@ const (
 	noticeAdminLimit = 200
 	// noticePublicLimit bounds the public feed; clients only show the newest few.
 	noticePublicLimit = 20
-	// noticesPublicPath is the public feed the server mounts through Route.
-	noticesPublicPath = "/v1/notices"
+	// NoticesPath is the public feed the server mounts through Route; accountRouteRate keys its separate bucket on this pattern, so the server must mount it under this exact path.
+	NoticesPath = "/v1/notices"
 	// publicFeedRateLimit is the per-address, per-minute limit of the public cacheable feeds (notices and download mirrors). Apps poll them about once a minute, so behind one proxy this bounds roughly how many clients can poll at once; it is kept apart from the 120/min bucket of the other account routes.
 	publicFeedRateLimit = 1200
 )

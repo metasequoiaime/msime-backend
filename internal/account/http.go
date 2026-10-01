@@ -168,7 +168,7 @@ func accountRouteTimeout(pattern string) time.Duration {
 // accountRouteRate returns the per-address bucket and its per-minute limit for pattern. The public cacheable feeds that every app and website visitor polls get their own, larger bucket so that polling behind a shared proxy cannot use up the quota that login, refresh and the community endpoints draw from.
 func accountRouteRate(pattern string) (string, int) {
 	switch pattern {
-	case "GET " + noticesPublicPath, "GET " + siteDownloadMirrorsPath:
+	case "GET " + NoticesPath, "GET " + siteDownloadMirrorsPath:
 		return "feed-ip:", publicFeedRateLimit
 	default:
 		return "ip:", 120
