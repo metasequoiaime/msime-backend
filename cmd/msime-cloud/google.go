@@ -27,23 +27,14 @@ const (
 
 const callbackPage = `<!doctype html><meta charset="utf-8"><title>水杉输入法</title><p>%s</p>`
 
-func (c cli) googleSignIn(server string, open bool) error {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("cannot listen for the browser: %w", err)
-	}
-	defer listener.Close()
-	port := listener.Addr().(*net.TCPAddr).Port
-	if port < 1024 {
-		return fmt.Errorf("the system gave a privileged port %d for the browser to return to", port)
-	}
-	target := fmt.Sprintf("http://127.0.0.1:%d%s", port, googleCallback)
-	body, _ := json.Marshal(map[string]string{"provider": "google", "target": target, "purpose": "login"})
-	response, err := c.do(server, request{method: "POST", path: "/v1/auth/challenges", body: body, contentType: "application/json"}, "")
+// postJSON sends body to path on server without credentials and decodes a 200 answer into v; any other answer is printed and returned as a statusError.
+func (c cli) postJSON(server, path string, body any, v any) error {
+	data, _ := json.Marshal(body)
+	response, err := c.do(server, request{method: "POST", path: path, body: data, contentType: "application/json"}, "")
 	if err != nil {
 		return err
 	}
-	data, err := io.ReadAll(response.Body)
+	data, err = io.ReadAll(response.Body)
 	response.Body.Close()
 	if err != nil {
 		return err
@@ -52,34 +43,108 @@ func (c cli) googleSignIn(server string, open bool) error {
 		fmt.Fprintln(c.stdout, strings.TrimSpace(string(data)))
 		return statusError{response.Status}
 	}
+	if err = json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("the answer from %s is unreadable: %w", path, err)
+	}
+	return nil
+}
+
+// googleLoopback listens on 127.0.0.1, lets begin ask the server for an authorization URL redirecting there, opens it, and returns the redirect and the code the browser brings back. begin returns the URL, how long the server keeps the sign-in open, and the state it expects, or "" to take the state from the URL.
+func (c cli) googleLoopback(open bool, begin func(target string) (string, int, string, error)) (string, string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", "", fmt.Errorf("cannot listen for the browser: %w", err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	if port < 1024 {
+		return "", "", fmt.Errorf("the system gave a privileged port %d for the browser to return to", port)
+	}
+	target := fmt.Sprintf("http://127.0.0.1:%d%s", port, googleCallback)
+	address, expiresIn, expected, err := begin(target)
+	if err != nil {
+		return "", "", err
+	}
+	state, err := googleState(address, target)
+	if err != nil {
+		return "", "", err
+	}
+	if expected != "" && subtle.ConstantTimeCompare([]byte(state), []byte(expected)) != 1 {
+		return "", "", errors.New("the server's Google sign-in address does not carry the state it gave")
+	}
+	wait := min(time.Duration(expiresIn)*time.Second-googleLoginMargin, googleSignInWait)
+	if wait <= 0 {
+		return "", "", errors.New("the sign-in expires too soon to wait for the browser")
+	}
+	fmt.Fprintf(c.stderr, "msime-cloud: sign in with Google at this address; waiting %s for the browser to come back:\n%s\n", wait.Round(time.Second), address)
+	if open {
+		if err = c.browse(address); err != nil {
+			fmt.Fprintf(c.stderr, "msime-cloud: cannot open a browser (%s); open the address yourself\n", err)
+		}
+	}
+	code, err := receiveGoogleCode(listener, state, wait)
+	return target, code, err
+}
+
+func (c cli) googleSignIn(server string, open bool) error {
 	var challenge struct {
 		ChallengeID      string `json:"challenge_id"`
 		ExpiresIn        int    `json:"expires_in"`
 		AuthorizationURL string `json:"authorization_url"`
 	}
-	if err = json.Unmarshal(data, &challenge); err != nil || challenge.ChallengeID == "" {
-		return errors.New("the server answered the Google sign-in without a challenge")
-	}
-	state, err := googleState(challenge.AuthorizationURL, target)
-	if err != nil {
-		return err
-	}
-	wait := min(time.Duration(challenge.ExpiresIn)*time.Second-googleLoginMargin, googleSignInWait)
-	if wait <= 0 {
-		return errors.New("the sign-in challenge expires too soon to wait for the browser")
-	}
-	fmt.Fprintf(c.stderr, "msime-cloud: sign in with Google at this address; waiting %s for the browser to come back:\n%s\n", wait.Round(time.Second), challenge.AuthorizationURL)
-	if open {
-		if err = c.browse(challenge.AuthorizationURL); err != nil {
-			fmt.Fprintf(c.stderr, "msime-cloud: cannot open a browser (%s); open the address yourself\n", err)
+	_, code, err := c.googleLoopback(open, func(target string) (string, int, string, error) {
+		err := c.postJSON(server, "/v1/auth/challenges", map[string]string{"provider": "google", "target": target, "purpose": "login"}, &challenge)
+		if err == nil && challenge.ChallengeID == "" {
+			err = errors.New("the server answered the Google sign-in without a challenge")
 		}
-	}
-	code, err := receiveGoogleCode(listener, state, wait)
+		return challenge.AuthorizationURL, challenge.ExpiresIn, "", err
+	})
 	if err != nil {
 		return err
 	}
 	return c.signIn(server, challenge.ChallengeID, code)
 }
+
+// adminSignIn signs an administrator in through the admin site's command-line flow and keeps the admin session, which lasts eight hours and is not refreshed.
+func (c cli) adminSignIn(open bool) error {
+	admin := c.adminServer()
+	var started struct {
+		State            string `json:"state"`
+		ExpiresIn        int    `json:"expires_in"`
+		AuthorizationURL string `json:"authorization_url"`
+	}
+	target, code, err := c.googleLoopback(open, func(target string) (string, int, string, error) {
+		err := c.postJSON(admin, "/api/auth/cli/start", map[string]string{"redirect_uri": target}, &started)
+		if err == nil && started.State == "" {
+			err = errors.New("the admin site answered the sign-in without a state")
+		}
+		return started.AuthorizationURL, started.ExpiresIn, started.State, err
+	})
+	if err != nil {
+		return err
+	}
+	var finished struct {
+		Token     string `json:"token"`
+		ExpiresIn int    `json:"expires_in"`
+		Email     string `json:"email"`
+	}
+	if err = c.postJSON(admin, "/api/auth/cli/finish", map[string]string{"state": started.State, "code": code, "redirect_uri": target}, &finished); err != nil {
+		return err
+	}
+	if finished.Token == "" {
+		return errors.New("the admin site answered the sign-in without a session")
+	}
+	user, _ := json.Marshal(map[string]string{"email": finished.Email})
+	kept := session{AccessToken: finished.Token, ExpiresAt: c.now().Add(time.Duration(finished.ExpiresIn) * time.Second), User: user}
+	if err = c.store().put(adminKey(admin), &kept); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.stdout, "{\n  \"email\": %q\n}\n", finished.Email)
+	return nil
+}
+
+// adminKey is where the admin session for admin is kept, apart from user sessions for the same host.
+func adminKey(admin string) string { return "admin " + admin }
 
 // googleState checks that the address the server built is a plain Google authorization URL returning to target, and returns its state. The address is opened in a browser, so anything else is refused rather than opened.
 func googleState(raw, target string) (string, error) {

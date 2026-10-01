@@ -110,6 +110,13 @@ func (s *Server) initAdminGoogle() {
 		oauth:    oauth2.Config{ClientID: c.ClientID, ClientSecret: c.secret, RedirectURL: c.RedirectURI, Scopes: []string{oidc.ScopeOpenID, "email"}, Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", AuthStyle: oauth2.AuthStyleInParams}},
 		verifier: oidc.NewVerifier("https://accounts.google.com", keys, &oidc.Config{ClientID: c.ClientID, SupportedSigningAlgs: []string{"RS256"}}),
 	}
+	// The web client only redirects to the admin site, so the command line signs in through the "Desktop app" client the user sign-in already uses for loopback redirects. Its redirect is set per request.
+	if d := s.config.Auth.Google.Desktop; d.ClientID != "" {
+		s.adminCLI = &adminGoogleAuth{
+			oauth:    oauth2.Config{ClientID: d.ClientID, ClientSecret: os.Getenv(d.SecretEnv), Scopes: []string{oidc.ScopeOpenID, "email"}, Endpoint: s.adminGoogle.oauth.Endpoint},
+			verifier: oidc.NewVerifier("https://accounts.google.com", keys, &oidc.Config{ClientID: d.ClientID, SupportedSigningAlgs: []string{"RS256"}}),
+		}
+	}
 }
 func adminRandom() string {
 	var value [32]byte
@@ -138,6 +145,18 @@ func (s *Server) adminBearer(r *http.Request) bool {
 	expected := sha256.Sum256([]byte(s.config.Admin.token))
 	return s.config.Admin.token != "" && strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare(supplied[:], expected[:]) == 1
 }
+
+// adminSessionToken is the session a request carries: the command line's Authorization header, which wins when present, or the browser's cookie.
+func (s *Server) adminSessionToken(r *http.Request) (string, bool) {
+	if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+		return token, true
+	}
+	cookie, err := r.Cookie(s.adminCookieName(false))
+	if err != nil {
+		return "", false
+	}
+	return cookie.Value, true
+}
 func (s *Server) adminIdentity(r *http.Request) (string, string, error) {
 	if s.adminBearer(r) {
 		return "legacy-token", "", nil
@@ -145,11 +164,11 @@ func (s *Server) adminIdentity(r *http.Request) (string, string, error) {
 	if s.adminGoogle == nil {
 		return "", "", account.ErrInvalid
 	}
-	cookie, err := r.Cookie(s.adminCookieName(false))
-	if err != nil {
+	token, ok := s.adminSessionToken(r)
+	if !ok {
 		return "", "", account.ErrInvalid
 	}
-	identity, err := s.adminStore.AdminSession(r.Context(), cookie.Value)
+	identity, err := s.adminStore.AdminSession(r.Context(), token)
 	if err != nil {
 		return "", "", err
 	}
@@ -163,7 +182,8 @@ func (s *Server) adminIdentity(r *http.Request) (string, string, error) {
 	return "google:" + identity.Subject + ":" + identity.Email, identity.Email, nil
 }
 func (s *Server) adminMutationOrigin(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method == "GET" || r.Method == "HEAD" || s.adminBearer(r) {
+	// A browser never attaches an Authorization header on its own, and the admin site allows no cross-origin requests, so a bearer request cannot be forged from another page.
+	if r.Method == "GET" || r.Method == "HEAD" || strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 		return true
 	}
 	// Cookie authentication requires an explicit same-origin browser request.
@@ -209,7 +229,7 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 			s.adminAuthError(w, err)
 			return true
 		}
-		respond(w, 200, map[string]any{"version": msimebackend.Version(), "authenticated": err == nil, "email": email, "google_enabled": s.adminGoogle != nil, "token_enabled": s.config.Admin.token != "", "can_manage_admins": err == nil && s.config.Admin.Google.allows(email)})
+		respond(w, 200, map[string]any{"version": msimebackend.Version(), "authenticated": err == nil, "email": email, "google_enabled": s.adminGoogle != nil, "cli_enabled": s.adminCLI != nil, "token_enabled": s.config.Admin.token != "", "can_manage_admins": err == nil && s.config.Admin.Google.allows(email)})
 	case "/api/auth/logout":
 		if r.Method != "POST" {
 			fail(w, 405, "method_not_allowed")
@@ -218,8 +238,8 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 		if !s.adminMutationOrigin(w, r) {
 			return true
 		}
-		if cookie, err := r.Cookie(s.adminCookieName(false)); err == nil && s.adminStore != nil {
-			if err = s.adminStore.DeleteAdminSession(r.Context(), cookie.Value); err != nil {
+		if token, ok := s.adminSessionToken(r); ok && s.adminStore != nil && !s.adminBearer(r) {
+			if err := s.adminStore.DeleteAdminSession(r.Context(), token); err != nil {
 				s.adminAuthError(w, err)
 				return true
 			}
@@ -251,6 +271,10 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 		}
 		s.adminCookie(w, state, true, 600)
 		http.Redirect(w, r, s.adminGoogle.oauth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.SetAuthURLParam("prompt", "select_account"), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
+	case "/api/auth/cli/start":
+		s.adminCLIStart(w, r)
+	case "/api/auth/cli/finish":
+		s.adminCLIFinish(w, r)
 	case adminCallbackPath:
 		if r.Method != "GET" {
 			fail(w, 405, "method_not_allowed")
