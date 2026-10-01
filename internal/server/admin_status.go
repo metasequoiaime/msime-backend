@@ -193,7 +193,7 @@ func (s *Server) adminHealth(ctx context.Context) string {
 	return stateOK
 }
 
-// statusProbeJob probes the database and the recent upstream metrics every minute until ctx ends, rolling the results into admin_service_daily and opening or resolving automatic incidents. It also flushes the metric buckets, and flushes them once more on the way out.
+// statusProbeJob probes the database and the recent upstream metrics every minute until ctx ends, rolling the results into admin_service_daily and opening or resolving automatic incidents. It also flushes the metric buckets; the final flush on shutdown is left to Close, which runs it only after the streaming sessions it cancels have recorded their calls.
 func (s *Server) statusProbeJob(ctx context.Context) {
 	if s.accounts == nil {
 		return
@@ -204,11 +204,6 @@ func (s *Server) statusProbeJob(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := s.flushMetrics(flushCtx); err != nil {
-				slog.Warn("final metrics flush failed", "reason", err.Error())
-			}
-			cancel()
 			return
 		case now := <-ticker.C:
 			s.statusTick(ctx, now)

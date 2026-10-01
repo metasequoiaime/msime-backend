@@ -122,6 +122,13 @@ func (c *AdminConfig) validateConsole() error {
 		if q.Period != "month" || q.Limit < 0 || q.UnitPrice < 0 || !(knownUnit || q.Unit == "" && q.Limit == 0) {
 			return fmt.Errorf("admin service %s: quota needs limit >= 0, unit calls|chars|hours|cny, period month and unit_price >= 0", v.Key)
 		}
+		// quotaUsed counts nothing for a unit the service does not meter, and cny is the unit price times the metered usage, so such a quota would read 0% used forever.
+		switch meter := serviceMeter(v.Key); {
+		case q.Unit == "chars" && meter != meterChars, q.Unit == "hours" && meter != meterSeconds:
+			return fmt.Errorf("admin service %s: quota unit %s is not what this service meters (%s)", v.Key, q.Unit, meter)
+		case q.Unit == "cny" && q.UnitPrice == 0:
+			return fmt.Errorf("admin service %s: quota unit cny needs unit_price > 0", v.Key)
+		}
 		if v.SlowMS == 0 {
 			v.SlowMS = defaultServiceSlowMS
 		}

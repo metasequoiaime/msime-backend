@@ -69,7 +69,7 @@ func TestSiteDownloadMirrorAdminEditAndPublicRead(t *testing.T) {
 		t.Helper()
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest("GET", "/v1/site/download-mirrors", nil))
-		if w.Code != 200 || w.Header().Get("Cache-Control") != "public, max-age=60" || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		if w.Code != 200 || w.Header().Get("Cache-Control") != "public, max-age=60" || w.Header().Get("Vary") != "Origin" || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
 			t.Fatal(w.Code, w.Header(), w.Body.String())
 		}
 		var v SiteDownloadMirrors

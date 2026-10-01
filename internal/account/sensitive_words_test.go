@@ -391,3 +391,29 @@ func TestSensitiveMatcherFolding(t *testing.T) {
 		t.Fatal(words, err)
 	}
 }
+
+// Hit counts that are not due yet are written when the service shuts down instead of being dropped with the process.
+func TestSensitiveHitsWrittenOnShutdown(t *testing.T) {
+	a, db := sensitiveFixture(t)
+	ctx := context.Background()
+	var id int64
+	if err := db.pool.QueryRow(ctx, `INSERT INTO admin_sensitive_words(pattern,is_regex,category,level,created_by) VALUES('加V',false,'ad','block','other') RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	a.sensitive.record(ctx, db, []SensitiveHit{{WordID: id}}, time.Now())
+	var stored int64
+	if err := db.pool.QueryRow(ctx, `SELECT COALESCE(sum(count),0) FROM admin_sensitive_hits`).Scan(&stored); err != nil || stored != 0 {
+		t.Fatal("a fresh count is not due yet", stored, err)
+	}
+	lifetime, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.maintain(lifetime)
+	}()
+	stop()
+	<-done
+	if err := db.pool.QueryRow(ctx, `SELECT COALESCE(sum(count),0) FROM admin_sensitive_hits WHERE word_id=$1`, id).Scan(&stored); err != nil || stored != 1 {
+		t.Fatal("pending counts must be written on shutdown", stored, err)
+	}
+}

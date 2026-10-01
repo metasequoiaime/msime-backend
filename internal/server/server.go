@@ -24,7 +24,7 @@ import (
 type skinJobOwnerKey struct{}
 
 // noticesPath is the public, unauthenticated feed of live console notices.
-const noticesPath = "/v1/notices"
+const noticesPath = account.NoticesPath
 
 type bucket struct {
 	tokens  float64
