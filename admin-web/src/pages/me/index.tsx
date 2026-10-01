@@ -68,7 +68,7 @@ function Profile({ me }: { me: Me }) {
   const display = me.name || me.email.split("@")[0] || "管理员";
   const meta = me.via === "legacy"
     ? ["旧版管理令牌"]
-    : [me.email, "Google 账号登录", me.joined_at ? `${format(new Date(me.joined_at), "yyyy-MM")} 加入` : me.owner ? "部署配置的所有者" : ""];
+    : [me.email, me.via === "token" ? "个人访问令牌访问" : "Google 账号登录", me.joined_at ? `${format(new Date(me.joined_at), "yyyy-MM")} 加入` : me.owner ? "部署配置的所有者" : ""];
   return <div className="flex flex-wrap items-center gap-[18px] rounded-[18px] bg-panel px-6 py-[22px] ring-1 ring-hair">
     <Avatar letter={initial(display)} size="lg" />
     <div className="min-w-[200px] flex-1">
@@ -142,19 +142,26 @@ function Security({ me }: { me: Me }) {
   const legacy = me.via === "legacy";
   const days = me.token ? Math.max(0, differenceInCalendarDays(new Date(me.token.expires_at), new Date())) : 0;
   const canRegenerate = me.via === "session";
+  const expiry = days > 0 ? `${days} 天后过期` : "今天过期";
+  // How this request authenticated: only a Google session is covered by Google two-step verification.
+  const login = legacy
+    ? { name: "旧版管理令牌", detail: "部署配置的共享令牌，不能管理权限", tone: "warn", pill: "共享令牌" } as const
+    : me.via === "token"
+      ? { name: "个人访问令牌", detail: `本次通过 Bearer 令牌访问，不受 Google 两步验证保护${me.token ? ` · ${expiry}` : ""}`, tone: "warn", pill: "令牌访问" } as const
+      : { name: "Google 账号登录", detail: "两步验证与通行密钥由 Google 账号控制", tone: "accent", pill: "已开启" } as const;
   return <SectionCard title="安全">
     <SectionRow>
       <div className="min-w-0 flex-1">
-        <div className="text-ink">{legacy ? "旧版管理令牌" : "Google 账号登录"}</div>
-        <div className="mt-0.5 text-xs text-muted">{legacy ? "部署配置的共享令牌，不能管理权限" : "两步验证与通行密钥由 Google 账号控制"}</div>
+        <div className="text-ink">{login.name}</div>
+        <div className="mt-0.5 text-xs text-muted">{login.detail}</div>
       </div>
-      <Pill tone={legacy ? "warn" : "accent"}>{legacy ? "共享令牌" : "已开启"}</Pill>
+      <Pill tone={login.tone}>{login.pill}</Pill>
     </SectionRow>
     {!legacy && <SectionRow className="flex-wrap">
       <div className="min-w-0 flex-1">
         <div className="text-ink">个人访问令牌</div>
         <div className="mt-0.5 font-mono text-xs text-muted">
-          {me.token ? `msime_pat_••••${me.token.last4} · ${days > 0 ? `${days} 天后过期` : "今天过期"}` : "尚未生成 · 用于脚本和 API 调用，有效期 30 天"}
+          {me.token ? `msime_pat_••••${me.token.last4} · ${expiry}` : "尚未生成 · 用于脚本和 API 调用，有效期 30 天"}
         </div>
       </div>
       <Button size="sm" variant="outline" className="h-8 rounded-[9px] px-3 text-[13px]" disabled={!canRegenerate || regenerate.isPending}
