@@ -6,7 +6,7 @@ import { extendTailwindMerge } from "tailwind-merge";
 const merge = extendTailwindMerge({
   extend: {
     theme: {
-      color: ["bg", "panel", "panel-2", "ink", "body", "muted", "accent", "accent-ink", "accent-soft", "accent-ring", "btn", "btn-fg", "hair", "hair-2", "warn", "warn-soft", "bad", "bad-soft", "info", "info-soft", "scrim", "chart-2", "chart-3"],
+      color: ["bg", "panel", "panel-2", "ink", "body", "muted", "accent", "accent-ink", "accent-soft", "accent-ring", "btn", "btn-fg", "hair", "hair-2", "warn", "warn-soft", "bad", "bad-soft", "bad-fg", "ok", "ok-ink", "ok-soft", "info", "info-soft", "scrim", "chart-1", "chart-2", "chart-3"],
       shadow: ["card", "pop", "dialog"],
     },
   },

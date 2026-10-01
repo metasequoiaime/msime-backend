@@ -46,7 +46,7 @@ export function NotificationBell({ unread }: { unread: number }) {
     <Popover.Trigger asChild>
       <Button variant="outline" size="icon" title="通知" aria-label={count ? `通知，${count} 条未读` : "通知"} className="relative">
         <Bell size={18} aria-hidden="true" />
-        {count > 0 && <span className="absolute -top-1 -right-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-bad px-1 text-[10.5px] font-bold text-white tabular-nums">{count > 99 ? "99+" : count}</span>}
+        {count > 0 && <span className="absolute -top-1 -right-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-bad px-1 text-[10.5px] font-bold text-bad-fg tabular-nums">{count > 99 ? "99+" : count}</span>}
       </Button>
     </Popover.Trigger>
     <Popover.Portal>

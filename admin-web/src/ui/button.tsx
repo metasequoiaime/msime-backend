@@ -10,7 +10,7 @@ export const buttonVariants = cva(
     variants: {
       variant: {
         primary: "bg-btn text-btn-fg hover:opacity-90",
-        danger: "bg-bad text-white hover:opacity-90",
+        danger: "bg-bad text-bad-fg hover:opacity-90",
         "danger-outline": "bg-transparent text-bad inset-ring inset-ring-bad-soft hover:bg-bad-soft",
         default: "bg-panel text-ink inset-ring inset-ring-hair-2 hover:bg-panel-2",
         outline: "bg-transparent text-ink inset-ring inset-ring-hair-2 hover:bg-panel-2",

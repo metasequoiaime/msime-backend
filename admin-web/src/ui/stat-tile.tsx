@@ -15,7 +15,7 @@ export type StatTileProps = {
 
 export function StatTile({ label, value, delta, deltaTone, sub, size = "stat", className }: StatTileProps) {
   const tone = deltaTone ?? (delta && /^[-−]/.test(delta) ? "bad" : "ok");
-  const toneClass = { ok: "text-accent-ink", bad: "text-bad", warn: "text-warn", mute: "text-muted" }[tone];
+  const toneClass = { ok: "text-ok-ink", bad: "text-bad", warn: "text-warn", mute: "text-muted" }[tone];
   return <div className={cn("min-w-0 bg-panel ring-1 ring-hair", size === "kpi" ? "rounded-[18px] px-5 py-[18px]" : "rounded-2xl px-[18px] py-3.5", className)}>
     <div className={cn("text-muted", size === "kpi" ? "text-[13px]" : "text-[12.5px]")}>{label}</div>
     <div className="mt-1 flex items-baseline gap-2.5">

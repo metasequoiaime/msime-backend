@@ -18,6 +18,6 @@ export function CardHeader({ title, sub, actions, className }: { title: ReactNod
 
 // Banner is the full-width tinted note (privacy boundary, unconfigured hints).
 export function Banner({ tone = "info", children, className }: { tone?: "info" | "warn" | "bad" | "ok"; children: ReactNode; className?: string }) {
-  const tones = { info: "bg-info-soft", warn: "bg-warn-soft", bad: "bg-bad-soft", ok: "bg-accent-soft" };
+  const tones = { info: "bg-info-soft", warn: "bg-warn-soft", bad: "bg-bad-soft", ok: "bg-ok-soft" };
   return <div className={cn("rounded-[18px] px-5 py-[18px] text-[13.5px] leading-[1.8] text-body", tones[tone], className)}>{children}</div>;
 }

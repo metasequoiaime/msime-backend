@@ -3,7 +3,7 @@ import { Area, AreaChart as RechartsAreaChart, CartesianGrid, Line, LineChart, R
 import { cn } from "./cn";
 
 // Series colors follow the prototype: the theme accent first, then the two fixed overview colors.
-export const chartColors = ["var(--accent)", "var(--chart-2)", "var(--chart-3)", "var(--info)", "var(--warn)"] as const;
+export const chartColors = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--info)", "var(--warn)"] as const;
 
 export type ChartSeries<K extends string> = { key: K; label: string; color?: string };
 

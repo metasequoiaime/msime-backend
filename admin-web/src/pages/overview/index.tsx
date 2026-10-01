@@ -16,7 +16,7 @@ import { StatGrid, StatTile } from "../../ui/stat-tile";
 import { Empty, ErrorState, Skeleton, SkeletonRows } from "../../ui/states";
 
 const activeSeries = [
-  { key: "windows", label: "Windows", color: "var(--accent)" },
+  { key: "windows", label: "Windows", color: "var(--chart-1)" },
   { key: "mac_linux", label: "macOS + Linux", color: "var(--chart-2)" },
   { key: "mobile", label: "移动端", color: "var(--chart-3)" },
 ] as const;

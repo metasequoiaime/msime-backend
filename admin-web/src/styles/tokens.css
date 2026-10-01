@@ -19,10 +19,18 @@
   --warn-soft: rgba(196, 120, 40, .12);
   --bad: #B4382A;
   --bad-soft: rgba(180, 56, 42, .1);
+  /* Text on a --bad fill (danger buttons, the unread badge). */
+  --bad-fg: #fff;
+  /* Status "ok" follows the season accent, except in autumn, whose orange accent would read as the warn tone. */
+  --ok: var(--accent);
+  --ok-ink: var(--accent-ink);
+  --ok-soft: var(--accent-soft);
   --info: #2F6FA8;
   --info-soft: rgba(47, 111, 168, .1);
   --pop-shadow: 0 0 0 1px var(--hair), 0 18px 48px rgba(0, 0, 0, .16);
   --scrim: rgba(10, 20, 14, .35);
+  /* Chart series keep fixed hues in every season, so the first series never takes the autumn accent next to the orange third one. */
+  --chart-1: #1E8E4E;
   --chart-2: #3C8DBC;
   --chart-3: #E0913A;
   color-scheme: light;
@@ -48,8 +56,12 @@
   --warn-soft: rgba(227, 165, 94, .13);
   --bad: #EE8577;
   --bad-soft: rgba(238, 133, 119, .12);
+  --bad-fg: #2A0F0B;
   --info: #7DB4E6;
   --info-soft: rgba(125, 180, 230, .12);
+  --chart-1: #6FD08B;
+  --chart-2: #6AAFE0;
+  --chart-3: #F0B35A;
   color-scheme: dark;
 }
 
@@ -76,6 +88,9 @@
   --btn: #B9582B;
   --hair: rgba(42, 26, 16, .08);
   --hair-2: rgba(42, 26, 16, .15);
+  --ok: #2F7D4A;
+  --ok-ink: #276A3E;
+  --ok-soft: rgba(47, 125, 74, .1);
 }
 
 :root[data-theme="light"][data-season="winter"] {
@@ -111,6 +126,9 @@
   --accent-ring: rgba(240, 160, 110, .3);
   --btn: #F0A06E;
   --btn-fg: #22140B;
+  --ok: #6FD08B;
+  --ok-ink: #86DB9E;
+  --ok-soft: rgba(111, 208, 139, .12);
 }
 
 :root[data-theme="dark"][data-season="winter"] {
@@ -144,9 +162,14 @@
   --color-warn-soft: var(--warn-soft);
   --color-bad: var(--bad);
   --color-bad-soft: var(--bad-soft);
+  --color-bad-fg: var(--bad-fg);
+  --color-ok: var(--ok);
+  --color-ok-ink: var(--ok-ink);
+  --color-ok-soft: var(--ok-soft);
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
   --color-scrim: var(--scrim);
+  --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
   --shadow-card: var(--shadow);
