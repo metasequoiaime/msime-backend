@@ -98,14 +98,14 @@ func (a *Service) adminOverview(w http.ResponseWriter, r *http.Request, _ string
          WHEN EXISTS(SELECT 1 FROM admin_incidents i WHERE i.service=s.key AND i.state='open') THEN 'degraded'
          WHEN today.total_minutes IS NULL OR today.total_minutes=0 THEN 'unknown'
          WHEN today.degraded THEN 'degraded' ELSE 'ok' END,
-       'uptime_60d',(SELECT round(sum(ok_minutes)::numeric*100/NULLIF(sum(total_minutes),0),2) FROM admin_service_daily WHERE service=s.key AND day>=current_date-59),
+       'uptime_60d',(SELECT round(sum(ok_minutes)::numeric*100/NULLIF(sum(total_minutes),0),2) FROM admin_service_daily WHERE service=s.key AND day>=(now() AT TIME ZONE 'UTC')::date-59),
        'p95_ms',today.p95_ms) ORDER BY s.ord),'[]'::json)
      FROM (
        SELECT key,name,provider,ord FROM unnest($3::text[],$4::text[],$5::text[]) WITH ORDINALITY AS c(key,name,provider,ord)
        UNION ALL
-       SELECT service,service,'',1000+row_number() OVER (ORDER BY service) FROM (SELECT DISTINCT service FROM admin_service_daily WHERE day>=current_date-59) d WHERE cardinality($3::text[])=0
+       SELECT service,service,'',1000+row_number() OVER (ORDER BY service) FROM (SELECT DISTINCT service FROM admin_service_daily WHERE day>=(now() AT TIME ZONE 'UTC')::date-59) d WHERE cardinality($3::text[])=0
      ) s
-     LEFT JOIN LATERAL (SELECT ok_minutes,total_minutes,degraded,p95_ms FROM admin_service_daily WHERE service=s.key AND day>=current_date-1 ORDER BY day DESC LIMIT 1) today ON true))`,
+     LEFT JOIN LATERAL (SELECT ok_minutes,total_minutes,degraded,p95_ms FROM admin_service_daily WHERE service=s.key AND day>=(now() AT TIME ZONE 'UTC')::date-1 ORDER BY day DESC LIMIT 1) today ON true))`,
 		days, community, keys, names, providers, len(a.admin.Services) > 0).Scan(&result)
 	if err != nil {
 		a.error(w, err)

@@ -131,12 +131,12 @@ func (a *Service) adminMe(w http.ResponseWriter, r *http.Request, _ string) {
 
 	var stats adminMeStats
 	err := a.store.pool.QueryRow(ctx, `WITH mine AS (
- SELECT action,target FROM admin_audit WHERE created_at>=date_trunc('month',now()) AND `+adminActorClause("actor", access)+`
+ SELECT action,target FROM admin_audit WHERE created_at>=date_trunc('month',now(),'UTC') AND `+adminActorClause("actor", access)+`
 ), moderated AS (
- SELECT created_at,moderated_at FROM community_skins WHERE moderated_at>=date_trunc('month',now()) AND moderation<>'pending' AND `+adminActorClause("moderated_by", access)+`
- UNION ALL SELECT created_at,moderated_at FROM community_resources WHERE moderated_at>=date_trunc('month',now()) AND moderation<>'pending' AND `+adminActorClause("moderated_by", access)+`
- UNION ALL SELECT created_at,moderated_at FROM community_candidate_skins WHERE moderated_at>=date_trunc('month',now()) AND moderation<>'pending' AND `+adminActorClause("moderated_by", access)+`
- UNION ALL SELECT created_at,moderated_at FROM community_plugins WHERE moderated_at>=date_trunc('month',now()) AND moderation<>'pending' AND `+adminActorClause("moderated_by", access)+`
+ SELECT created_at,moderated_at FROM community_skins WHERE moderated_at>=date_trunc('month',now(),'UTC') AND moderation<>'pending' AND `+adminActorClause("moderated_by", access)+`
+ UNION ALL SELECT created_at,moderated_at FROM community_resources WHERE moderated_at>=date_trunc('month',now(),'UTC') AND moderation<>'pending' AND `+adminActorClause("moderated_by", access)+`
+ UNION ALL SELECT created_at,moderated_at FROM community_candidate_skins WHERE moderated_at>=date_trunc('month',now(),'UTC') AND moderation<>'pending' AND `+adminActorClause("moderated_by", access)+`
+ UNION ALL SELECT created_at,moderated_at FROM community_plugins WHERE moderated_at>=date_trunc('month',now(),'UTC') AND moderation<>'pending' AND `+adminActorClause("moderated_by", access)+`
 )
 SELECT (SELECT count(DISTINCT target) FROM mine WHERE action LIKE 'dict\_pr\_%'),
  (SELECT count(*) FROM moderated)+(SELECT count(*) FROM mine WHERE action IN ('delete_skin','delete_candidate_skin','delete_plugin','delete_dictionary','delete_reply')),

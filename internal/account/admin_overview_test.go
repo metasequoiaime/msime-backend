@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"testing"
 )
 
@@ -217,5 +219,31 @@ func TestOverviewCommunityCountersSkipRemoved(t *testing.T) {
 	}
 	if counts.Skins != int(stats.Skins) || counts.Dictionaries != int(stats.Dictionaries) || counts.Replies != int(stats.Replies) || counts.Skins != 1 || counts.Dictionaries != 1 || counts.Replies != 0 {
 		t.Fatalf("overview %+v stats %+v", counts, stats)
+	}
+}
+
+// Stored days are UTC, so the 60-day window and today's row must be UTC days whatever the database session's time zone is. Between them, these two zones put the local date on another day than UTC at every hour.
+func TestOverviewServiceDaysAreUTC(t *testing.T) {
+	overviewTestService(t)
+	for _, zone := range []string{"Etc/GMT-14", "Etc/GMT+12"} {
+		db, err := Open(context.Background(), os.Getenv("MSIME_TEST_DATABASE_URL")+"&timezone="+url.QueryEscape(zone))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := &Service{store: db}
+		a.ConfigureAdmin(AdminSettings{Services: []AdminService{{Key: "cloud", Name: "云候选代理"}}})
+		ctx := context.Background()
+		if _, err = db.pool.Exec(ctx, `TRUNCATE admin_service_daily;
+INSERT INTO admin_service_daily(service,day,ok_minutes,total_minutes,degraded,p95_ms) VALUES
+ ('cloud',(now() AT TIME ZONE 'UTC')::date,60,60,false,42),
+ ('cloud',(now() AT TIME ZONE 'UTC')::date-59,40,40,false,40),
+ ('cloud',(now() AT TIME ZONE 'UTC')::date-60,0,100,true,40)`); err != nil {
+			t.Fatal(err)
+		}
+		body := getOverview(t, a, "")
+		db.Close()
+		if len(body.Services) != 1 || body.Services[0].Uptime60d == nil || *body.Services[0].Uptime60d != 100 || body.Services[0].P95MS == nil || *body.Services[0].P95MS != 42 {
+			t.Fatalf("%s: %+v", zone, body.Services)
+		}
 	}
 }

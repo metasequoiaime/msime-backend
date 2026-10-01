@@ -199,7 +199,7 @@ ORDER BY COALESCE(c.c7,0) DESC,g.last_seen DESC,g.signature LIMIT $3`, "", platf
  (SELECT count(*) FROM admin_crash_groups WHERE $1='' OR platform=$1),
  count(*) FILTER (WHERE kind='crash'),
  CASE WHEN count(install_id) FILTER (WHERE kind='crash')=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE kind='crash') END,
- CASE WHEN count(install_id)=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE created_at>=date_trunc('day',now())) END,
+ CASE WHEN count(install_id)=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE created_at>=date_trunc('day',now(),'UTC')) END,
  CASE WHEN count(*) FILTER (WHERE kind='session')=0 THEN NULL ELSE GREATEST(0,1-(count(*) FILTER (WHERE kind='session_crash'))::float8/(count(*) FILTER (WHERE kind='session'))) END
 FROM admin_events WHERE created_at>=now()-interval '7 days' AND ($1='' OR platform=$1)`, platform).Scan(&summary.Groups, &summary.Crashes7d, &summary.Devices7d, &summary.InstallsToday, &summary.CrashFreeRate)
 	if err != nil {
