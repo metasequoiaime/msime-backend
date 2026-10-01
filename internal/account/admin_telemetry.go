@@ -7,6 +7,9 @@ import (
 )
 
 // telemetryKinds are the accepted event kinds: download and crash from the first protocol, and the anonymous device activity kinds that feed active devices and crash-free session rates.
+// telemetryActivityRetentionDays is how long Prune keeps active, session and session_crash events; the overview reads at most the last 60 days of them.
+const telemetryActivityRetentionDays = 90
+
 var telemetryKinds = map[string]bool{"download": true, "crash": true, "active": true, "session": true, "session_crash": true}
 
 var (

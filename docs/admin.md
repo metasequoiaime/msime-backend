@@ -340,6 +340,8 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 
 非 `crash` 事件不能带非空的 `message` 或 `stack`。后台统计时会归一平台名（`win` → windows，`mac`、`darwin` → macos，`ipados` → ios，`harmony`、`ohos` → HarmonyOS）。服务端以接收时间入库，离线上报算在接收日；后台不额外存 IP 或用户身份。客户端须在用户同意采集后发送，并先清理输入文本、密码、令牌和个人信息。数据保存在 PostgreSQL，多副本共享，当前不自动清理，需要按规模设置归档或保留策略。新增字段和类型都是可选的，旧客户端无需修改。
 
+`active`、`session`、`session_crash` 事件保留 90 天，由每小时的清理任务删除（概览最多读近 60 天）；`download` 和 `crash` 事件不清理，累计下载和崩溃分组依赖它们。
+
 如果官网或客户端对 GitHub Release 的下载也上报 `channel=github` 的下载事件，这次下载会被遥测和 Release 快照各计一次。在确定统计口径之前，不要为 GitHub Release 下载上报遥测事件。
 
 ### 词库投稿的新错误码

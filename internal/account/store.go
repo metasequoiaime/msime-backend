@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -445,7 +446,9 @@ func (s *Store) DeleteUser(ctx context.Context, uid string) error {
 	return e
 }
 func (s *Store) Prune(ctx context.Context) {
-	for _, q := range []string{"DELETE FROM admin_login_flows WHERE expires_at<now()", "DELETE FROM admin_sessions WHERE expires_at<now()", "DELETE FROM admin_tokens WHERE expires_at<now()", "DELETE FROM auth_challenges WHERE expires_at<now()", "DELETE FROM auth_rates WHERE expires_at<now()", "DELETE FROM auth_sessions WHERE expires_at<now()"} {
+	for _, q := range []string{"DELETE FROM admin_login_flows WHERE expires_at<now()", "DELETE FROM admin_sessions WHERE expires_at<now()", "DELETE FROM admin_tokens WHERE expires_at<now()", "DELETE FROM auth_challenges WHERE expires_at<now()", "DELETE FROM auth_rates WHERE expires_at<now()", "DELETE FROM auth_sessions WHERE expires_at<now()",
+		// Activity heartbeats and session ends only feed the overview's last 60 days, so they are kept for telemetryActivityRetentionDays. Downloads and crashes stay: the cumulative counters and crash groups read them.
+		"DELETE FROM admin_events WHERE kind IN ('active','session','session_crash') AND created_at<now()-interval '" + strconv.Itoa(telemetryActivityRetentionDays) + " days'"} {
 		s.pool.Exec(ctx, q)
 	}
 }
