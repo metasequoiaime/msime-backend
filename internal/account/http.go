@@ -342,6 +342,8 @@ func (a *Service) error(w http.ResponseWriter, e error) {
 		writeError(w, 429, "rate_limit_exceeded")
 	case errors.Is(e, ErrConflict):
 		writeError(w, 409, "identity_already_linked")
+	case errors.Is(e, ErrRefreshSuperseded):
+		writeError(w, 409, "refresh_superseded")
 	default:
 		writeError(w, 503, "auth_unavailable")
 	}

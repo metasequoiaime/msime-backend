@@ -76,11 +76,27 @@ func TestSessionRotationReplayLogoutAndDelete(t *testing.T) {
 	if _, e = s.Authenticate(ctx, next.AccessToken); e != nil {
 		t.Fatal(e)
 	}
+	// 30 秒内再次出现的旧令牌按并发刷新处理：409，不撤销，新令牌继续有效，可以重复出现。
+	for range 2 {
+		if _, e = s.Refresh(ctx, first.RefreshToken); !errors.Is(e, ErrRefreshSuperseded) || errors.Is(e, ErrInvalid) {
+			t.Fatal("宽限期内的旧令牌应返回 refresh_superseded", e)
+		}
+	}
+	if _, e = s.Authenticate(ctx, next.AccessToken); e != nil {
+		t.Fatal("宽限期内的旧令牌不应撤销会话", e)
+	}
+	// 超过 30 秒后仍是重放：撤销整个会话。
+	if _, e = s.pool.Exec(ctx, "UPDATE auth_used_refresh SET used_at=now()-interval '31 seconds' WHERE hash=$1", hash(first.RefreshToken)); e != nil {
+		t.Fatal(e)
+	}
 	if _, e = s.Refresh(ctx, first.RefreshToken); !errors.Is(e, ErrInvalid) {
 		t.Fatal("刷新重放应失败", e)
 	}
 	if _, e = s.Authenticate(ctx, next.AccessToken); !errors.Is(e, ErrInvalid) {
 		t.Fatal("重放后应撤销会话族", e)
+	}
+	if _, e = s.Refresh(ctx, next.RefreshToken); !errors.Is(e, ErrInvalid) {
+		t.Fatal("撤销后新刷新令牌也应失效", e)
 	}
 	another := complete(t, s, Identity{"email", "one@example.test"})
 	if another.User.ID != p.UserID {
@@ -106,6 +122,73 @@ func TestSessionRotationReplayLogoutAndDelete(t *testing.T) {
 	var n int
 	if e = s.pool.QueryRow(ctx, "SELECT count(*) FROM auth_identities").Scan(&n); e != nil || n != 0 {
 		t.Fatal("注销应清理身份", n, e)
+	}
+}
+
+// 并发刷新：同一个刷新令牌同时提交多次，只有一次轮换成功，其余在宽限期内得到 refresh_superseded，会话不被撤销。迁移前轮换、used_at 为空的旧行按超过宽限期处理。会话已退出时，宽限期内的旧令牌也只得到 401。
+func TestRefreshSupersededGrace(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	first := complete(t, s, Identity{"email", "race@example.test"})
+	results := make(chan error, 6)
+	tokens := make(chan Tokens, 6)
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			v, e := s.Refresh(ctx, first.RefreshToken)
+			results <- e
+			if e == nil {
+				tokens <- v
+			}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(tokens)
+	won, superseded := 0, 0
+	for e := range results {
+		switch {
+		case e == nil:
+			won++
+		case errors.Is(e, ErrRefreshSuperseded):
+			superseded++
+		default:
+			t.Fatal("unexpected refresh error", e)
+		}
+	}
+	if won != 1 || superseded != 5 {
+		t.Fatal("won", won, "superseded", superseded)
+	}
+	winner := <-tokens
+	if _, e := s.Authenticate(ctx, winner.AccessToken); e != nil {
+		t.Fatal("并发刷新不应撤销会话", e)
+	}
+	// 迁移前轮换的行没有 used_at，按重放处理。
+	if _, e := s.pool.Exec(ctx, "UPDATE auth_used_refresh SET used_at=NULL WHERE hash=$1", hash(first.RefreshToken)); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.Refresh(ctx, first.RefreshToken); !errors.Is(e, ErrInvalid) {
+		t.Fatal("没有轮换时间的旧令牌应按重放处理", e)
+	}
+	if _, e := s.Authenticate(ctx, winner.AccessToken); !errors.Is(e, ErrInvalid) {
+		t.Fatal("重放应撤销会话", e)
+	}
+	// 已退出的会话：宽限期内的旧令牌返回 401 而不是 409。
+	second := complete(t, s, Identity{"email", "race@example.test"})
+	p, e := s.Authenticate(ctx, second.AccessToken)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Refresh(ctx, second.RefreshToken); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.Logout(ctx, p, false); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Refresh(ctx, second.RefreshToken); !errors.Is(e, ErrInvalid) || errors.Is(e, ErrRefreshSuperseded) {
+		t.Fatal("已退出会话的旧令牌应返回 invalid_credentials", e)
 	}
 }
 func TestChallengeSingleUseAttemptsExpiryAndLinkConflict(t *testing.T) {

@@ -51,6 +51,14 @@ func TestAccountHTTPProfileRefreshLogoutDelete(t *testing.T) {
 	}
 	apiRequest(t, mux, "GET", "/v1/users/me", "", first.AccessToken, 401)
 	apiRequest(t, mux, "GET", "/v1/users/me", "", refreshed.AccessToken, 200)
+	// 轮换后 30 秒内再次提交旧令牌：409 refresh_superseded，会话保留。
+	if w = apiRequest(t, mux, "POST", "/v1/auth/refresh", string(refreshBody), "", 409); !strings.Contains(w.Body.String(), `"code":"refresh_superseded"`) {
+		t.Fatal(w.Body.String())
+	}
+	apiRequest(t, mux, "GET", "/v1/users/me", "", refreshed.AccessToken, 200)
+	if _, err := db.pool.Exec(t.Context(), "UPDATE auth_used_refresh SET used_at=now()-interval '31 seconds'"); err != nil {
+		t.Fatal(err)
+	}
 	apiRequest(t, mux, "POST", "/v1/auth/refresh", string(refreshBody), "", 401)
 	apiRequest(t, mux, "GET", "/v1/users/me", "", refreshed.AccessToken, 401)
 	second := complete(t, db, Identity{"email", "profile@example.test"})

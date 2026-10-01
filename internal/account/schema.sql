@@ -24,6 +24,9 @@ CREATE INDEX IF NOT EXISTS auth_sessions_expiry ON auth_sessions(expires_at);
 CREATE TABLE IF NOT EXISTS auth_used_refresh (
  hash text PRIMARY KEY, session_id text NOT NULL REFERENCES auth_sessions(id) ON DELETE CASCADE
 );
+-- 刷新令牌被轮换的时间。30 秒内再次出现的旧令牌视为并发刷新（返回 409 refresh_superseded，不撤销会话），更早的才按重放撤销。先加可空列再设默认值：迁移前已轮换的行保持 NULL，按「超过 30 秒」处理；旧版本副本插入时不写这一列，由默认值补上。
+ALTER TABLE auth_used_refresh ADD COLUMN IF NOT EXISTS used_at timestamptz;
+ALTER TABLE auth_used_refresh ALTER COLUMN used_at SET DEFAULT now();
 CREATE TABLE IF NOT EXISTS auth_rates (
  key text PRIMARY KEY, count integer NOT NULL, expires_at timestamptz NOT NULL
 );
