@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useAPI } from "../../api/client";
 import type { CloudService } from "../../api/cloud";
-import { ago, cloudSchema, formatLatency, formatRate, stateTone } from "../../api/cloud";
+import { cloudSchema, formatLatency, formatRate, stateTone } from "../../api/cloud";
+import { relativeTime } from "../../shell/notifications";
 import { keys } from "../../api/keys";
 import { PageIntro } from "../../shell/page-intro";
 import { Banner } from "../../ui/card";
@@ -84,7 +85,7 @@ export default function CloudPage() {
   });
   const data = query.data;
   return <>
-    <PageIntro page="cloud">{data && <span className="text-xs text-muted">{ago(data.generated_at)}更新 · 每分钟刷新</span>}</PageIntro>
+    <PageIntro page="cloud">{data && <span className="text-xs text-muted">{relativeTime(data.generated_at)}更新 · 每分钟刷新</span>}</PageIntro>
     {query.isPending && <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3.5" role="status" aria-label="正在加载">
       {["a", "b", "c", "d"].map(key => <Skeleton key={key} className="h-[232px] rounded-[18px]" />)}
     </div>}

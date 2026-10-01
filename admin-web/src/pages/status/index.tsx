@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { differenceInMinutes, format, isToday, parseISO } from "date-fns";
 import { useEffect, useRef } from "react";
 import { useAPI } from "../../api/client";
-import { ago, formatLatency, formatRate, stateTone } from "../../api/cloud";
+import { formatLatency, formatRate, stateTone } from "../../api/cloud";
+import { relativeTime } from "../../shell/notifications";
 import { keys } from "../../api/keys";
 import type { Incident, Status, StatusService } from "../../api/status";
 import { statusSchema } from "../../api/status";
@@ -17,7 +18,7 @@ function summary(status: Status): { tone: "ok" | "warn" | "bad" | "mute"; title:
   const services = status.services;
   if (!status.checked_at) return { tone: "mute", title: "状态检查尚未运行，等待第一次探测" };
   // The server reports unknown once the last probe is more than three minutes old: the per-service states below are stale, so they are not summarised as current.
-  if (status.state === "unknown") return { tone: "warn", title: `状态检查已停止，最近一次在${ago(status.checked_at)}` };
+  if (status.state === "unknown") return { tone: "warn", title: `状态检查已停止，最近一次在${relativeTime(status.checked_at)}` };
   const degraded = services.filter(s => s.state === "degraded").map(s => s.name);
   const down = services.filter(s => s.state === "down").map(s => s.name);
   const healthy = services.length - degraded.length - down.length;
@@ -102,7 +103,7 @@ export default function StatusPage() {
           <span aria-hidden="true" className={cn("h-2.5 w-2.5 shrink-0 rounded-full ring-4", bannerDot[banner.tone])} />
           <div className="min-w-0 flex-1">
             <div className="font-bold text-ink">{banner.title}</div>
-            <div className="mt-0.5 text-[12.5px] text-body">本地输入不受影响，云端功能异常时键盘仍可使用本地候选。{data.checked_at ? `${ago(data.checked_at)}检查` : "尚未检查"}</div>
+            <div className="mt-0.5 text-[12.5px] text-body">本地输入不受影响，云端功能异常时键盘仍可使用本地候选。{data.checked_at ? `${relativeTime(data.checked_at)}检查` : "尚未检查"}</div>
           </div>
         </div>
         : <Skeleton className="h-[74px] rounded-[18px]" />}

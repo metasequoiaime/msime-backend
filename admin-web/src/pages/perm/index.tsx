@@ -15,7 +15,8 @@ import { useConfirm } from "../../ui/confirm";
 import { Pill } from "../../ui/pill";
 import { Empty, ErrorState, SkeletonRows } from "../../ui/states";
 import { useToast } from "../../ui/toast";
-import { Avatar, SectionCard, SectionRow, ago } from "../me/section";
+import { relativeTime } from "../../shell/notifications";
+import { Avatar, SectionCard, SectionRow } from "../me/section";
 
 const permKey = keys.page("perm", "matrix");
 
@@ -104,7 +105,7 @@ function AuditLog() {
           <Avatar letter={initial(who)} />
           <div className="min-w-0 flex-1">
             <div className="break-words text-ink"><b className="font-semibold">{who}</b> {describeAudit(entry)}</div>
-            <div className="mt-0.5 text-xs text-muted" title={new Date(entry.created_at).toLocaleString("zh-CN")}>{ago(entry.created_at)}</div>
+            <div className="mt-0.5 text-xs text-muted" title={new Date(entry.created_at).toLocaleString("zh-CN")}>{relativeTime(entry.created_at)}</div>
           </div>
         </SectionRow>;
       })}
@@ -159,7 +160,7 @@ function Members({ data }: { data: Permissions }) {
     </form> : <p className="m-0 border-b border-hair px-5 py-3 text-xs text-muted">只有部署配置中的所有者可以添加、停用成员或调整成员角色。</p>}
     {data.members.length === 0 ? <Empty title="还没有管理员" /> : data.members.map(member => {
       const name = member.email.split("@")[0] || member.email;
-      const meta = [member.owner ? "部署配置的所有者" : "", member.sessions ? `${member.sessions} 个有效会话` : "无有效会话", member.last_seen_at ? `最近活动 ${ago(member.last_seen_at)}` : ""].filter(Boolean).join(" · ");
+      const meta = [member.owner ? "部署配置的所有者" : "", member.sessions ? `${member.sessions} 个有效会话` : "无有效会话", member.last_seen_at ? `最近活动 ${relativeTime(member.last_seen_at)}` : ""].filter(Boolean).join(" · ");
       return <SectionRow key={member.email} className="flex-wrap">
         <Avatar letter={initial(name)} />
         <div className="min-w-[180px] flex-1">

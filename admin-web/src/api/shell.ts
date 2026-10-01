@@ -15,7 +15,8 @@ export const shellSchema = z.object({
   me: z.object({ email: z.string(), name: z.string().nullish(), role: z.string(), permissions: z.array(z.string()) }),
   pending: z.object({ dict_prs: z.number().int().nonnegative(), community: z.number().int().nonnegative(), issues: z.number().int().nonnegative() }),
   unread_notifications: z.number().int().nonnegative(),
-  status: z.enum(["ok", "degraded", "down"]),
+  // unknown: no service probe has run yet, or the last one is more than 3 minutes old.
+  status: z.enum(["ok", "degraded", "down", "unknown"]),
 });
 export type Shell = z.infer<typeof shellSchema>;
 

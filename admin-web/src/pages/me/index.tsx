@@ -19,7 +19,8 @@ import { StatGrid, StatTile } from "../../ui/stat-tile";
 import { Empty, ErrorState, Skeleton, SkeletonRows } from "../../ui/states";
 import { Switch } from "../../ui/switch";
 import { useToast } from "../../ui/toast";
-import { Avatar, SectionCard, SectionRow, ago } from "./section";
+import { relativeTime } from "../../shell/notifications";
+import { Avatar, SectionCard, SectionRow } from "./section";
 
 const meKey = keys.page("me");
 
@@ -196,7 +197,7 @@ function Sessions({ me }: { me: Me }) {
     {me.sessions.length === 0 ? <Empty title={me.via === "token" ? "当前通过个人访问令牌访问，没有有效的浏览器会话" : "没有有效的登录会话"} /> : me.sessions.map(session => <SectionRow key={session.id}>
       <div className="min-w-0 flex-1">
         <div className="truncate text-ink">{session.device}</div>
-        <div className="mt-0.5 text-xs text-muted">{session.current ? "当前会话" : `最近活动 ${ago(session.last_seen_at)}`} · 登录于 {format(new Date(session.created_at), "MM-dd HH:mm")}</div>
+        <div className="mt-0.5 text-xs text-muted">{session.current ? "当前会话" : `最近活动 ${relativeTime(session.last_seen_at)}`} · 登录于 {format(new Date(session.created_at), "MM-dd HH:mm")}</div>
       </div>
       {session.current
         ? <span className="shrink-0 text-xs font-semibold text-accent-ink">当前设备</span>
@@ -209,7 +210,7 @@ function Recent({ me }: { me: Me }) {
   return <SectionCard title="我的最近操作">
     {me.recent.length === 0 ? <Empty title="还没有操作记录" /> : me.recent.map(entry => <SectionRow key={entry.id} className="py-3">
       <span className="min-w-0 flex-1 text-ink">{describeAudit(entry)}</span>
-      <span className="shrink-0 text-xs text-muted" title={new Date(entry.created_at).toLocaleString("zh-CN")}>{ago(entry.created_at)}</span>
+      <span className="shrink-0 text-xs text-muted" title={new Date(entry.created_at).toLocaleString("zh-CN")}>{relativeTime(entry.created_at)}</span>
     </SectionRow>)}
   </SectionCard>;
 }

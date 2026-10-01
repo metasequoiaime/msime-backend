@@ -48,11 +48,30 @@ function apply() {
   root.dataset.season = resolveSeason(current.season);
 }
 
-// initAppearance runs before the first render so the stored theme is applied without a flash; system mode follows prefers-color-scheme changes live.
+// refreshSeason re-applies the auto season when the month has moved it on; the snapshot gets a new identity so the appearance popover re-renders its label.
+function refreshSeason() {
+  if (current.season !== "auto" || document.documentElement.dataset.season === resolveSeason("auto")) return;
+  current = { ...current };
+  apply();
+  for (const listener of listeners) listener();
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// scheduleSeasonCheck wakes up just after the next local month starts, or within a day because setTimeout cannot wait a whole month (its delay overflows past about 24.8 days).
+function scheduleSeasonCheck() {
+  const now = new Date();
+  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  window.setTimeout(() => { refreshSeason(); scheduleSeasonCheck(); }, Math.min(nextMonth.getTime() - now.getTime() + 1000, DAY_MS));
+}
+
+// initAppearance runs before the first render so the stored theme is applied without a flash; system mode follows prefers-color-scheme changes live, and the auto season follows the month in a tab that stays open across a month boundary (also checked when a sleeping tab becomes visible again, since timers are paused then).
 export function initAppearance() {
   current = readStored();
   media = window.matchMedia("(prefers-color-scheme: dark)");
   media.addEventListener("change", () => { apply(); for (const listener of listeners) listener(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshSeason(); });
+  scheduleSeasonCheck();
   apply();
 }
 

@@ -1,5 +1,3 @@
-import { formatDistanceToNow } from "date-fns";
-import { zhCN } from "date-fns/locale";
 import { z } from "zod";
 
 // Service states shared by /api/cloud and /api/status: idle means no calls in the last five minutes (counted as available); unknown means no probe has run yet.
@@ -51,10 +49,4 @@ export function stateTone(state: ServiceState): "ok" | "warn" | "bad" | "mute" {
   if (state === "down") return "bad";
   if (state === "unknown") return "mute";
   return "ok";
-}
-
-// ago is the relative time of a server timestamp (「1 分钟前」). It is local rather than the shell's relativeTime: importing shell/notifications from a lazy page splits the shell's zod schemas into a chunk that evaluates before zod-config.ts, which breaks the CSP's no-eval rule.
-export function ago(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : formatDistanceToNow(date, { locale: zhCN, addSuffix: true });
 }

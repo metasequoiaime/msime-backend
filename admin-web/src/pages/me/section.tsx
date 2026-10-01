@@ -1,13 +1,5 @@
 import type { HTMLAttributes, ReactNode } from "react";
-import { formatDistanceToNow } from "date-fns";
-import { zhCN } from "date-fns/locale";
 import { cn } from "../../ui/cn";
-
-// ago is relativeTime from shell/notifications, repeated here because importing that module together with shell/permissions from a page makes the bundler split zod into a chunk that runs before zod-config, which the CSP smoke test reports as an eval violation.
-export function ago(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : formatDistanceToNow(date, { locale: zhCN, addSuffix: true });
-}
 
 // SectionCard is the design's list card: a 15px title over hairline-separated rows, edge to edge.
 export function SectionCard({ title, actions, children, className }: { title: ReactNode; actions?: ReactNode; children: ReactNode; className?: string }) {

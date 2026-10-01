@@ -8,8 +8,8 @@ import { NavIcon } from "./nav-icon";
 import { navAllowed, usePermissions } from "./permissions";
 import { useShell } from "./shell-data";
 
-const statusText = { ok: "后端运行正常", degraded: "部分服务降级", down: "后端服务异常" } as const;
-const statusDot = { ok: "bg-accent ring-accent-soft", degraded: "bg-warn ring-warn-soft", down: "bg-bad ring-bad-soft" } as const;
+const statusText = { ok: "后端运行正常", degraded: "部分服务降级", down: "后端服务异常", unknown: "状态未知" } as const;
+const statusDot = { ok: "bg-accent ring-accent-soft", degraded: "bg-warn ring-warn-soft", down: "bg-bad ring-bad-soft", unknown: "bg-muted ring-panel-2" } as const;
 
 // Sidebar is the grouped navigation. expanded is false only for the collapsed desktop rail; the mobile drawer always renders expanded content.
 export function Sidebar({ expanded, mobile, mobileOpen, onToggle, onNavigate }: { expanded: boolean; mobile: boolean; mobileOpen: boolean; onToggle: () => void; onNavigate: () => void }) {
