@@ -274,6 +274,23 @@ func (s *Store) completeWith(ctx context.Context, c Challenge, identity Identity
 	if c.LinkUser != "" && uid != "" && uid != c.LinkUser {
 		return Tokens{}, ErrConflict
 	}
+	account := uid
+	if account == "" {
+		account = c.LinkUser
+	}
+	if account != "" {
+		// A banned account can neither sign in nor gain identities. The challenge is still consumed, so the verified credential cannot be replayed. FOR SHARE waits for a ban committing concurrently (it holds the row FOR UPDATE), so a login racing a ban either sees the ban or creates its session before the ban revokes every session.
+		var banned bool
+		if e = tx.QueryRow(ctx, "SELECT banned_at IS NOT NULL FROM auth_users WHERE id=$1 FOR SHARE", account).Scan(&banned); e != nil && !errors.Is(e, pgx.ErrNoRows) {
+			return Tokens{}, e
+		}
+		if banned {
+			if e = tx.Commit(ctx); e != nil {
+				return Tokens{}, e
+			}
+			return Tokens{}, ErrBanned
+		}
+	}
 	if uid == "" {
 		uid = c.LinkUser
 		if uid == "" {
@@ -314,7 +331,8 @@ func newSession(ctx context.Context, tx pgx.Tx, uid string) (Tokens, error) {
 	if e != nil {
 		return t, e
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO auth_sessions(id,user_id,access_hash,refresh_hash,access_expires,expires_at) VALUES($1,$2,$3,$4,now()+interval '15 minutes',now()+interval '30 days')`, randomToken(), uid, hash(t.AccessToken), hash(t.RefreshToken))
+	// The login request's User-Agent, when the handler passed one, lets the console tell the user's devices apart.
+	_, e = tx.Exec(ctx, `INSERT INTO auth_sessions(id,user_id,access_hash,refresh_hash,access_expires,expires_at,user_agent) VALUES($1,$2,$3,$4,now()+interval '15 minutes',now()+interval '30 days',$5)`, randomToken(), uid, hash(t.AccessToken), hash(t.RefreshToken), sessionUserAgent(ctx))
 	return t, e
 }
 func (s *Store) Authenticate(ctx context.Context, token string) (Principal, error) {
@@ -322,9 +340,14 @@ func (s *Store) Authenticate(ctx context.Context, token string) (Principal, erro
 	if len(token) != 64 {
 		return p, ErrInvalid
 	}
-	e := s.pool.QueryRow(ctx, `SELECT user_id,id,created_at FROM auth_sessions WHERE access_hash=$1 AND NOT revoked AND access_expires>now() AND expires_at>now()`, hash(token)).Scan(&p.UserID, &p.SessionID, &p.CreatedAt)
+	var banned bool
+	e := s.pool.QueryRow(ctx, `SELECT s.user_id,s.id,s.created_at,u.banned_at IS NOT NULL FROM auth_sessions s JOIN auth_users u ON u.id=s.user_id WHERE s.access_hash=$1 AND NOT s.revoked AND s.access_expires>now() AND s.expires_at>now()`, hash(token)).Scan(&p.UserID, &p.SessionID, &p.CreatedAt, &banned)
 	if errors.Is(e, pgx.ErrNoRows) {
 		e = ErrInvalid
+	}
+	if e == nil && banned {
+		// Banning revokes every session in the same transaction; this covers a ban written outside the console.
+		return Principal{}, ErrBanned
 	}
 	return p, e
 }
@@ -338,7 +361,15 @@ func (s *Store) Refresh(ctx context.Context, token string) (Tokens, error) {
 	}
 	defer tx.Rollback(ctx)
 	var sid, uid string
-	e = tx.QueryRow(ctx, `SELECT id,user_id FROM auth_sessions WHERE refresh_hash=$1 AND NOT revoked AND expires_at>now() FOR UPDATE`, hash(token)).Scan(&sid, &uid)
+	var revoked, banned bool
+	e = tx.QueryRow(ctx, `SELECT s.id,s.user_id,s.revoked,u.banned_at IS NOT NULL FROM auth_sessions s JOIN auth_users u ON u.id=s.user_id WHERE s.refresh_hash=$1 AND s.expires_at>now() FOR UPDATE OF s`, hash(token)).Scan(&sid, &uid, &revoked, &banned)
+	if e == nil && banned {
+		// The ban revoked this session; the client learns why instead of being sent back to a login that would fail the same way.
+		return Tokens{}, ErrBanned
+	}
+	if e == nil && revoked {
+		e = pgx.ErrNoRows
+	}
 	if errors.Is(e, pgx.ErrNoRows) {
 		// 已轮换令牌被重放时撤销该会话族，已签发的新 access_token 也立即失效。
 		_, e = tx.Exec(ctx, "UPDATE auth_sessions SET revoked=true WHERE id=(SELECT session_id FROM auth_used_refresh WHERE hash=$1)", hash(token))
