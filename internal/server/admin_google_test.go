@@ -128,10 +128,11 @@ func TestAdminGoogleFlow(t *testing.T) {
 	s := fixture(t, nil)
 	s.config.Admin = AdminConfig{Enabled: true, Host: "admin.msime.app", Google: AdminGoogleConfig{ClientID: "google-client", RedirectURI: "https://admin.msime.app" + adminCallbackPath, AllowedEmails: []string{"admin@example.test"}}}
 	s.adminStore = store
-	s.adminGoogle = &adminGoogleAuth{oauth: oauth2.Config{ClientID: "google-client", ClientSecret: "secret", RedirectURL: s.config.Admin.Google.RedirectURI, Scopes: []string{"openid", "email"}, Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: provider.URL, AuthStyle: oauth2.AuthStyleInParams}}, verifier: oidc.NewVerifier("https://accounts.google.com", adminTestKeys{&key.PublicKey}, &oidc.Config{ClientID: "google-client", SupportedSigningAlgs: []string{"RS256"}})}
+	s.adminGoogle = &adminGoogleAuth{oauth: oauth2.Config{ClientID: "google-client", ClientSecret: "secret", RedirectURL: s.config.Admin.Google.RedirectURI, Scopes: adminGoogleScopes, Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: provider.URL, AuthStyle: oauth2.AuthStyleInParams}}, verifier: oidc.NewVerifier("https://accounts.google.com", adminTestKeys{&key.PublicKey}, &oidc.Config{ClientID: "google-client", SupportedSigningAlgs: []string{"RS256"}})}
 	call := func(method, path, origin string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, "https://admin.msime.app"+path, nil)
+		r.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 		if cookie != nil {
 			r.AddCookie(cookie)
 		}
@@ -149,14 +150,14 @@ func TestAdminGoogleFlow(t *testing.T) {
 		u, _ := url.Parse(w.Header().Get("Location"))
 		params := u.Query()
 		challenge = params.Get("code_challenge")
-		if params.Get("code_challenge_method") != "S256" || params.Get("scope") != "openid email" || params.Get("nonce") == "" {
+		if params.Get("code_challenge_method") != "S256" || params.Get("scope") != "openid email profile" || params.Get("nonce") == "" {
 			t.Fatal(params)
 		}
 		cookie := w.Result().Cookies()[0]
 		if !cookie.HttpOnly || !cookie.Secure || cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode {
 			t.Fatal(cookie)
 		}
-		claims = map[string]any{"iss": "https://accounts.google.com", "aud": "google-client", "sub": "google-admin", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "nonce": params.Get("nonce"), "email": "admin@example.test", "email_verified": true}
+		claims = map[string]any{"iss": "https://accounts.google.com", "aud": "google-client", "sub": "google-admin", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "nonce": params.Get("nonce"), "email": "admin@example.test", "email_verified": true, "name": "Admin\u0007 Person"}
 		return cookie, adminCallbackPath + "?state=" + params.Get("state") + "&code=code"
 	}
 	for _, tc := range []struct {
@@ -186,6 +187,10 @@ func TestAdminGoogleFlow(t *testing.T) {
 	}
 	if session == nil || session.MaxAge != 28800 || !session.HttpOnly || !session.Secure {
 		t.Fatal(session)
+	}
+	// The profile name and the browser are handed to the store for the personal page; the store strips control characters.
+	if stored := store.sessions[session.Value]; stored.Name != "Admin\u0007 Person" || !strings.Contains(stored.UserAgent, "Safari") {
+		t.Fatal(stored)
 	}
 	if w = call("GET", path, "", cookie); w.Header().Get("Location") != "/?login_error=google_denied" {
 		t.Fatal("replay accepted")

@@ -3,9 +3,12 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/mail"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (a *Service) AdminEmailAllowed(ctx context.Context, email string) (bool, error) {
@@ -18,7 +21,7 @@ func (a *Service) AdminEmailAllowed(ctx context.Context, email string) (bool, er
 func (a *Service) AdminMembersHTTP(w http.ResponseWriter, r *http.Request, owners []string) {
 	if r.Method == "GET" {
 		var result json.RawMessage
-		err := a.store.pool.QueryRow(r.Context(), `SELECT COALESCE(json_agg(x ORDER BY email),'[]'::json) FROM (SELECT email,enabled,created_at,updated_at,(SELECT count(*) FROM admin_sessions s WHERE s.email=m.email AND expires_at>now()) AS sessions FROM admin_members m) x`).Scan(&result)
+		err := a.store.pool.QueryRow(r.Context(), `SELECT COALESCE(json_agg(x ORDER BY email),'[]'::json) FROM (SELECT email,enabled,role,created_at,updated_at,(SELECT count(*) FROM admin_sessions s WHERE s.email=m.email AND expires_at>now()) AS sessions FROM admin_members m) x`).Scan(&result)
 		if err != nil {
 			a.error(w, err)
 			return
@@ -33,14 +36,20 @@ func (a *Service) AdminMembersHTTP(w http.ResponseWriter, r *http.Request, owner
 	var v struct {
 		Email  string `json:"email"`
 		Action string `json:"action"`
+		// Role is required by set_role and optional for add, which defaults to the maintainer role.
+		Role string `json:"role"`
 	}
 	if !read(w, r, &v) {
 		return
 	}
 	v.Email = strings.ToLower(strings.TrimSpace(v.Email))
 	addr, err := mail.ParseAddress(v.Email)
-	if err != nil || addr.Address != v.Email || len(v.Email) > 254 || (v.Action != "add" && v.Action != "enable" && v.Action != "disable" && v.Action != "revoke") {
+	if err != nil || addr.Address != v.Email || len(v.Email) > 254 || (v.Action != "add" && v.Action != "enable" && v.Action != "disable" && v.Action != "revoke" && v.Action != "set_role") {
 		writeError(w, 400, "invalid_admin")
+		return
+	}
+	if (v.Action == "set_role" && v.Role == "") || (v.Action != "add" && v.Action != "set_role" && v.Role != "") || len(v.Role) > 32 {
+		writeError(w, 400, "invalid_role")
 		return
 	}
 	for _, owner := range owners {
@@ -60,8 +69,36 @@ func (a *Service) AdminMembersHTTP(w http.ResponseWriter, r *http.Request, owner
 		a.error(w, err)
 		return
 	}
+	if v.Role != "" {
+		var exists bool
+		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM admin_roles WHERE key=$1)`, v.Role).Scan(&exists); err != nil {
+			a.error(w, err)
+			return
+		}
+		if !exists {
+			writeError(w, 400, "invalid_role")
+			return
+		}
+	}
 	var affected int64
-	if v.Action == "add" {
+	var detail map[string]any
+	if v.Action == "set_role" {
+		var previous string
+		err = tx.QueryRow(r.Context(), `SELECT role FROM admin_members WHERE email=$1 FOR UPDATE`, v.Email).Scan(&previous)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 404, "not_found")
+			return
+		}
+		if err == nil && previous != v.Role {
+			_, err = tx.Exec(r.Context(), `UPDATE admin_members SET role=$2,updated_at=now() WHERE email=$1`, v.Email, v.Role)
+			affected = 1
+			detail = map[string]any{"from": previous, "to": v.Role}
+		}
+		if err == nil && affected == 0 {
+			write(w, 200, map[string]any{"ok": true, "affected": 0})
+			return
+		}
+	} else if v.Action == "add" {
 		var count int
 		if err = tx.QueryRow(r.Context(), `SELECT count(*) FROM admin_members`).Scan(&count); err != nil {
 			a.error(w, err)
@@ -71,9 +108,14 @@ func (a *Service) AdminMembersHTTP(w http.ResponseWriter, r *http.Request, owner
 			writeError(w, 409, "admin_limit")
 			return
 		}
-		tag, e := tx.Exec(r.Context(), `INSERT INTO admin_members(email) VALUES($1) ON CONFLICT DO NOTHING`, v.Email)
+		role := v.Role
+		if role == "" {
+			role = RoleMaintainer
+		}
+		tag, e := tx.Exec(r.Context(), `INSERT INTO admin_members(email,role) VALUES($1,$2) ON CONFLICT DO NOTHING`, v.Email, role)
 		err = e
 		affected = tag.RowsAffected()
+		detail = map[string]any{"role": role}
 	} else {
 		tag, e := tx.Exec(r.Context(), `UPDATE admin_members SET enabled=CASE WHEN $2='revoke' THEN enabled ELSE $2='enable' END,updated_at=now() WHERE email=$1`, v.Email, v.Action)
 		err = e
@@ -91,14 +133,23 @@ func (a *Service) AdminMembersHTTP(w http.ResponseWriter, r *http.Request, owner
 		}
 		return
 	}
-	// Also clear sessions on re-enable so historical credentials never regain access.
-	if v.Action != "add" {
+	// Also clear sessions and personal access tokens on re-enable so historical credentials never regain access. A role change applies on the next request and keeps them.
+	if v.Action == "enable" || v.Action == "disable" || v.Action == "revoke" {
 		if _, err = tx.Exec(r.Context(), `DELETE FROM admin_sessions WHERE email=$1`, v.Email); err != nil {
 			a.error(w, err)
 			return
 		}
+		if _, err = tx.Exec(r.Context(), `DELETE FROM admin_tokens WHERE email=$1`, v.Email); err != nil {
+			a.error(w, err)
+			return
+		}
 	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO admin_audit(action,target,actor) VALUES($1,$2,$3)`, "admin_"+v.Action, v.Email, adminActor(r.Context())); err != nil {
+	// A nil map inside an interface would marshal to null, which auditTx rejects.
+	var audited any
+	if detail != nil {
+		audited = detail
+	}
+	if err = auditTx(r.Context(), tx, "admin_"+v.Action, v.Email, audited); err != nil {
 		a.error(w, err)
 		return
 	}
