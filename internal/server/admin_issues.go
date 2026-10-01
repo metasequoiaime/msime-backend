@@ -105,6 +105,8 @@ type issueRow struct {
 type issueRef struct {
 	Repo string `json:"repo"`
 	N    int    `json:"n"`
+	// KeepAssignee, only for untriage, leaves the platform assignee assigned: undoing a triage sets it when the assignee was already assigned before the triage, so the undo does not drop that earlier assignment.
+	KeepAssignee bool `json:"keep_assignee,omitempty"`
 }
 
 func (ref issueRef) key() string { return ref.Repo + "#" + strconv.Itoa(ref.N) }
@@ -296,7 +298,7 @@ type issueComment struct {
 	CreatedAt         time.Time       `json:"created_at"`
 }
 
-// repoIssues reads one repository: up to issueOpenPages pages of open issues, the 100 most recently updated closed issues, and the 100 newest comments for response times. Pull requests are dropped. Every read goes through the client's short cache, so the shell badge polling this costs GitHub at most one revalidation per path a minute.
+// repoIssues reads one repository: up to issueOpenPages pages of open issues, the 100 most recently updated closed issues, and up to issueOpenPages pages of the comments of the response window, oldest first, for response times. Pull requests are dropped. Every read goes through the client's short cache, so the shell badge polling this costs GitHub at most one revalidation per path a minute.
 func (s *Server) repoIssues(ctx context.Context, gh *githubapp.Client, repo string) ([]issueRow, []issueComment, error) {
 	token, err := gh.Token(ctx, repo, issueTokenPerms)
 	if err != nil {
@@ -332,13 +334,22 @@ func (s *Server) repoIssues(ctx context.Context, gh *githubapp.Client, repo stri
 	if _, err := read(base + "?state=closed&sort=updated&direction=desc&per_page=100"); err != nil {
 		return nil, nil, err
 	}
-	r, err := gh.Get(ctx, token, base+"/comments?sort=created&direction=desc&per_page=100")
-	if err != nil || !r.OK() {
-		return nil, nil, issueResponseError("list comments", r, err)
-	}
+	// Oldest first, so the first replies to the issues of the window come before any later ones; when the window has more comments than are read, the newest issues lose their sample instead of getting a later reply counted as the first. since is rounded to the day so the path, and with it the read cache, stays the same all day.
+	since := time.Now().UTC().Add(-issueResponseWindow).Truncate(24 * time.Hour).Format(time.RFC3339)
 	var comments []issueComment
-	if err := r.Decode(&comments); err != nil {
-		return nil, nil, issueResponseError("list comments", r, err)
+	for page := 1; page <= issueOpenPages; page++ {
+		r, err := gh.Get(ctx, token, base+"/comments?sort=created&direction=asc&per_page=100&since="+url.QueryEscape(since)+"&page="+strconv.Itoa(page))
+		if err != nil || !r.OK() {
+			return nil, nil, issueResponseError("list comments", r, err)
+		}
+		var batch []issueComment
+		if err := r.Decode(&batch); err != nil {
+			return nil, nil, issueResponseError("list comments", r, err)
+		}
+		comments = append(comments, batch...)
+		if len(batch) < 100 {
+			break
+		}
 	}
 	return rows, comments, nil
 }
@@ -448,7 +459,7 @@ func (s *Server) rememberIssues(ctx context.Context, items []issueRow, complete 
 		}
 	} else {
 		for _, row := range items {
-			key := issueRef{row.Repo, row.Number}.key()
+			key := issueRef{Repo: row.Repo, N: row.Number}.key()
 			if row.State == "new" && row.CreatedAt.After(m.baseline) && !m.seen[key] {
 				m.seen[key] = true
 				announce = append(announce, row)
@@ -456,12 +467,14 @@ func (s *Server) rememberIssues(ctx context.Context, items []issueRow, complete 
 		}
 	}
 	m.mu.Unlock()
+	// An issue is marked seen before it is announced, so the announcement must not die with the request that happened to list it.
+	ctx = context.WithoutCancel(ctx)
 	for _, row := range announce {
 		title := "#" + strconv.Itoa(row.Number) + " " + row.Title
 		if utf8.RuneCountInString(title) > 300 {
 			title = string([]rune(title)[:299]) + "…"
 		}
-		key := issueRef{row.Repo, row.Number}.key()
+		key := issueRef{Repo: row.Repo, N: row.Number}.key()
 		if err := s.accounts.NotifyNow(ctx, account.Notification{Kind: account.NotifyIssue, Title: title, TargetPage: "issues", TargetID: key}); err != nil {
 			slog.Error("issues: notification failed", "issue", key, "reason", err.Error())
 		}
@@ -594,7 +607,7 @@ func (s *Server) parseIssuePath(rest string) (issueRef, error) {
 	if err != nil || n < 1 || strconv.Itoa(n) != parts[2] {
 		return issueRef{}, &issueError{400, "invalid_id"}
 	}
-	return issueRef{repo, n}, nil
+	return issueRef{Repo: repo, N: n}, nil
 }
 
 // issueEvent is one entry of an issue's timeline.
@@ -633,6 +646,26 @@ func (e issueTimelineGitHub) actor() string {
 	return ""
 }
 
+// issueLastPage reads the page number of the rel="last" link of a paginated GitHub answer, 0 when there is none.
+func issueLastPage(h http.Header) int {
+	for _, link := range strings.Split(h.Get("Link"), ",") {
+		target, rel, ok := strings.Cut(link, ";")
+		if !ok || strings.TrimSpace(rel) != `rel="last"` {
+			continue
+		}
+		u, err := url.Parse(strings.Trim(strings.TrimSpace(target), "<>"))
+		if err != nil {
+			return 0
+		}
+		n, err := strconv.Atoi(u.Query().Get("page"))
+		if err != nil || n < 1 {
+			return 0
+		}
+		return n
+	}
+	return 0
+}
+
 // issueSimilar is a listed issue whose title resembles another's.
 type issueSimilar struct {
 	Repo   string `json:"repo"`
@@ -664,7 +697,16 @@ func (s *Server) issueDetail(w http.ResponseWriter, r *http.Request, rest string
 		issueFail(w, err)
 		return
 	}
-	resp, err := gh.Get(ctx, token, fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=100", ref.Repo, ref.N))
+	timelinePath := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=100", ref.Repo, ref.N)
+	resp, err := gh.Get(ctx, token, timelinePath)
+	// GitHub lists the timeline oldest first; a timeline of several pages shows its newest page, so recent replies (including those sent from the console) are never cut off.
+	truncated := false
+	if err == nil && resp.OK() {
+		if last := issueLastPage(resp.Header); last > 1 {
+			truncated = true
+			resp, err = gh.Get(ctx, token, timelinePath+"&page="+strconv.Itoa(last))
+		}
+	}
 	if err != nil || !resp.OK() {
 		issueFail(w, issueResponseError("timeline", resp, err))
 		return
@@ -713,7 +755,7 @@ func (s *Server) issueDetail(w http.ResponseWriter, r *http.Request, rest string
 			issueRow
 			Body string `json:"body"`
 		}{row, issue.Body},
-		"timeline": timeline, "similar": s.similarIssues(ctx, gh, row), "platform_assignee": assignee,
+		"timeline": timeline, "timeline_truncated": truncated, "similar": s.similarIssues(ctx, gh, row), "platform_assignee": assignee,
 	})
 }
 
@@ -845,8 +887,8 @@ func (s *Server) issueActionsHTTP(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]bool{}
 	for i, item := range v.Items {
 		repo, ok := s.issueRepo(item.Repo)
-		ref := issueRef{repo, item.N}
-		if !ok || item.N < 1 || seen[ref.key()] {
+		ref := issueRef{Repo: repo, N: item.N, KeepAssignee: item.KeepAssignee}
+		if !ok || item.N < 1 || seen[ref.key()] || item.KeepAssignee && v.Action != "untriage" {
 			fail(w, 400, "invalid_items")
 			return
 		}
@@ -869,6 +911,12 @@ func (s *Server) issueActionsHTTP(w http.ResponseWriter, r *http.Request) {
 	var firstErr error
 	for _, item := range v.Items {
 		detail, err := s.issueAction(ctx, gh, v.Action, item, v.Body)
+		if err != nil && detail != nil {
+			// Part of the action reached GitHub and could not be rolled back; the change is recorded even though the item is reported as failed.
+			if auditErr := s.accounts.Audit(ctx, "issue_"+v.Action, item.key(), detail); auditErr != nil {
+				slog.Error("issues: audit failed after a partial GitHub write", "action", v.Action, "issue", item.key(), "reason", auditErr.Error())
+			}
+		}
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -896,7 +944,16 @@ func (s *Server) issueActionsHTTP(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, map[string]any{"ok": true, "affected": affected, "failed": failures})
 }
 
-// issueAction applies one action to one issue and returns the audit detail. Every write first reads the issue fresh, so a pull request or a missing issue fails as not_found before anything changes and the audit records the state the action started from.
+// issueStep is one GitHub write of an action, with the write that reverses it when a later step of the same action fails; undo is nil for the last step and for a write that needs no reversal.
+type issueStep struct {
+	what, method, path string
+	payload            any
+	// allowMissing accepts 404, which removing a label the issue no longer has answers.
+	allowMissing bool
+	undo         *issueStep
+}
+
+// issueAction applies one action to one issue and returns the audit detail. Every write first reads the issue fresh, so a pull request or a missing issue fails as not_found before anything changes and the audit records the state the action started from. An action of several writes reverses the writes it made when a later one fails, so a failed item leaves the issue as it was; when that reversal fails too, the error comes with the detail (marked partial) so the caller can still record the change that stayed.
 func (s *Server) issueAction(ctx context.Context, gh *githubapp.Client, action string, ref issueRef, body string) (map[string]any, error) {
 	token, err := gh.Token(ctx, ref.Repo, issueTokenPerms)
 	if err != nil {
@@ -911,73 +968,101 @@ func (s *Server) issueAction(ctx context.Context, gh *githubapp.Client, action s
 	row := s.issueRow(ref.Repo, issue)
 	detail := map[string]any{"repo": ref.Repo, "number": ref.N, "title": issue.Title, "from": row.State}
 	base := fmt.Sprintf("/repos/%s/issues/%d", ref.Repo, ref.N)
-	// call performs one write; allowMissing accepts 404, which removing a label the issue no longer has answers.
-	call := func(what, method, path string, payload any, allowMissing bool) error {
-		resp, err := gh.Do(ctx, token, method, path, payload)
-		if err == nil && (resp.OK() || allowMissing && resp.Status == 404) {
-			return nil
-		}
-		return issueResponseError(what, resp, err)
+	addLabel := func(name string) *issueStep {
+		return &issueStep{what: "add label", method: "POST", path: base + "/labels", payload: map[string][]string{"labels": {name}}}
 	}
+	removeLabel := func(name string) *issueStep {
+		return &issueStep{what: "remove label", method: "DELETE", path: base + "/labels/" + url.PathEscape(name), allowMissing: true}
+	}
+	assignees := func(method, login string) *issueStep {
+		return &issueStep{what: "assignees", method: method, path: base + "/assignees", payload: map[string][]string{"assignees": {login}}}
+	}
+	setState := func(state, reason string) *issueStep {
+		return &issueStep{what: "state", method: "PATCH", path: base, payload: map[string]string{"state": state, "state_reason": reason}}
+	}
+	hasAssignee := func(login string) bool {
+		return slices.ContainsFunc(row.Assignees, func(a string) bool { return strings.EqualFold(a, login) })
+	}
+	hasTriaged, hasDuplicate := issueHasLabel(row.Labels, issueTriagedLabel), issueHasLabel(row.Labels, issueDuplicateLabel)
 	platform := s.issuePlatform(ref.Repo, row.Labels)
+	var steps []*issueStep
 	switch action {
 	case "triage":
-		if err := call("add label", "POST", base+"/labels", map[string][]string{"labels": {issueTriagedLabel}}, false); err != nil {
-			return nil, err
+		step := addLabel(issueTriagedLabel)
+		if !hasTriaged {
+			step.undo = removeLabel(issueTriagedLabel)
 		}
+		steps = append(steps, step)
 		if platform != nil {
 			detail["platform"] = platform.ID
 			if platform.Assignee != "" {
-				if err := call("assign", "POST", base+"/assignees", map[string][]string{"assignees": {platform.Assignee}}, false); err != nil {
-					return nil, err
-				}
+				steps = append(steps, assignees("POST", platform.Assignee))
 				detail["assignee"] = platform.Assignee
 			}
 		}
 		detail["to"] = "triaged"
 	case "untriage":
-		if err := call("remove label", "DELETE", base+"/labels/"+url.PathEscape(issueTriagedLabel), nil, true); err != nil {
-			return nil, err
+		step := removeLabel(issueTriagedLabel)
+		if hasTriaged {
+			step.undo = addLabel(issueTriagedLabel)
 		}
-		if platform != nil && platform.Assignee != "" && slices.ContainsFunc(row.Assignees, func(a string) bool { return strings.EqualFold(a, platform.Assignee) }) {
-			if err := call("unassign", "DELETE", base+"/assignees", map[string][]string{"assignees": {platform.Assignee}}, false); err != nil {
-				return nil, err
-			}
+		steps = append(steps, step)
+		if !ref.KeepAssignee && platform != nil && platform.Assignee != "" && hasAssignee(platform.Assignee) {
+			steps = append(steps, assignees("DELETE", platform.Assignee))
 			detail["assignee"] = platform.Assignee
 		}
 		detail["to"] = "new"
 	case "mark_dup":
-		if err := call("add label", "POST", base+"/labels", map[string][]string{"labels": {issueDuplicateLabel}}, false); err != nil {
-			return nil, err
+		step := addLabel(issueDuplicateLabel)
+		if !hasDuplicate {
+			step.undo = removeLabel(issueDuplicateLabel)
 		}
-		if err := call("close", "PATCH", base, map[string]string{"state": "closed", "state_reason": "not_planned"}, false); err != nil {
-			return nil, err
-		}
+		steps = append(steps, step, setState("closed", "not_planned"))
 		detail["to"] = "dup"
 	case "close":
-		if err := call("close", "PATCH", base, map[string]string{"state": "closed", "state_reason": "completed"}, false); err != nil {
-			return nil, err
-		}
+		steps = append(steps, setState("closed", "completed"))
 		detail["to"] = "done"
 	case "reopen":
-		if err := call("reopen", "PATCH", base, map[string]string{"state": "open", "state_reason": "reopened"}, false); err != nil {
-			return nil, err
+		// The duplicate label goes first so that a failed reopen can put it back and leave the issue closed as a duplicate.
+		if hasDuplicate {
+			step := removeLabel(issueDuplicateLabel)
+			step.undo = addLabel(issueDuplicateLabel)
+			steps = append(steps, step)
 		}
-		if issueHasLabel(row.Labels, issueDuplicateLabel) {
-			if err := call("remove label", "DELETE", base+"/labels/"+url.PathEscape(issueDuplicateLabel), nil, true); err != nil {
-				return nil, err
-			}
-		}
+		steps = append(steps, setState("open", "reopened"))
 		detail["to"] = "new"
-		if issueHasLabel(row.Labels, issueTriagedLabel) {
+		if hasTriaged {
 			detail["to"] = "triaged"
 		}
 	case "comment":
-		if err := call("comment", "POST", base+"/comments", map[string]string{"body": body}, false); err != nil {
-			return nil, err
-		}
+		steps = append(steps, &issueStep{what: "comment", method: "POST", path: base + "/comments", payload: map[string]string{"body": body}})
 		delete(detail, "from")
 		detail["length"] = utf8.RuneCountInString(body)
+	}
+	call := func(step *issueStep) error {
+		resp, err := gh.Do(ctx, token, step.method, step.path, step.payload)
+		if err == nil && (resp.OK() || step.allowMissing && resp.Status == 404) {
+			return nil
+		}
+		return issueResponseError(step.what, resp, err)
+	}
+	for i, step := range steps {
+		if err := call(step); err != nil {
+			partial := false
+			for j := i - 1; j >= 0; j-- {
+				if undo := steps[j].undo; undo != nil {
+					if undoErr := call(undo); undoErr != nil {
+						slog.Error("issues: could not roll back a partial action", "action", action, "issue", ref.key(), "step", undo.what, "reason", undoErr.Error())
+						partial = true
+					}
+				}
+			}
+			if partial {
+				detail["partial"] = true
+				return detail, err
+			}
+			return nil, err
+		}
 	}
 	return detail, nil
 }
@@ -999,7 +1084,7 @@ func (s *Server) searchIssues(q string) []account.AdminSearchHit {
 		if number != n && !strings.Contains(strings.ToLower(row.Title), q) && !strings.Contains(strings.ToLower(row.Repo+"#"+n), q) {
 			continue
 		}
-		hits = append(hits, account.AdminSearchHit{Kind: "issue", ID: issueRef{row.Repo, row.Number}.key(), Title: "#" + n + " " + row.Title, Where: "问题分诊", Target: "issues"})
+		hits = append(hits, account.AdminSearchHit{Kind: "issue", ID: issueRef{Repo: row.Repo, N: row.Number}.key(), Title: "#" + n + " " + row.Title, Where: "问题分诊", Target: "issues"})
 		if len(hits) == 8 {
 			break
 		}

@@ -44,7 +44,7 @@ FIXTURES = {
 SMOKE_ISSUE = {"repo": "metasequoiaime/msime", "number": 12, "title": "Shift 切换偶尔失效", "author": "smoke-author", "url": "https://github.com/metasequoiaime/msime/issues/12", "state": "new", "platform": "linux", "kind": "bug", "labels": ["bug", "linux", "快捷键"], "assignees": [], "comments": 1, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z", "closed_at": None}
 FIXTURES.update({
     "/api/issues": {"items": [SMOKE_ISSUE], "page": 1, "page_size": 50, "total": 1, "has_more": False, "repos": ["metasequoiaime/msime"], "platforms": [{"id": "linux", "name": "Linux", "label": "linux", "assignee": "houko"}], "unavailable": [], "platform_counts": {"all": 1, "other": 0, "linux": 1}, "state_counts": {"new": 1, "triaged": 0, "done": 0, "dup": 0}, "stats": {"pending": 1, "triaged": 0, "new_this_week": 1, "first_response_hours": 2.5, "first_response_samples": 1}},
-    "/api/issues/metasequoiaime/msime/12": {"issue": {**SMOKE_ISSUE, "body": "连按 Shift 偶尔没有反应。"}, "timeline": [{"kind": "created", "actor": "smoke-author", "text": "", "at": "2026-10-01T00:00:00Z"}, {"kind": "commented", "actor": "houko", "text": "需要日志", "at": "2026-10-01T01:00:00Z"}], "similar": [], "platform_assignee": "houko"},
+    "/api/issues/metasequoiaime/msime/12": {"issue": {**SMOKE_ISSUE, "body": "连按 Shift 偶尔没有反应。"}, "timeline": [{"kind": "created", "actor": "smoke-author", "text": "", "at": "2026-10-01T00:00:00Z"}, {"kind": "commented", "actor": "houko", "text": "需要日志", "at": "2026-10-01T01:00:00Z"}], "timeline_truncated": False, "similar": [], "platform_assignee": "houko"},
 })
 
 

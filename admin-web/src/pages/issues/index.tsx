@@ -5,7 +5,7 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import { APIError, errorMessage, isGithubDisabled, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
-import { issueActionResultSchema, issueDetailSchema, issueKey, issueRef, issuesSchema, parseIssueKey } from "../../api/issues";
+import { issueActionResultSchema, issueDetailSchema, issueKey, issuePath, issueRef, issuesSchema, parseIssueKey } from "../../api/issues";
 import type { IssueAction, IssueDetail, IssueEvent, IssuePlatform, IssueRef, IssueRow, IssueState, IssueStateFilter } from "../../api/issues";
 import { relativeTime } from "../../shell/notifications";
 import { PageIntro } from "../../shell/page-intro";
@@ -148,7 +148,7 @@ export default function IssuesPage() {
 
   const detail = useQuery({
     queryKey: keys.page("issues", "detail", openKey),
-    queryFn: ({ signal }) => api.get(`issues/${openRef?.repo}/${openRef?.n}`, issueDetailSchema, { signal }),
+    queryFn: ({ signal }) => api.get(issuePath(openRef as IssueRef), issueDetailSchema, { signal }),
     enabled: Boolean(openRef),
   });
 
@@ -163,22 +163,25 @@ export default function IssuesPage() {
   });
   const runAction = mutation.mutateAsync;
 
-  // apply runs an action and shows its toast. The rows it changed that pass reverse.undoable get 撤销, which runs the reverse action on exactly those rows, so each row returns to its own previous state.
-  const apply = useCallback(async (action: IssueAction, rows: readonly IssueRow[], text: (count: number) => string, reverse?: { action: IssueAction; undoable: (row: IssueRow) => boolean }) => {
-    if (rows.length === 0) return;
+  // apply runs an action and shows its toast. The rows it changed that pass reverse.undoable get 撤销, which runs the reverse action on exactly those rows (reverse.ref adds per-row options), so each row returns to its own previous state. It resolves to false when no selected row applies, which keeps a batch selection.
+  const apply = useCallback(async (action: IssueAction, rows: readonly IssueRow[], text: (count: number) => string, reverse?: { action: IssueAction; undoable: (row: IssueRow) => boolean; ref?: (row: IssueRow) => IssueRef }) => {
+    if (rows.length === 0) {
+      toast("所选 Issue 都不适用这个操作");
+      return false;
+    }
     const result = await runAction({ action, items: rows.map(issueRef) });
     const failed = new Set(result.failed.map(item => `${item.repo}#${item.n}`));
     const message = failed.size ? `${text(result.affected)}，${failed.size} 个失败` : text(result.affected);
     const undoRows = reverse ? rows.filter(row => !failed.has(issueKey(row)) && reverse.undoable(row)) : [];
-    if (reverse && undoRows.length) toast({ text: message, undo: () => runAction({ action: reverse.action, items: undoRows.map(issueRef) }) });
+    if (reverse && undoRows.length) toast({ text: message, undo: () => runAction({ action: reverse.action, items: undoRows.map(reverse.ref ?? issueRef) }) });
     else toast(message);
+    return true;
   }, [runAction, toast]);
 
   // guarded shows a failure as a toast and resolves to false, which keeps a batch selection for another try.
-  const guarded = useCallback(async (work: () => Promise<unknown>) => {
+  const guarded = useCallback(async (work: () => Promise<boolean>) => {
     try {
-      await work();
-      return true;
+      return await work();
     } catch (error) {
       toast(`操作失败：${issueErrorText(error)}`);
       return false;
@@ -189,12 +192,20 @@ export default function IssuesPage() {
     if (rows.length !== 1) return `已分类 ${count} 个 Issue`;
     const assignee = platforms.find(p => p.id === rows[0].platform)?.assignee;
     return assignee ? `#${rows[0].number} 已分类，指派给 @${assignee}` : `#${rows[0].number} 已分类`;
-  }, { action: "untriage", undoable: row => row.state === "new" })), [apply, guarded, platforms]);
+  }, {
+    action: "untriage",
+    undoable: row => row.state === "new",
+    // An assignee the issue already had before the triage stays assigned after the undo.
+    ref: row => {
+      const assignee = platforms.find(p => p.id === row.platform)?.assignee?.toLowerCase();
+      return { ...issueRef(row), keep_assignee: Boolean(assignee && row.assignees.some(a => a.toLowerCase() === assignee)) || undefined };
+    },
+  })), [apply, guarded, platforms]);
   const markDup = useCallback((rows: readonly IssueRow[]) => guarded(() => apply("mark_dup", rows,
     count => rows.length === 1 ? `#${rows[0].number} 已标记为重复` : `已将 ${count} 个 Issue 标记为重复`,
     { action: "reopen", undoable: isOpenRow })), [apply, guarded]);
   const close = useCallback(async (rows: readonly IssueRow[]) => {
-    if (rows.length === 0) return true;
+    if (rows.length === 0) return apply("close", rows, () => "");
     const ok = await confirm({ title: rows.length === 1 ? `关闭 #${rows[0].number}？` : `关闭 ${rows.length} 个 Issue？`, description: "提交者会收到关闭通知，之后可以重新打开。", okLabel: "关闭" });
     if (ok === null) return false;
     return guarded(() => apply("close", rows, count => rows.length === 1 ? `#${rows[0].number} 已关闭` : `已关闭 ${count} 个 Issue`, { action: "reopen", undoable: isOpenRow }));
@@ -384,7 +395,7 @@ function IssueDrawer({ onClose, fallback, detail, platformName, platforms, canTr
     fields={fields}
     sections={data ? [
       { title: "描述", items: [{ text: data.issue.body.trim() || "（提交者没有填写描述）" }] },
-      { title: "时间线", items: data.timeline.map(event => ({ text: eventText(event), meta: relativeTime(event.at) })), empty: "暂无记录" },
+      { title: data.timeline_truncated ? "时间线（仅最近部分，完整记录见 GitHub）" : "时间线", items: data.timeline.map(event => ({ text: eventText(event), meta: relativeTime(event.at) })), empty: "暂无记录" },
     ] : []}
     actions={actions}
     composer={composer}

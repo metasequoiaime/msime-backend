@@ -180,6 +180,9 @@ func (f *fakeIssuesGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if parts[3] == "comments" {
+		if q := r.URL.Query(); q.Get("direction") != "asc" || q.Get("sort") != "created" || q.Get("since") == "" {
+			f.t.Errorf("comments read newest first or without a window: %s", r.URL.RawQuery)
+		}
 		out := []map[string]any{}
 		for _, c := range f.comments[repo] {
 			out = append(out, map[string]any{"issue_url": "https://api.github.com/repos/" + repo + "/issues/" + strconv.Itoa(c.number), "user": map[string]any{"login": c.login, "type": c.kind}, "author_association": c.association, "created_at": c.created.UTC().Format(time.RFC3339)})
@@ -198,7 +201,19 @@ func (f *fakeIssuesGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && sub == "":
 		reply(200, issue.json(repo))
 	case r.Method == "GET" && sub == "timeline":
-		reply(200, issue.timeline)
+		// Paginated like GitHub: per_page events per page, a Link header with rel="last" when there is more than one page.
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		page = max(page, 1)
+		events := issue.timeline
+		if events == nil {
+			events = []map[string]any{}
+		}
+		if last := (len(events) + perPage - 1) / perPage; last > 1 {
+			w.Header().Set("Link", `<`+f.server.URL+r.URL.Path+`?per_page=`+strconv.Itoa(perPage)+`&page=2>; rel="next", <`+f.server.URL+r.URL.Path+`?per_page=`+strconv.Itoa(perPage)+`&page=`+strconv.Itoa(last)+`>; rel="last"`)
+		}
+		start := min((page-1)*perPage, len(events))
+		reply(200, events[start:min(start+perPage, len(events))])
 	case r.Method == "PATCH" && sub == "":
 		issue.state, _ = body["state"].(string)
 		issue.stateReason, _ = body["state_reason"].(string)
@@ -715,5 +730,103 @@ func TestIssueHelpers(t *testing.T) {
 	}
 	if p := s.issuePlatform(issuesCoreRepo, []string{"Linux"}); p == nil || p.ID != "linux" {
 		t.Fatal("label", p)
+	}
+}
+
+// A failed later write rolls back the earlier writes of the same action, so a failed item changes nothing and leaves no audit row; when the rollback fails as well, the change that stayed is audited as partial.
+func TestAdminIssueActionRollback(t *testing.T) {
+	s, f, conn, schema := issuesFixture(t)
+	act := func(action string, n int) (int, map[string]any) {
+		return issuesRequest(t, s, "POST", "/api/issues/actions", `{"action":"`+action+`","items":[{"repo":"`+issuesWinRepo+`","n":`+strconv.Itoa(n)+`}]}`)
+	}
+	f.status["POST /repos/"+issuesWinRepo+"/issues/10/assignees"] = 500
+	if status, v := act("triage", 10); status != 502 || issueErrorCode(v) != "github_unavailable" {
+		t.Fatal(status, v)
+	}
+	if got := f.get(issuesWinRepo, 10); slices.Contains(got.labels, "triaged") || len(got.assignees) != 0 {
+		t.Fatal("triage was not rolled back", got)
+	}
+	if audits := issueAudits(t, conn, schema); len(audits) != 0 {
+		t.Fatal("a rolled back action was audited", audits)
+	}
+
+	// The duplicate label is removed first and put back when the reopen itself fails.
+	if status, _ := act("mark_dup", 11); status != 200 {
+		t.Fatal(status)
+	}
+	f.status["PATCH /repos/"+issuesWinRepo+"/issues/11"] = 500
+	if status, _ := act("reopen", 11); status != 502 {
+		t.Fatal(status)
+	}
+	if got := f.get(issuesWinRepo, 11); got.state != "closed" || !slices.Contains(got.labels, "duplicate") {
+		t.Fatal("reopen was not rolled back", got)
+	}
+	delete(f.status, "PATCH /repos/"+issuesWinRepo+"/issues/11")
+
+	// The rollback of the triaged label fails too: the label stays, so the request fails but the change is audited as partial.
+	f.status["DELETE /repos/"+issuesWinRepo+"/issues/10/labels/triaged"] = 500
+	if status, _ := act("triage", 10); status != 502 {
+		t.Fatal(status)
+	}
+	audits := issueAudits(t, conn, schema)
+	last := audits[len(audits)-1]
+	if len(audits) != 2 || last.action != "issue_triage" || last.target != issuesWinRepo+"#10" || last.detail["partial"] != true {
+		t.Fatal("partial change not audited", audits)
+	}
+}
+
+// Undoing the triage of an issue whose platform assignee was already assigned keeps that assignment; keep_assignee belongs to untriage only.
+func TestAdminIssueUntriageKeepAssignee(t *testing.T) {
+	s, f, _, _ := issuesFixture(t)
+	body := func(action string, keep bool) string {
+		return `{"action":"` + action + `","items":[{"repo":"` + issuesWinRepo + `","n":11,"keep_assignee":` + strconv.FormatBool(keep) + `}]}`
+	}
+	if status, v := issuesRequest(t, s, "POST", "/api/issues/actions", body("untriage", true)); status != 200 || v["affected"] != 1.0 {
+		t.Fatal(status, v)
+	}
+	if got := f.get(issuesWinRepo, 11); slices.Contains(got.labels, "triaged") || !slices.Equal(got.assignees, []string{"houko"}) {
+		t.Fatal("keep_assignee dropped the assignee", got)
+	}
+	writes := len(f.writeLog())
+	for _, action := range []string{"triage", "close", "reopen", "mark_dup"} {
+		if status, v := issuesRequest(t, s, "POST", "/api/issues/actions", body(action, true)); status != 400 || issueErrorCode(v) != "invalid_items" {
+			t.Error(action, status, v)
+		}
+	}
+	if len(f.writeLog()) != writes {
+		t.Fatal("an invalid request reached GitHub")
+	}
+	if status, _ := issuesRequest(t, s, "POST", "/api/issues/actions", body("untriage", false)); status != 200 {
+		t.Fatal(status)
+	}
+}
+
+// A timeline longer than one page shows its newest page, so the latest replies are always there.
+func TestAdminIssueDetailNewestTimelinePage(t *testing.T) {
+	s, f, _, _ := issuesFixture(t)
+	start := time.Now().Add(-200 * time.Hour)
+	var events []map[string]any
+	for i := range 150 {
+		events = append(events, map[string]any{"event": "commented", "actor": map[string]any{"login": "houko"}, "body": "reply " + strconv.Itoa(i), "created_at": start.Add(time.Duration(i) * time.Hour).UTC().Format(time.RFC3339)})
+	}
+	f.add(issuesWinRepo, &fakeIssue{number: 30, title: "很长的讨论", author: "alice", state: "open", created: start, timeline: events})
+	status, v := issuesRequest(t, s, "GET", "/api/issues/"+issuesWinRepo+"/30", "")
+	if status != 200 || v["timeline_truncated"] != true {
+		t.Fatal(status, v["timeline_truncated"])
+	}
+	timeline := v["timeline"].([]any)
+	if len(timeline) != 51 || timeline[len(timeline)-1].(map[string]any)["text"] != "reply 149" || timeline[1].(map[string]any)["text"] != "reply 100" {
+		t.Fatal(len(timeline), timeline[len(timeline)-1])
+	}
+	if status, v := issuesRequest(t, s, "GET", "/api/issues/"+issuesWinRepo+"/10", ""); status != 200 || v["timeline_truncated"] != false {
+		t.Fatal(status, v["timeline_truncated"])
+	}
+	h := http.Header{}
+	if issueLastPage(h) != 0 {
+		t.Fatal("no Link header")
+	}
+	h.Set("Link", `<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?per_page=100&page=7>; rel="last"`)
+	if issueLastPage(h) != 7 {
+		t.Fatal(issueLastPage(h))
 	}
 }

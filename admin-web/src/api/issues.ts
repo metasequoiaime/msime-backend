@@ -59,6 +59,8 @@ export type IssueEvent = z.infer<typeof issueEventSchema>;
 export const issueDetailSchema = z.object({
   issue: issueRowSchema.extend({ body: z.string() }),
   timeline: z.array(issueEventSchema),
+  // timeline_truncated is true when the timeline has more than one page and only the newest page is shown.
+  timeline_truncated: z.boolean(),
   similar: z.array(z.object({ repo: z.string(), number: z.number().int().positive(), title: z.string(), state: z.enum(issueStates), url: z.string() })),
   // platform_assignee is who triage assigns, "" when the platform has none or the issue has no platform.
   platform_assignee: z.string(),
@@ -66,7 +68,8 @@ export const issueDetailSchema = z.object({
 export type IssueDetail = z.infer<typeof issueDetailSchema>;
 
 export type IssueAction = "triage" | "untriage" | "mark_dup" | "close" | "reopen" | "comment";
-export type IssueRef = { repo: string; n: number };
+// keep_assignee, only for untriage, leaves the platform assignee assigned (undoing a triage of an issue that already had that assignee).
+export type IssueRef = { repo: string; n: number; keep_assignee?: boolean };
 
 export const issueActionResultSchema = z.object({
   ok: z.literal(true),
@@ -82,6 +85,12 @@ export function issueRef(row: { repo: string; number: number }): IssueRef {
 // issueKey is the id global search and notifications pass as ?focus=, e.g. "metasequoiaime/msime#12".
 export function issueKey(row: { repo: string; number: number }): string {
   return `${row.repo}#${row.number}`;
+}
+
+// issuePath is the detail path of an issue below /api/, with each segment encoded.
+export function issuePath(ref: IssueRef): string {
+  const [owner, name] = ref.repo.split("/");
+  return `issues/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/${ref.n}`;
 }
 
 export function parseIssueKey(key: string): IssueRef | null {
