@@ -40,6 +40,18 @@ FIXTURES = {
     "/api/auth/logout": {"ok": True},
 }
 
+# Release page fixtures (U7), shaped like internal/server/admin_releases.go.
+RELEASE_PLATFORM = {"id": "windows", "name": "Windows", "repo": "metasequoiaime/msime-windows", "tag_prefix": "windows-v", "workflow": "release.yml"}
+RELEASE_CURRENT = {"id": 3, "tag": "windows-v0.5.4", "version": "v0.5.4", "name": "", "status": "released", "created_at": "2026-09-25T08:00:00Z", "published_at": "2026-09-26T08:00:00Z", "author": "houko", "body": "### 新增\n- 剪贴板历史支持固定条目", "notes": [{"kind": "新增", "text": "剪贴板历史支持固定条目"}], "assets": [{"name": "msime-windows-x64-setup.exe", "size": 19084083, "downloads": 120, "url": "https://example.test/x64"}], "downloads": 120, "url": "https://example.test/release"}
+RELEASE_WITHDRAWN = {**RELEASE_CURRENT, "id": 1, "tag": "windows-v0.5.3", "version": "v0.5.3", "status": "withdrawn", "body": "### 说明\n- 缺少 vc_redist", "notes": [{"kind": "说明", "text": "缺少 vc_redist"}], "downloads": 7, "assets": []}
+FIXTURES.update({
+    "/api/releases": {"platforms": [
+        {**RELEASE_PLATFORM, "latest": RELEASE_CURRENT, "checklist": [{"key": "ci", "label": "CI 全部通过", "state": "passed", "note": ""}, {"key": "store", "label": "商店 / 分发渠道", "state": "passed", "note": "GitHub Release 已公开"}]},
+        {"id": "ios", "name": "iOS", "repo": "metasequoiaime/msime", "tag_prefix": "ios-v", "workflow": "", "latest": None, "checklist": [], "error": "github_unavailable"},
+    ]},
+    "/api/releases/windows": {"platform": RELEASE_PLATFORM, "releases": [RELEASE_CURRENT, RELEASE_WITHDRAWN]},
+})
+
 
 def production_csp() -> str:
     match = re.search(r'Header\(\)\.Set\("Content-Security-Policy", "([^"]+)"\)', ADMIN_GO.read_text())
@@ -143,6 +155,18 @@ def main() -> int:
                     page.goto(base + old)
                     page.wait_for_url(base + new)
                     violations(old)
+
+                page.goto(base + "/release")
+                expect(page.get_by_text("GitHub 暂时无法访问，请稍后重试。")).to_be_visible()
+                page.get_by_role("button", name="发布历史").first.click()
+                page.wait_for_url(re.compile(r"/release\?platform=windows$"))
+                expect(page.get_by_text("剪贴板历史支持固定条目")).to_be_visible()
+                page.get_by_role("button", name=re.compile("v0\\.5\\.3")).click()
+                expect(page.get_by_text("缺少 vc_redist")).to_be_visible()
+                expect(page.get_by_text("剪贴板历史支持固定条目")).to_be_hidden()
+                page.goto(base + "/release?focus=windows:windows-v0.5.3")
+                expect(page.get_by_text("缺少 vc_redist")).to_be_visible()
+                violations("release")
 
                 page.goto(base + "/")
                 expect(page.locator("header")).to_contain_text("测试环境")
