@@ -38,6 +38,23 @@ func TestAdminMemberLifecycle(t *testing.T) {
 			t.Fatal(tc, w.Code, w.Body.String())
 		}
 	}
+	// A former owner's leftover session and token, which no longer pass the allow list, are cleared when the email is added as a member.
+	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_sessions(token_hash,subject,email,name,created_at) VALUES('former-owner','s','former@example.test','',now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_tokens(hash,email,last4,expires_at) VALUES('former-owner-pat','former@example.test','abcd',now()+interval '30 days')`); err != nil {
+		t.Fatal(err)
+	}
+	if w := call("add", "former@example.test"); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var leftover int
+	if err := db.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM admin_sessions WHERE email='former@example.test')+(SELECT count(*) FROM admin_tokens WHERE email='former@example.test')`).Scan(&leftover); err != nil || leftover != 0 {
+		t.Fatal("former owner's credentials survived the add", leftover, err)
+	}
+	if _, err := db.pool.Exec(ctx, `DELETE FROM admin_members WHERE email='former@example.test'`); err != nil {
+		t.Fatal(err)
+	}
 	identity := AdminIdentity{Subject: "google-member", Email: "admin@example.test"}
 	token, err := a.CreateAdminSession(ctx, identity)
 	if err != nil {

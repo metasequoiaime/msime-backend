@@ -159,10 +159,6 @@ func TestAdminMemberSetRole(t *testing.T) {
 		a.AdminMembersHTTP(w, r, []string{"owner@example.test"})
 		return w
 	}
-	session, err := a.CreateAdminSession(ctx, AdminIdentity{Subject: "m", Email: "member@example.test"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	for body, want := range map[string]int{
 		`{"action":"add","email":"member@example.test","role":"ghost"}`:          400,
 		`{"action":"add","email":"member@example.test","role":"reviewer"}`:       200,
@@ -177,6 +173,11 @@ func TestAdminMemberSetRole(t *testing.T) {
 	}
 	if role, _, err := a.AdminMemberRole(ctx, "member@example.test"); err != nil || role != "reviewer" {
 		t.Fatal(role, err)
+	}
+	// Adding clears any older credentials, so the member signs in after the add.
+	session, err := a.CreateAdminSession(ctx, AdminIdentity{Subject: "m", Email: "member@example.test"})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if w := call(`{"action":"set_role","email":"member@example.test","role":"operator"}`); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())

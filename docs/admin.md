@@ -136,7 +136,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 - 除 `GET /api/cloud` 外，所有 GET 请求对所有角色开放，「只读」角色就是靠这一点成立的。缺少权限的写操作返回 403 `permission_denied`，前端对应按钮置灰并提示所需权限，云端监控在侧栏和搜索中对没有 `view_cloud_usage` 的角色隐藏。
 - 维护者的 `manage_permissions` 不能收回（409 `protected`），迁移也会在它缺失时补回。权限矩阵通过 `POST /api/permissions {action: grant|revoke, role, permission}` 修改。
 - 所有者恒为维护者，不能在后台修改、停用或撤销（403 `protected_owner`），恢复入口始终在部署配置里。
-- 成员的增删、启停和改角色走 `GET/POST /api/admins`，只有所有者能调用。请求体为 `{"email","action":"add|enable|disable|revoke|set_role","role"?}`：`add` 可带 `role`（默认维护者），`set_role` 必须带 `role`。最多 100 个成员（409 `admin_limit`），重复添加返回 409 `admin_exists`。停用不删除记录，重新启用后需重新登录。成员记录不创建输入法用户账户，也不发送邀请邮件，被添加者直接用 Google 账号登录。
+- 成员的增删、启停和改角色走 `GET/POST /api/admins`，只有所有者能调用。请求体为 `{"email","action":"add|enable|disable|revoke|set_role","role"?}`：`add` 可带 `role`（默认维护者），`set_role` 必须带 `role`。最多 100 个成员（409 `admin_limit`），重复添加返回 409 `admin_exists`。停用不删除记录，重新启用后需重新登录。添加、启用、停用和撤销都会删除该邮箱已有的后台会话和个人访问令牌，所以从配置中移除的前所有者被重新添加为成员时，旧凭据不会复活。成员记录不创建输入法用户账户，也不发送邀请邮件，被添加者直接用 Google 账号登录。
 - 引入角色之前已有的成员在迁移时成为维护者，权限不变。
 - `save_notice_draft` 不需要权限，任何角色都能写草稿，发布才需要 `publish_notices`。个人中心的偏好、会话和令牌操作也不需要权限，只作用于本人。
 
