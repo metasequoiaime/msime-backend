@@ -186,11 +186,12 @@ func (a *Service) adminNotifications(w http.ResponseWriter, r *http.Request, _ s
 	write(w, 200, map[string]any{"items": items, "unread": unread})
 }
 
-// adminNotificationsRead serves POST /api/notifications/read {ids}|{all:true}. It only changes the caller's own read markers, so it needs no permission and is not an audited admin action; the legacy token has no email and gets a no-op.
+// adminNotificationsRead serves POST /api/notifications/read {ids}|{all:true,up_to_id?}. 全部已读 marks read every notification up to and including up_to_id (by created_at), the newest one the console has on screen, so one that arrived after the list was fetched stays unread; without up_to_id it covers everything up to now(). It only changes the caller's own read markers, so it needs no permission and is not an audited admin action; the legacy token has no email and gets a no-op.
 func (a *Service) adminNotificationsRead(w http.ResponseWriter, r *http.Request, _ string) {
 	var v struct {
-		IDs []json.RawMessage `json:"ids"`
-		All bool              `json:"all"`
+		IDs    []json.RawMessage `json:"ids"`
+		All    bool              `json:"all"`
+		UpToID json.RawMessage   `json:"up_to_id"`
 	}
 	if !read(w, r, &v) {
 		return
@@ -198,6 +199,15 @@ func (a *Service) adminNotificationsRead(w http.ResponseWriter, r *http.Request,
 	if v.All == (len(v.IDs) > 0) || len(v.IDs) > maxNotificationReads {
 		writeError(w, 400, "invalid_ids")
 		return
+	}
+	var upTo *int64
+	if v.UpToID != nil {
+		id, ok := notificationID(v.UpToID)
+		if !v.All || !ok {
+			writeError(w, 400, "invalid_ids")
+			return
+		}
+		upTo = &id
 	}
 	ids := make([]int64, 0, len(v.IDs))
 	for _, raw := range v.IDs {
@@ -218,11 +228,12 @@ func (a *Service) adminNotificationsRead(w http.ResponseWriter, r *http.Request,
 	var err error
 	if v.All {
 		err = pgx.BeginFunc(ctx, a.store.pool, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `INSERT INTO admin_preferences(email,read_all_before) VALUES($1,now()) ON CONFLICT(email) DO UPDATE SET read_all_before=GREATEST(admin_preferences.read_all_before,EXCLUDED.read_all_before)`, email); err != nil {
+			// An up_to_id that no longer exists gives a NULL watermark, which GREATEST ignores, so the call changes nothing.
+			if _, err := tx.Exec(ctx, `INSERT INTO admin_preferences(email,read_all_before) VALUES($1,CASE WHEN $2::bigint IS NULL THEN now() ELSE (SELECT created_at FROM admin_notifications WHERE id=$2) END) ON CONFLICT(email) DO UPDATE SET read_all_before=GREATEST(admin_preferences.read_all_before,EXCLUDED.read_all_before)`, email, upTo); err != nil {
 				return err
 			}
 			// Individual markers at or before the new watermark are redundant now.
-			_, err := tx.Exec(ctx, `DELETE FROM admin_notification_reads r USING admin_notifications n WHERE r.email=$1 AND n.id=r.notification_id AND n.created_at<=now()`, email)
+			_, err := tx.Exec(ctx, `DELETE FROM admin_notification_reads r USING admin_notifications n WHERE r.email=$1 AND n.id=r.notification_id AND n.created_at<=(SELECT read_all_before FROM admin_preferences WHERE email=$1)`, email)
 			return err
 		})
 	} else {

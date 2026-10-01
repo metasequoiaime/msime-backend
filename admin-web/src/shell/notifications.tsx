@@ -31,12 +31,17 @@ export function NotificationBell({ unread }: { unread: number }) {
     queryKey: keys.notifications,
     queryFn: ({ signal }) => api.get("notifications?limit=20", notificationsSchema, { signal }),
     enabled: open,
+    // Every opening refetches, so 全部已读 acts on what the admin is actually looking at.
+    staleTime: 0,
   });
   const markRead = useMutation({
-    mutationFn: (body: { ids: string[] } | { all: true }) => api.post("notifications/read", notificationsReadSchema, body),
+    mutationFn: (body: { ids: string[] } | { all: true; up_to_id: string }) => api.post("notifications/read", notificationsReadSchema, body),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.notifications }), client.invalidateQueries({ queryKey: keys.shell })]),
   });
-  const count = list.data?.unread ?? unread;
+  // While the popover is closed the cached list goes stale (and a read made from it settles after the query is disabled), so the badge follows the 60s /api/shell poll; the open popover shows the count that came with its list.
+  const count = open && list.data ? list.data.unread : unread;
+  // 全部已读 covers the newest notification on screen, not the server's now(), so one that arrived after the list was fetched stays unread.
+  const newest = list.data?.items[0]?.id;
   const openItem = (item: Notification) => {
     setOpen(false);
     if (!item.read) markRead.mutate({ ids: [item.id] });
@@ -53,8 +58,8 @@ export function NotificationBell({ unread }: { unread: number }) {
       <Popover.Content align="end" sideOffset={8} collisionPadding={16} className="z-40 w-[340px] max-w-[calc(100vw-32px)] animate-pop-in rounded-2xl bg-panel p-2 shadow-pop outline-none">
         <div className="flex items-center justify-between px-2.5 pt-1.5 pb-2">
           <span className="font-bold text-ink">通知</span>
-          <button type="button" className="text-[13px] text-accent-ink hover:underline disabled:opacity-45" disabled={count === 0 || markRead.isPending}
-            onClick={() => markRead.mutate({ all: true }, { onSuccess: () => toast("已全部标记为已读"), onError: error => toast(`操作失败：${errorMessage(error)}`) })}>全部已读</button>
+          <button type="button" className="text-[13px] text-accent-ink hover:underline disabled:opacity-45" disabled={count === 0 || !newest || markRead.isPending}
+            onClick={() => newest && markRead.mutate({ all: true, up_to_id: newest }, { onSuccess: () => toast("已全部标记为已读"), onError: error => toast(`操作失败：${errorMessage(error)}`) })}>全部已读</button>
         </div>
         {list.isPending && <SkeletonRows rows={3} className="p-2" />}
         {list.isError && <p className="m-0 px-2.5 py-3 text-[13px] text-bad" role="alert">{errorMessage(list.error)}</p>}

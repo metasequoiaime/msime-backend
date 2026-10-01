@@ -84,7 +84,7 @@ server {
 | 成员 | Google 登录或个人访问令牌，邮箱在已启用的 `admin_members` 中 | `google:<sub>:<email>` 或 `pat:<email>` | `admin_members.role` 对应角色在权限矩阵中的权限 |
 | 管理员密钥 | `Authorization: Bearer <MSIME_ADMIN_TOKEN>` | `legacy-token` | 维护者，拥有除 `manage_permissions` 以外的全部权限；没有个人中心 |
 
-Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效期、nonce、`email_verified`，以及邮箱是否在白名单或 `admin_members` 中。授权码流程使用 PKCE S256 和一次性 state；state 与浏览器 HttpOnly Cookie 绑定，在数据库中保留 10 分钟。管理员会话在 PostgreSQL 中只存令牌哈希，有效期固定 8 小时；浏览器使用 Secure、HttpOnly、SameSite=Lax、无 Domain 的 `__Host-` Cookie。会话另外记录创建时间、最近活动时间（每 5 分钟最多更新一次）、截断到 256 字符的 User-Agent 和 Google 名字，供个人中心显示和吊销。Cookie 会话发起的写请求要求 `Origin` 与回调地址的来源完全相同。普通 Google 用户不会因此成为管理员，也不会自动创建输入法用户账户。Google Cloud 项目处于测试发布状态时，需要把管理员加入测试用户。此处遵循 [Google OpenID Connect 服务端流程](https://developers.google.com/identity/openid-connect/openid-connect)。
+Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效期、nonce、`email_verified`，以及邮箱是否在白名单或 `admin_members` 中。授权码流程使用 PKCE S256 和一次性 state；state 与浏览器 HttpOnly Cookie 绑定，在数据库中保留 10 分钟。管理员会话在 PostgreSQL 中只存令牌哈希，有效期固定 8 小时；浏览器使用 Secure、HttpOnly、SameSite=Lax、无 Domain 的 `__Host-` Cookie。会话另外记录创建时间、最近活动时间（每 5 分钟最多更新一次）、截断到 256 字符的 User-Agent 和 Google 名字，供个人中心显示和吊销。Cookie 会话发起的写请求要求 `Origin` 与回调地址的来源完全相同，否则返回 403 `origin_required`；后台的访问地址（协议和域名）与 `admin.google.redirect_uri` 不一致时，所有写操作都会因此失败。普通 Google 用户不会因此成为管理员，也不会自动创建输入法用户账户。Google Cloud 项目处于测试发布状态时，需要把管理员加入测试用户。此处遵循 [Google OpenID Connect 服务端流程](https://developers.google.com/identity/openid-connect/openid-connect)。
 
 | 端点 | 用途 |
 | --- | --- |
@@ -148,14 +148,14 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 - 每个后台请求有 15 秒的服务端超时。
 - 数据库写操作统一经过 `POST /api/actions`，请求体为 `{"action","id"?,"user_id"?,"ids"?: [≤100],"reason"?: ≤500 字,"section"?,"value"?: JSON}`，拒绝未知字段。`value` 一般不超过 8 KiB，`save_notice_draft` 和 `publish_notice` 放宽到 256 KiB，以容纳 20000 字的公告正文。批量操作在单个事务内完成，审计与变更同事务写入，失败不部分生效。涉及 GitHub 的操作走各自的 REST 子路径，例如 `POST /api/dict-prs/{n}/approve`。
 - 错误响应形如 `{"error":{"code","message"}}` 或 `{"error":"code"}`。前端的中文提示集中在 `admin-web/src/api/client.ts` 的 `codeMessages` 里，页面只在语境需要不同措辞时覆盖个别代码。
-- 可逆操作（社区状态、Issue 标签、封禁、崩溃状态）完成后，提示条提供 4 秒「撤销」，调用服务端的反向操作。不可逆操作（合并词库 PR、为崩溃分组建 Issue）延迟 4 秒才真正发出，期间点「撤销」即取消；关闭页面时立即以 keepalive 请求发出。
+- 可逆操作（社区状态、Issue 标签、封禁、崩溃状态）完成后，提示条提供 4 秒「撤销」，调用服务端的反向操作。不可逆操作（合并、驳回词库 PR，为崩溃分组建 Issue）延迟 4 秒才真正发出，期间点「撤销」即取消。在此期间又做了一个可撤销或延迟的操作时，前一个立即发出；普通提示（包括前一个延迟操作的失败提示）显示在它上方，不会提前发出它，也不会遮住它的「撤销」。退出登录前会先发出并等它完成；关闭页面时立即以 keepalive 请求发出。
 
 ## 外壳
 
 外壳由 `GET /api/shell` 一次性提供，每 60 秒刷新：版本号、环境标签（`admin.environment`）、本人邮箱、名字、角色和权限、侧栏待处理角标（词库 PR、社区待复核、待分诊 Issue）、未读通知数和后端状态（`ok`、`degraded`、`down`；前端也接受 `unknown` 并显示「状态未知」）。
 
 - 全局搜索（按 `/` 聚焦）：前端匹配页面名，`GET /api/search?q=` 最多返回 8 条，覆盖用户、社区内容、崩溃分组、敏感词、公告，以及内存缓存中的 GitHub PR、Issue 和 Release。结果通过 `?focus=<id>` 打开对应页面的详情。
-- 通知：`GET /api/notifications?limit=20`，`POST /api/notifications/read {ids?|all:true}`。来源包括新举报（与举报同事务写入）、新词库 PR、崩溃分组 7 天环比上升超过 20%（每小时检查，同一分组 7 天内只提醒一次）、自动开启的故障事件、Release 状态变化和新 Issue。个人中心可以按类型关闭词库 PR、举报和崩溃提醒。新加入的管理员会看到全部历史通知为未读。
+- 通知：`GET /api/notifications?limit=20`，`POST /api/notifications/read {ids}|{all:true,up_to_id?}`。「全部已读」带上列表中最新一条通知的 `up_to_id`，只把创建时间不晚于它的通知标为已读，打开列表之后才到的通知仍是未读；不带 `up_to_id` 时标记到服务端当前时间。通知列表每次打开都重新加载；角标在弹层关闭时跟随外壳的 60 秒轮询，在个人中心切换通知偏好后立即刷新。来源包括新举报（与举报同事务写入）、新词库 PR、崩溃分组 7 天环比上升超过 20%（每小时检查，同一分组 7 天内只提醒一次）、自动开启的故障事件、Release 状态变化和新 Issue。个人中心可以按类型关闭词库 PR、举报和崩溃提醒。新加入的管理员会看到全部历史通知为未读。
 - 外观：浅色、深色或跟随系统；配色可选春、夏、秋、冬或「自动」。自动配色按本地月份切换（3–5 月春，6–8 月夏，9–11 月秋，12–2 月冬），页面一直开着跨过月份边界时也会自动切换。外观保存在浏览器本地。
 - 旧路径重定向：`/admins`、`/audit` → `/perm`，`/system` → `/status`，`/crashes` → `/crash`，`/skins`、`/dictionaries`、`/replies` → `/community?tab=skins|dictionaries|replies`，原有查询参数保留。
 

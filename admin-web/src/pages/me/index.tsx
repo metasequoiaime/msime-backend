@@ -109,7 +109,8 @@ function Preferences({ me }: { me: Me }) {
       if (context?.previous) client.setQueryData(meKey, context.previous);
       toast(`操作失败：${errorMessage(error)}`);
     },
-    onSettled: () => client.invalidateQueries({ queryKey: meKey }),
+    // The notify_* preferences filter the bell's list and unread count on the server, so both refresh with the profile.
+    onSettled: () => Promise.all([client.invalidateQueries({ queryKey: meKey }), client.invalidateQueries({ queryKey: keys.shell }), client.invalidateQueries({ queryKey: keys.notifications })]),
   });
   return <SectionCard title="通知偏好">
     {prefRows.map(row => (

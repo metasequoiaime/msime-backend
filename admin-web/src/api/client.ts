@@ -13,6 +13,8 @@ const codeMessages: Record<string, string> = {
   permission_denied: "当前角色没有执行此操作的权限。",
   owner_required: "只有配置中的所有者可以执行此操作。",
   origin_denied: "请求来源被拒绝，请从管理后台域名访问。",
+  origin_required: "请求来源与 Google 登录回调地址不一致：后台的访问地址（协议和域名）必须与 admin.google.redirect_uri 相同。",
+  admin_auth_unavailable: "暂时无法校验登录状态，请检查服务和数据库状态后重试。",
   rate_limit_exceeded: "请求过于频繁，请稍后重试。",
   not_implemented: "该功能的服务端接口尚未实现。",
   // Generic record and validation errors.

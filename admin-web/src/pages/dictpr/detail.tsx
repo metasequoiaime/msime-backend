@@ -75,9 +75,9 @@ export function PRDetailCard({ pr, repo, overrides, setOverrides, onNext, onPrev
       text: label,
       delayCommit: ({ keepalive }) => send(keepalive).then(refresh).finally(() => markOptimistic(number, null)),
       undo: () => markOptimistic(number, null),
-      onCommitError: error => {
+      // The toast provider already shows the failure.
+      onCommitError: () => {
         markOptimistic(number, null);
-        toast(`操作失败：${errorMessage(error)}`);
         void refresh();
       },
     });
