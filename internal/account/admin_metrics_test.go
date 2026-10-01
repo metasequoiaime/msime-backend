@@ -406,7 +406,9 @@ func TestStatusLeaderLock(t *testing.T) {
 		t.Fatalf("after release = %v, %v", second, err)
 	}
 	// A session that dies, as when the leader's host vanishes, frees the lock, and the old leader's check fails.
-	if _, err = db.pool.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND classid=$1 AND objsubid=2`, int64(statusLeaderLockSpace)); err != nil {
+	// pg_locks is cluster-wide and replicas of other tests or runs against the same server hold the same lock in their own schemas, so only this database and schema's lock is touched.
+	const leaderLock = `FROM pg_locks WHERE locktype='advisory' AND classid=$1 AND objsubid=2 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND objid=(hashtext(current_schema())::bigint & 4294967295)::oid`
+	if _, err = db.pool.Exec(ctx, `SELECT pg_terminate_backend(pid) `+leaderLock, int64(statusLeaderLockSpace)); err != nil {
 		t.Fatal(err)
 	}
 	if err = second.Check(ctx); err == nil {
@@ -415,7 +417,7 @@ func TestStatusLeaderLock(t *testing.T) {
 	// pg_terminate_backend only signals the backend; its lock goes when it has exited.
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		var held bool
-		if err = db.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=$1 AND objsubid=2)`, int64(statusLeaderLockSpace)).Scan(&held); err != nil {
+		if err = db.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 `+leaderLock+`)`, int64(statusLeaderLockSpace)).Scan(&held); err != nil {
 			t.Fatal(err)
 		}
 		if !held {

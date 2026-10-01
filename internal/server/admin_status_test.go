@@ -670,21 +670,26 @@ func TestStatusProbeFailover(t *testing.T) {
 	}
 	// A leader whose session dies loses the lock; the next replica to probe takes it, and the old leader does not get it back while the new one holds it.
 	c := monitoringReplica(t, func(w http.ResponseWriter, r *http.Request) {})
-	const leaderLock = `FROM pg_locks WHERE locktype='advisory' AND classid=1836282740 AND objsubid=2`
-	if _, err := admin.Exec(ctx, `SELECT pg_terminate_backend(pid) `+leaderLock); err != nil {
+	// pg_locks is cluster-wide and other tests' replicas, or other runs against the same server, hold the same lock in their own schemas, so only this database and schema's lock is touched.
+	const leaderLock = `FROM pg_locks WHERE locktype='advisory' AND granted AND classid=1836282740 AND objsubid=2 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND objid=(hashtext(current_schema())::bigint & 4294967295)::oid`
+	var pid int
+	if err := admin.QueryRow(ctx, `SELECT pid `+leaderLock).Scan(&pid); err != nil {
 		t.Fatal(err)
 	}
-	// pg_terminate_backend only signals the backend; its lock goes when it has exited.
+	if _, err := admin.Exec(ctx, `SELECT pg_terminate_backend($1)`, pid); err != nil {
+		t.Fatal(err)
+	}
+	// pg_terminate_backend only signals the backend; its lock goes when it has exited. Wait for that backend rather than for the lock to be free: c's startup probe may still be running and can take the lock the moment it is released.
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		var held bool
-		if err := admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 `+leaderLock+`)`).Scan(&held); err != nil {
+		var alive bool
+		if err := admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)`, pid).Scan(&alive); err != nil {
 			t.Fatal(err)
 		}
-		if !held {
+		if !alive {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the terminated session kept its lock")
+			t.Fatal("the terminated leader session did not exit")
 		}
 	}
 	c.statusTick(ctx, now.Add(30*time.Minute))
