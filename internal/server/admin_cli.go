@@ -43,7 +43,7 @@ func (s *Server) adminCLIStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 在代理之后所有人的 TCP 对端都是代理，`client_ip_header` 指定携带真实地址的头。
-	peer := account.ClientAddress(r, s.config.ClientIPHeader)
+	peer := account.ClientAddress(r, s.config.ClientIPHeader, s.config.siteProxySecret)
 	// Shares the "admin-login" budget with the web login start, so a source address gets 10 login starts per minute in total across both entry points and all replicas.
 	if !s.adminLimit(r.Context(), w, "admin-login", peer, 10) {
 		return

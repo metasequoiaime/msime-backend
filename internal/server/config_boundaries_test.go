@@ -340,6 +340,41 @@ func TestClientIPHeaderConfig(t *testing.T) {
 	}
 }
 
+// `site_proxy_secret_env` 指向的官网代理密钥：未配置时不启用；配置了就必须读到 32–256 个可见 ASCII 字符，否则拒绝启动；读到的值同时交给词条表单。
+func TestSiteProxySecretConfig(t *testing.T) {
+	t.Setenv("CONFIG_TEST_TOKEN", strings.Repeat("a", 32))
+	base := func() Config {
+		return Config{Clients: []Client{{ID: "local", TokenEnv: "CONFIG_TEST_TOKEN", RequestsPerMinute: 1}}}
+	}
+	c := base()
+	if err := c.Validate(); err != nil || c.siteProxySecret != "" || c.WordSubmissions.siteProxySecret != "" {
+		t.Fatal("unset secret", err, c.siteProxySecret)
+	}
+	secret := strings.Repeat("k", 32)
+	t.Setenv("CONFIG_SITE_PROXY_SECRET", secret)
+	c = base()
+	c.SiteProxySecretEnv = "CONFIG_SITE_PROXY_SECRET"
+	if err := c.Validate(); err != nil || c.siteProxySecret != secret || c.WordSubmissions.siteProxySecret != secret {
+		t.Fatal("configured secret", err)
+	}
+	for name, value := range map[string]string{
+		"missing":   "",
+		"too short": strings.Repeat("k", 31),
+		"too long":  strings.Repeat("k", 257),
+		"space":     strings.Repeat("k", 32) + " x",
+		"non-ascii": strings.Repeat("k", 32) + "密",
+	} {
+		t.Setenv("CONFIG_SITE_PROXY_SECRET", value)
+		c := base()
+		c.SiteProxySecretEnv = "CONFIG_SITE_PROXY_SECRET"
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s accepted", name)
+		} else if value != "" && strings.Contains(err.Error(), value) {
+			t.Errorf("%s: error leaks the secret", name)
+		}
+	}
+}
+
 // `auth.community.official_skin_publishers` 按完整路径严格解码，名单格式错误时无论用户体系是否启用都拒绝启动。
 func TestOfficialSkinPublishersConfig(t *testing.T) {
 	t.Setenv("CONFIG_TEST_TOKEN", strings.Repeat("a", 32))

@@ -104,6 +104,8 @@ type WordSubmissionsConfig struct {
 	ClientIPHeader string            `json:"client_ip_header"`
 	Turnstile      TurnstileConfig   `json:"turnstile"`
 	GitHub         WordsGitHubConfig `json:"github"`
+	// siteProxySecret 是顶层官网代理密钥，由 Config.Validate 写入，不是本节的配置项。
+	siteProxySecret string
 }
 
 func (c WordSubmissionsConfig) enabled() bool { return c.Turnstile.SiteKey != "" }
@@ -521,9 +523,9 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// clientAddress 是按确定后的 `client_ip_header` 计算的访客地址（见 account.ClientAddress）。
+// clientAddress 是按确定后的 `client_ip_header` 和官网代理密钥计算的访客地址（见 account.ClientAddress）。
 func (ws *wordSubmitter) clientAddress(r *http.Request) string {
-	return account.ClientAddress(r, ws.config.ClientIPHeader)
+	return account.ClientAddress(r, ws.config.ClientIPHeader, ws.config.siteProxySecret)
 }
 
 func wordCharacter(r rune) bool { return unicode.Is(unicode.Unified_Ideograph, r) || r == '〇' }

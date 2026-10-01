@@ -595,6 +595,17 @@ func TestWordSubmissionClientAddress(t *testing.T) {
 	if got := ws.clientAddress(request("10.0.0.1:1", map[string][]string{"Cf-Connecting-Ip": {"192.0.2.44"}})); got != "192.0.2.44" {
 		t.Fatal(got)
 	}
+	// 词条表单与账号接口共用官网代理密钥：密钥相符时采用代理报告的访客地址，否则忽略。
+	ws.config.siteProxySecret = strings.Repeat("s", 32)
+	proxied := func(proof string) *http.Request {
+		return request("10.0.0.1:1", map[string][]string{"Cf-Connecting-Ip": {"192.0.2.44"}, "X-MSIME-Site-Proxy": {proof}, "X-MSIME-Client-IP": {"203.0.113.9"}})
+	}
+	if got := ws.clientAddress(proxied(ws.config.siteProxySecret)); got != "203.0.113.9" {
+		t.Fatal("trusted site proxy", got)
+	}
+	if got := ws.clientAddress(proxied("wrong")); got != "192.0.2.44" {
+		t.Fatal("untrusted site proxy", got)
+	}
 }
 
 func TestWordSubmissionCreatesBranchAndPullRequest(t *testing.T) {
