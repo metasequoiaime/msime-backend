@@ -44,6 +44,8 @@ func TestWaitLockAcrossPools(t *testing.T) {
 		t.Fatal("a cancelled waiter took the lock")
 	}
 
+	// Release only after the waiter has failed at least one attempt, so the poll-then-acquire path is what runs: every attempt checks a connection out, and a second checkout means the first attempt found the lock held.
+	attempts := other.pool.Stat().AcquireCount()
 	got := make(chan error, 1)
 	go func() {
 		release, err := second.WaitLock(ctx, name, 5*time.Second)
@@ -52,7 +54,13 @@ func TestWaitLockAcrossPools(t *testing.T) {
 		}
 		got <- err
 	}()
-	time.Sleep(100 * time.Millisecond)
+	for other.pool.Stat().AcquireCount() < attempts+2 {
+		select {
+		case err = <-got:
+			t.Fatal("waiter finished while the lock was held", err)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 	release()
 	if err = <-got; err != nil {
 		t.Fatal("waiter did not get the released lock", err)
