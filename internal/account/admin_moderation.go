@@ -240,6 +240,13 @@ func actionRestoreContent(a *Service, ctx context.Context, tx pgx.Tx, v actionRe
 			return actionResult{}, err
 		}
 		changed, err = moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET moderation=COALESCE(previous_moderation,'approved'),previous_moderation=NULL,moderation_reason=NULL,moderated_by=$2,moderated_at=now()`+section.match()+` AND moderation='removed' RETURNING id,name`, ids, adminActor(ctx))
+		if err == nil && len(changed) > 0 {
+			restored := make([]string, len(changed))
+			for i, item := range changed {
+				restored[i] = item.ID
+			}
+			err = a.rescreenRestored(ctx, tx, v.Section, restored)
+		}
 	} else {
 		// moderation_reason of a row that is not removed is the automatic flag, which stays.
 		changed, err = moderationUpdate(ctx, tx, `UPDATE `+section.table+` SET moderation=$3,previous_moderation=NULL,moderated_by=$2,moderated_at=now()`+section.match()+` AND moderation<>'removed' RETURNING id,name`, ids, adminActor(ctx), to)
@@ -370,11 +377,69 @@ func screenCommunityText(ctx context.Context, matcher SensitiveMatcher, texts ..
 	if len(review) == 0 {
 		return false, nil, nil
 	}
-	text := "命中敏感词：「" + strings.Join(review, "」「") + "」"
+	text := sensitiveFlagText(review)
+	return false, &text, nil
+}
+
+// sensitiveFlagText is the automatic flag stored in moderation_reason for the matched patterns, at most 500 characters.
+func sensitiveFlagText(patterns []string) string {
+	text := "命中敏感词：「" + strings.Join(patterns, "」「") + "」"
 	if utf8.RuneCountInString(text) > 500 {
 		text = string([]rune(text)[:499]) + "…"
 	}
-	return false, &text, nil
+	return text
+}
+
+// contentScreenSQL selects, for the id in $1, the fields contentScreenText reads; content is the manifest or resource content of sections that have one.
+func contentScreenSQL(section string, table moderationTable) string {
+	content := "NULL"
+	switch section {
+	case "candidate-skins", "plugins":
+		content = "convert_from(manifest,'UTF8')"
+	case "dictionaries", "replies":
+		content = "content"
+	}
+	return `SELECT json_build_object('name',name,'description',description,'content',` + content + `) FROM ` + table.table + table.where(`id=$1`)
+}
+
+// rescreenRestored puts the automatic flag back on the items of section among ids that are pending review again after a restore or an unban. Removing an item overwrote its flag with the removal reason, so it is computed afresh from the item's text, with the preview matcher because a restore is not a new submission.
+func (a *Service) rescreenRestored(ctx context.Context, tx pgx.Tx, section string, ids []string) error {
+	table := moderationSections[section]
+	rows, err := tx.Query(ctx, `SELECT id FROM `+table.table+table.match()+` AND moderation='pending'`, ids)
+	if err != nil {
+		return err
+	}
+	pending, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	for _, id := range pending {
+		var raw json.RawMessage
+		if err = tx.QueryRow(ctx, contentScreenSQL(section, table), id).Scan(&raw); err != nil {
+			return err
+		}
+		var base map[string]json.RawMessage
+		if err = json.Unmarshal(raw, &base); err != nil {
+			return err
+		}
+		hits, err := a.SensitivePreview().Match(ctx, contentScreenText(section, base))
+		if err != nil {
+			return err
+		}
+		if len(hits) == 0 {
+			continue
+		}
+		var patterns []string
+		for _, hit := range hits {
+			if !slices.Contains(patterns, hit.Pattern) {
+				patterns = append(patterns, hit.Pattern)
+			}
+		}
+		if _, err = tx.Exec(ctx, `UPDATE `+table.table+` SET moderation_reason=$2 WHERE id=$1`, id, sensitiveFlagText(patterns)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // screenUpload screens an upload's text and answers a block-level hit with 422 blocked_content; ok false means the response is written. The returned flag goes into moderation_reason of the pending row.

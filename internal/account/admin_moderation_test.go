@@ -668,3 +668,58 @@ func TestAdminListSearchMatchesValuesOnly(t *testing.T) {
 		}
 	}
 }
+
+// Restoring a removed item that goes back to review, by restore_content or by unbanning its author, puts its automatic flag back; an approved item gets none.
+func TestRestoredPendingItemsAreScreenedAgain(t *testing.T) {
+	db, a, owner, _, call := moderationFixture(t)
+	ctx := context.Background()
+	if _, err := db.pool.Exec(ctx, `TRUNCATE admin_sensitive_words,admin_sensitive_hits`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.pool.Exec(context.Background(), `TRUNCATE admin_sensitive_words,admin_sensitive_hits`) })
+	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_sensitive_words(pattern,category,level,created_by) VALUES('春日','ad','review','test'),('墨竹','ad','review','test'),('加班','ad','review','test')`); err != nil {
+		t.Fatal(err)
+	}
+	a.sensitive.invalidate()
+	reason := func(table, id string) string {
+		_, _, r, _ := moderationState(t, db, table, id)
+		if r == nil {
+			return ""
+		}
+		return *r
+	}
+	for _, body := range []string{
+		`{"action":"remove_content","section":"skins","ids":["skin-a","skin-b"],"reason":"内容低俗"}`,
+		`{"action":"restore_content","section":"skins","ids":["skin-a","skin-b"]}`,
+	} {
+		if w := call("POST", "/api/actions", body); w.Code != 200 {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+	if got := reason("community_skins", "skin-a"); got != "命中敏感词：「春日」" {
+		t.Fatal("pending skin lost its flag", got)
+	}
+	if got := reason("community_skins", "skin-b"); got != "" {
+		t.Fatal("approved skin got a flag", got)
+	}
+	// A ban removes the pending reply and overwrites its reason; the unban restores it to review with its flag.
+	if w := call("POST", "/api/actions", `{"action":"ban_user","id":"`+owner.User.ID+`","reason":"spam"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := reason("community_resources", "reply-a"); got != banModerationReason {
+		t.Fatal(got)
+	}
+	if w := call("POST", "/api/actions", `{"action":"unban_user","id":"`+owner.User.ID+`"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := reason("community_resources", "reply-a"); got != "命中敏感词：「加班」" {
+		t.Fatal("reply lost its flag after unban", got)
+	}
+	// Restoring is not a submission, so it counts no hits.
+	a.sensitive.mu.Lock()
+	pending := len(a.sensitive.pending)
+	a.sensitive.mu.Unlock()
+	if pending != 0 {
+		t.Fatal("restores counted sensitive hits", pending)
+	}
+}

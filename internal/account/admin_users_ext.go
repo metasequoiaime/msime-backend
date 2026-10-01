@@ -165,15 +165,29 @@ func actionUnbanUser(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest
 	}
 	actor := adminActor(ctx)
 	var restored int64
+	restoredIDs := map[string][]string{}
 	for _, table := range communityModeratedTables {
 		// A row restored to pending was never reviewed, so it gets no reviewer; a row restored to approved records who put it back.
-		tag, err := tx.Exec(ctx, `UPDATE `+table+` SET moderation=COALESCE(previous_moderation,'approved'),previous_moderation=NULL,moderation_reason=NULL,
+		rows, err := tx.Query(ctx, `UPDATE `+table+` SET moderation=COALESCE(previous_moderation,'approved'),previous_moderation=NULL,moderation_reason=NULL,
  moderated_by=CASE WHEN previous_moderation='pending' THEN NULL ELSE $3 END,moderated_at=CASE WHEN previous_moderation='pending' THEN NULL ELSE now() END
- WHERE owner_id=$1 AND moderation='removed' AND moderation_reason=$2`, v.ID, banModerationReason, actor)
+ WHERE owner_id=$1 AND moderation='removed' AND moderation_reason=$2 RETURNING id`, v.ID, banModerationReason, actor)
 		if err != nil {
 			return actionResult{}, err
 		}
-		restored += tag.RowsAffected()
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return actionResult{}, err
+		}
+		restored += int64(len(ids))
+		restoredIDs[table] = ids
+	}
+	// The ban overwrote each removed row's automatic flag; rows back in review get it again. The resources table holds two sections, and each section only touches its own kind.
+	for section, table := range moderationSections {
+		if ids := restoredIDs[table.table]; len(ids) > 0 {
+			if err = a.rescreenRestored(ctx, tx, section, ids); err != nil {
+				return actionResult{}, err
+			}
+		}
 	}
 	detail := map[string]any{"name": name, "restored": restored}
 	if v.Reason != "" {
