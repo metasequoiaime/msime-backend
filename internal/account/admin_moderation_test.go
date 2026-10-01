@@ -638,3 +638,33 @@ func TestModerationUndoKeepsFlagsAndNeverRevivesRemovals(t *testing.T) {
 		t.Fatal(detail)
 	}
 }
+
+// The page search matches what a moderator sees, not the shape of the row: field names and a skin's design never match, names and other values do.
+func TestAdminListSearchMatchesValuesOnly(t *testing.T) {
+	_, _, _, _, call := moderationFixture(t)
+	total := func(path string) int {
+		w := call("GET", path, "")
+		var page struct {
+			Total int `json:"total"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatal(path, w.Code, w.Body.String())
+		}
+		return page.Total
+	}
+	for path, want := range map[string]int{
+		"/api/skins?q=keyBackground":  0, // a design key
+		"/api/skins?q=15266027":       0, // a design value
+		"/api/skins?q=moderation":     0, // a column name
+		"/api/skins?q=樱":              1,
+		"/api/skins?q=skin-b":         1,
+		"/api/skins?q=pending":        1,
+		"/api/dictionaries?q=entries": 0,
+		"/api/dictionaries?q=防抖":      1, // the preview entries stay searchable
+		"/api/replies?q=加班":           1,
+	} {
+		if got := total(path); got != want {
+			t.Errorf("%s: %d want %d", path, got, want)
+		}
+	}
+}

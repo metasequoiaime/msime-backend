@@ -144,10 +144,15 @@ func (a *Service) adminList(w http.ResponseWriter, r *http.Request, list adminLi
 			return
 		}
 	}
+	// The page search matches field values only, never the field names, and skips the list's unsearched fields.
+	searched := "to_jsonb(x)"
+	if len(list.unsearched) > 0 {
+		searched += " - '{" + strings.Join(list.unsearched, ",") + "}'::text[]"
+	}
 	var result json.RawMessage
 	err := a.store.pool.QueryRow(r.Context(), `WITH filtered AS MATERIALIZED (
  SELECT to_jsonb(x) AS item, created_at, id FROM (`+list.query+`) x
- WHERE ($1='' OR to_jsonb(x)::text ILIKE '%'||$1||'%')`+conditions+`
+ WHERE ($1='' OR EXISTS(SELECT 1 FROM jsonb_each_text(`+searched+`) e WHERE e.value ILIKE '%'||$1||'%'))`+conditions+`
 ), selected AS (SELECT * FROM filtered ORDER BY created_at DESC,id DESC LIMIT 50 OFFSET $2)
 SELECT json_build_object('items', COALESCE((SELECT json_agg(item ORDER BY created_at DESC,id DESC) FROM selected),'[]'::json),
  'page',$3::int,'total',(SELECT count(*) FROM filtered),'has_more',(SELECT count(*) FROM filtered)>$2+50)`, args...).Scan(&result)

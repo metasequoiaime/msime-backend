@@ -33,8 +33,9 @@ const authorColumn = `COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'
 var (
 	// The skin design travels without its photo, so the console can draw the keyboard preview on each card.
 	skinsList = adminList{
-		query:   `SELECT s.id,s.name,s.description,s.owner_id,` + authorColumn + `,s.created_at,s.design-'photo' AS design,(SELECT count(*) FROM community_skin_downloads WHERE skin_id=s.id) AS downloads,` + moderationColumns("s", "skins") + ` FROM community_skins s JOIN auth_users u ON u.id=s.owner_id`,
-		filters: []listFilter{statusFilter},
+		query:      `SELECT s.id,s.name,s.description,s.owner_id,` + authorColumn + `,s.created_at,s.design-'photo' AS design,(SELECT count(*) FROM community_skin_downloads WHERE skin_id=s.id) AS downloads,` + moderationColumns("s", "skins") + ` FROM community_skins s JOIN auth_users u ON u.id=s.owner_id`,
+		filters:    []listFilter{statusFilter},
+		unsearched: []string{"design"},
 	}
 	// Candidate skins hold both the public gallery and each account's private library, so moderation can list either one.
 	candidateSkinsList = adminList{

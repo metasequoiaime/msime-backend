@@ -132,6 +132,8 @@ type adminList struct {
 	// args, when set, supplies extra query arguments from the service configuration (never from the request). They follow the runner's own $1 search, $2 offset and $3 page, so the first is $4, and come before the filter arguments.
 	args    func(*Service) []any
 	filters []listFilter
+	// unsearched names row fields the page search skips, such as a skin's design, whose nested keys and numbers would otherwise match almost any query. Each is a fixed identifier, never request text.
+	unsearched []string
 }
 
 // listFilter maps one query parameter onto one field of the listed rows. A parameter that some list accepts but this one does not is 400 invalid_filter.
