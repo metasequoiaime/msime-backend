@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -556,11 +557,13 @@ func (a *Service) rescreenRestored(ctx context.Context, tx pgx.Tx, section strin
 	return nil
 }
 
-// screenUpload screens an upload's text and answers a block-level hit with 422 blocked_content; ok false means the response is written. The returned flag goes into moderation_reason of the pending row.
+// screenUpload 检查上传内容的文本，命中拦截级规则时返回 422 `blocked_content`；ok 为 false 表示响应已写出。规则无法加载时以 503 `screening_unavailable` 和 `Retry-After` 拒绝上传（与官网词条表单用的错误码相同），客户端据此提示作者稍后重试，而不是报告账号服务故障。返回的 flag 写入待复核行的 `moderation_reason`。
 func (a *Service) screenUpload(w http.ResponseWriter, r *http.Request, texts ...string) (flag *string, ok bool) {
 	blocked, flag, err := screenCommunityText(r.Context(), a.Sensitive(), texts...)
 	if err != nil {
-		a.error(w, err)
+		slog.Error("community upload: sensitive word list unavailable", "reason", err.Error())
+		w.Header().Set("Retry-After", "30")
+		writeError(w, 503, "screening_unavailable")
 		return nil, false
 	}
 	if blocked {

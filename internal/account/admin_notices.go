@@ -227,6 +227,8 @@ func (a *Service) PublicNotices(w http.ResponseWriter, r *http.Request) {
 	}
 	query := r.URL.Query()
 	platform, channel := query.Get("platform"), query.Get("channel")
+	// 客户端对平台的叫法不一（win、darwin、ipados、harmonyos、ohos），别名映射到后台投放用的平台 ID，其他值仍然报错。
+	platform = canonicalPlatform(platform)
 	if platform != "" && !slices.Contains(noticePlatforms, platform) {
 		writeError(w, 400, "invalid_platform")
 		return

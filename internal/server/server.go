@@ -100,6 +100,7 @@ func New(c Config) (*Server, error) {
 	}
 	s.initAdminGoogle()
 	s.accounts.ConfigureEngine(c.Engine)
+	s.accounts.ConfigureClientIPHeader(c.ClientIPHeader)
 	if c.Admin.Enabled {
 		s.accounts.ConfigureAdmin(s.adminAccountSettings())
 		s.accounts.ConfigureNoticeBroadcaster(s.noticeBroadcaster())
@@ -130,7 +131,8 @@ func New(c Config) (*Server, error) {
 		w.Write(skins.License())
 	})
 	account.Mount(mux, s.accounts)
-	mux.HandleFunc("POST /v1/telemetry/events", s.accounts.Telemetry)
+	// 匿名遥测：account.IsPath 让它绕过 Bearer 认证，Route 计入它独立的按地址额度。
+	mux.HandleFunc("POST "+account.TelemetryPath, account.Route(s.accounts, "POST "+account.TelemetryPath, (*account.Service).Telemetry))
 	// Console-managed public data: the live notices feed needs no credentials, a content report needs a signed-in user (the /v1/community/ prefix skips Bearer authentication in the middleware and the handler checks the session itself).
 	mux.HandleFunc("GET "+noticesPath, account.Route(s.accounts, "GET "+noticesPath, (*account.Service).PublicNotices))
 	mux.HandleFunc("POST /v1/community/reports", account.Route(s.accounts, "POST /v1/community/reports", (*account.Service).CommunityReport))

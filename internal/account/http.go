@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/mail"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -49,6 +50,9 @@ type Service struct {
 	admin       AdminSettings
 	sensitive   sensitiveWords
 	broadcaster NoticeBroadcaster
+
+	// clientIPHeader 是受信任的反向代理写入访客地址的头（顶层 `client_ip_header`），为空时只信任 TCP 对端。在开始服务前由 ConfigureClientIPHeader 设置一次。
+	clientIPHeader string
 }
 
 func New(ctx context.Context, c Config) (*Service, error) {
@@ -127,6 +131,13 @@ func (a *Service) maintain(lifetime context.Context) {
 	}
 }
 
+// ConfigureClientIPHeader 在构建服务端时、开始处理请求前调用一次，传入校验过的顶层 `client_ip_header`。
+func (a *Service) ConfigureClientIPHeader(header string) {
+	if a != nil {
+		a.clientIPHeader = header
+	}
+}
+
 // ConfigureEngine is called once during server construction, before serving requests.
 func (a *Service) ConfigureEngine(c engine.Config) {
 	if a != nil {
@@ -150,8 +161,43 @@ func (a *Service) Authenticate(ctx context.Context, token string) (Principal, er
 func (a *Service) RateLimit(ctx context.Context, scope, subject string, limit int, window time.Duration) error {
 	return a.store.Rate(ctx, scope+":"+hash(subject), limit, window)
 }
+
+// ClientAddress 返回请求的限流主体。在代理之后 TCP 对端是代理，所以 header 指定的头（由代理写入，例如 `CF-Connecting-IP`）含有地址时以它为准；`X-Forwarded-For` 这类列表取最后一项，即最近的代理追加的那一项。IPv6 访客按 /64 归组，这是单个用户通常能控制的最小地址块。header 为空时只信任 TCP 对端，因为客户端可以自己带任何头。
+func ClientAddress(r *http.Request, header string) string {
+	candidate := ""
+	if header != "" {
+		if values := r.Header.Values(header); len(values) > 0 {
+			candidate = values[len(values)-1]
+			if i := strings.LastIndexByte(candidate, ','); i >= 0 {
+				candidate = candidate[i+1:]
+			}
+		}
+	}
+	address, err := netip.ParseAddr(strings.TrimSpace(candidate))
+	if err != nil {
+		host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+		if splitErr != nil {
+			host = r.RemoteAddr
+		}
+		if address, err = netip.ParseAddr(host); err != nil {
+			return host
+		}
+	}
+	address = address.Unmap()
+	if address.Is6() {
+		prefix, _ := address.Prefix(64)
+		return prefix.String()
+	}
+	return address.String()
+}
+
+// clientAddress 是按配置的 `client_ip_header` 计算的 ClientAddress。
+func (a *Service) clientAddress(r *http.Request) string {
+	return ClientAddress(r, a.clientIPHeader)
+}
+
 func IsPath(path string) bool {
-	return strings.HasPrefix(path, "/v1/community/") || path == siteDownloadMirrorsPath || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
+	return strings.HasPrefix(path, "/v1/community/") || path == siteDownloadMirrorsPath || path == TelemetryPath || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
 }
 
 // accountRouteTimeout is the context each mounted route runs under: 15 s, except the transfers whose body alone can take longer: the dictionary snapshot restore, a candidate-skin publish or replacement, and a plugin pack publish or download.
@@ -168,11 +214,13 @@ func accountRouteTimeout(pattern string) time.Duration {
 	}
 }
 
-// accountRouteRate returns the per-address bucket and its per-minute limit for pattern. The public cacheable feeds that every app and website visitor polls get their own, larger bucket so that polling behind a shared proxy cannot use up the quota that login, refresh and the community endpoints draw from.
+// accountRouteRate 返回 pattern 对应的按地址额度及其每分钟上限。每个 App 和官网访客都会拉取的可缓存公开接口用一份更大的独立额度，匿名遥测用一份更小的独立额度，两者都不会挤占登录、刷新令牌和社区接口的额度。
 func accountRouteRate(pattern string) (string, int) {
 	switch pattern {
 	case "GET " + NoticesPath, "GET " + siteDownloadMirrorsPath:
 		return "feed-ip:", publicFeedRateLimit
+	case "POST " + TelemetryPath:
+		return "telemetry-ip:", telemetryRateLimit
 	default:
 		return "ip:", 120
 	}
@@ -262,13 +310,9 @@ func Route(a *Service, pattern string, method func(*Service, http.ResponseWriter
 		ctx, cancel := context.WithTimeout(r.Context(), accountRouteTimeout(pattern))
 		defer cancel()
 		r = r.WithContext(ctx)
-		host, _, e := net.SplitHostPort(r.RemoteAddr)
-		if e != nil {
-			host = r.RemoteAddr
-		}
-		// 默认只信任 TCP 对端，不使用可伪造的转发头。代理配置见部署文档。
+		// 除非 `client_ip_header` 指定了反向代理会覆盖写入的头，否则只信任 TCP 对端，见 docs/user-auth.md。
 		scope, limit := accountRouteRate(pattern)
-		if e = a.store.Rate(ctx, scope+hash(host), limit, time.Minute); e != nil {
+		if e := a.store.Rate(ctx, scope+hash(a.clientAddress(r)), limit, time.Minute); e != nil {
 			a.error(w, e)
 			return
 		}
@@ -423,12 +467,8 @@ func (a *Service) begin(w http.ResponseWriter, r *http.Request) {
 		if limit <= 0 {
 			limit = 5
 		}
-		host, hostErr := "", error(nil)
-		if host, _, hostErr = net.SplitHostPort(r.RemoteAddr); hostErr != nil {
-			host = r.RemoteAddr
-		}
-		// 和上面的通用限流一样只信任 TCP 对端,转发头可伪造。
-		if e := a.store.Rate(r.Context(), "anonymous:"+hash(host), limit, 24*time.Hour); e != nil {
+		// 和上面的通用限流一样按 clientAddress 计：默认只信任 TCP 对端，配置了 `client_ip_header` 才读代理写入的头。
+		if e := a.store.Rate(r.Context(), "anonymous:"+hash(a.clientAddress(r)), limit, 24*time.Hour); e != nil {
 			a.error(w, e)
 			return
 		}

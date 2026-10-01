@@ -89,7 +89,9 @@ type Config struct {
 	MaxConcurrent        int                   `json:"max_concurrent"`
 	TimeoutSeconds       int                   `json:"timeout_seconds"`
 	AllowedOrigins       []string              `json:"allowed_origins"`
-	WordSubmissions      WordSubmissionsConfig `json:"word_submissions"`
+	// ClientIPHeader 是受信任的反向代理用访客地址覆盖写入的头（例如 Cloudflare 之后的 `CF-Connecting-IP`，或 `X-Real-IP`；`X-Forwarded-For` 取最后一项）。所有按地址的限额都用它：账号接口、匿名开户、匿名遥测、后台登录限额和官网词条投稿。为空时只信任 TCP 对端，在代理之后会让所有客户端共用一份额度。只有代理会覆盖这个头时才设置，因为客户端可以自己带它。旧的 `word_submissions.client_ip_header` 仍作为别名接受。
+	ClientIPHeader  string                `json:"client_ip_header"`
+	WordSubmissions WordSubmissionsConfig `json:"word_submissions"`
 	// Replicas is how many server processes share the fleet-wide request budget; the main token bucket lives in each process's memory, so every replica enforces its share of each limit.
 	Replicas int `json:"replicas"`
 }
@@ -259,12 +261,31 @@ func (c *Config) Validate() error {
 			return errors.New("allowed_origins must contain HTTPS origins")
 		}
 	}
+	if err := c.resolveClientIPHeader(); err != nil {
+		return err
+	}
 	if err := c.WordSubmissions.validate(c.Auth.Enabled, c.AllowedOrigins); err != nil {
 		return err
 	}
 	if c.Admin.Enabled && c.Admin.GitHub.enabled() && c.WordSubmissions.enabled() && !strings.EqualFold(c.Admin.GitHub.DictionaryRepo, c.WordSubmissions.GitHub.Repository) {
 		return errors.New("admin github dictionary_repo must be the word_submissions github repository: submission notes are matched to pull requests by number")
 	}
+	return nil
+}
+
+// resolveClientIPHeader 确定所有按地址限额共用的那一个客户端地址头：顶层 `client_ip_header`，或只设置了旧的 `word_submissions.client_ip_header` 时用后者。两者都设置且不同时拒绝，否则各项限额对客户端身份的判断会不一致。
+func (c *Config) resolveClientIPHeader() error {
+	top, words := c.ClientIPHeader, c.WordSubmissions.ClientIPHeader
+	if top != "" && words != "" && !strings.EqualFold(top, words) {
+		return errors.New("client_ip_header and word_submissions.client_ip_header name different headers; set only the top-level client_ip_header")
+	}
+	if top == "" {
+		top = words
+	}
+	if top != "" && !headerNamePattern.MatchString(top) {
+		return errors.New("client_ip_header must be a header name")
+	}
+	c.ClientIPHeader, c.WordSubmissions.ClientIPHeader = top, top
 	return nil
 }
 

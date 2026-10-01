@@ -90,6 +90,8 @@ func TestEveryAccountRouteAuthenticationAndDisabledService(t *testing.T) {
 	// The server package registers the report route with Route instead of Mount; register it the same way so it meets the same contract.
 	mux.HandleFunc("POST /v1/community/reports", Route(a, "POST /v1/community/reports", (*Service).CommunityReport))
 	disabled.HandleFunc("POST /v1/community/reports", Route(nil, "POST /v1/community/reports", (*Service).CommunityReport))
+	mux.HandleFunc("POST "+TelemetryPath, Route(a, "POST "+TelemetryPath, (*Service).Telemetry))
+	disabled.HandleFunc("POST "+TelemetryPath, Route(nil, "POST "+TelemetryPath, (*Service).Telemetry))
 	n := 0
 	for path, methods := range spec.Paths {
 		// The website word form is mounted by the server package and covered by its word submission tests.
@@ -113,6 +115,10 @@ func TestEveryAccountRouteAuthenticationAndDisabledService(t *testing.T) {
 				if path == "/v1/community/resources" {
 					concrete += "?kind=dictionary"
 				}
+			}
+			// 遥测完全不需要凭据：空事件因内容不合法被拒绝，带不带令牌都一样。
+			if path == TelemetryPath {
+				expected = 400
 			}
 			t.Run(method+" "+path, func(t *testing.T) {
 				verb := strings.ToUpper(method)
@@ -226,6 +232,7 @@ func TestEveryAccountJSONBodyRejectsMalformedInput(t *testing.T) {
 	mux := http.NewServeMux()
 	Mount(mux, &Service{store: db})
 	mux.HandleFunc("POST /v1/community/reports", Route(&Service{store: db}, "POST /v1/community/reports", (*Service).CommunityReport))
+	mux.HandleFunc("POST "+TelemetryPath, Route(&Service{store: db}, "POST "+TelemetryPath, (*Service).Telemetry))
 	count := 0
 	for path, methods := range spec.Paths {
 		// The website word form is mounted by the server package; its malformed-body cases are in TestWordSubmissionValidation there.
@@ -269,5 +276,75 @@ func TestEveryAccountJSONBodyRejectsMalformedInput(t *testing.T) {
 	}
 	if count == 0 {
 		t.Fatal("no JSON request bodies checked")
+	}
+}
+
+func TestClientAddress(t *testing.T) {
+	request := func(remote string, headers map[string][]string) *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		for name, values := range headers {
+			for _, v := range values {
+				r.Header.Add(name, v)
+			}
+		}
+		return r
+	}
+	spoofed := map[string][]string{"CF-Connecting-IP": {"203.0.113.9"}, "X-Forwarded-For": {"203.0.113.9"}}
+	for _, tc := range []struct {
+		header, remote string
+		headers        map[string][]string
+		want           string
+	}{
+		// 没有配置头时只认 TCP 对端，不管客户端带了什么。
+		{"", "198.51.100.7:1", spoofed, "198.51.100.7"},
+		{"", "[2001:db8:1:2:3:4:5:6]:1", nil, "2001:db8:1:2::/64"},
+		{"", "[::ffff:198.51.100.7]:1", nil, "198.51.100.7"},
+		{"", "not-an-address", nil, "not-an-address"},
+		// X-Forwarded-For：取最后一项，即最近的代理追加的那一项。
+		{"X-Forwarded-For", "10.0.0.1:1", map[string][]string{"X-Forwarded-For": {"192.0.2.1, 192.0.2.2", "192.0.2.3, 203.0.113.5"}}, "203.0.113.5"},
+		{"X-Forwarded-For", "10.0.0.1:1", map[string][]string{"X-Forwarded-For": {"garbage"}}, "10.0.0.1"},
+		{"CF-Connecting-IP", "10.0.0.1:1", map[string][]string{"Cf-Connecting-Ip": {"192.0.2.44"}}, "192.0.2.44"},
+		{"CF-Connecting-IP", "10.0.0.1:1", map[string][]string{"CF-Connecting-IP": {"2001:db8:aa:bb:1::1"}}, "2001:db8:aa:bb::/64"},
+		// 配置了头但请求里没有时，退回 TCP 对端。
+		{"CF-Connecting-IP", "10.0.0.1:1", nil, "10.0.0.1"},
+	} {
+		if got := ClientAddress(request(tc.remote, tc.headers), tc.header); got != tc.want {
+			t.Errorf("ClientAddress(%s via %q) = %q, want %q", tc.remote, tc.header, got, tc.want)
+		}
+	}
+}
+
+// 在代理之后，账号接口和匿名开户按代理报告的地址计，代理后面的客户端不会共用一份额度。
+func TestAccountRateLimitsUseConfiguredClientIPHeader(t *testing.T) {
+	db := testStore(t)
+	t.Setenv("ANON_HEADER_PEPPER", strings.Repeat("p", 32))
+	a := &Service{store: db, clientIPHeader: "CF-Connecting-IP", config: Config{PepperEnv: "ANON_HEADER_PEPPER", Anonymous: AnonymousConfig{Enabled: true, DailyPerAddress: 1}}}
+	if _, err := db.pool.Exec(t.Context(), `DELETE FROM auth_rates WHERE key LIKE 'anonymous:%' OR key LIKE 'ip:%'`); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	challenge := func(client, subject string) int {
+		r := httptest.NewRequest("POST", "/v1/auth/challenges", strings.NewReader(`{"provider":"anonymous","target":"`+subject+`"}`))
+		r.RemoteAddr = "10.0.0.1:443"
+		r.Header.Set("CF-Connecting-IP", client)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := challenge("198.51.100.30", "msime-header-000001"); code != 201 {
+		t.Fatal(code)
+	}
+	if code := challenge("198.51.100.31", "msime-header-000002"); code != 201 {
+		t.Fatal("a second client behind the same proxy was refused", code)
+	}
+	if code := challenge("198.51.100.30", "msime-header-000003"); code != 429 {
+		t.Fatal("the daily per-address limit did not apply to the reported client", code)
+	}
+	var keys int
+	if err := db.pool.QueryRow(t.Context(), `SELECT count(*) FROM auth_rates WHERE key LIKE 'ip:%'`).Scan(&keys); err != nil || keys != 2 {
+		t.Fatal("route bucket not keyed by client address", keys, err)
 	}
 }

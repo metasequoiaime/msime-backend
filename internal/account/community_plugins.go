@@ -95,6 +95,9 @@ type CommunityPlugin struct {
 	Owned         bool      `json:"owned"`
 	MyRating      int       `json:"my_rating"`
 	CreatedAt     time.Time `json:"created_at"`
+	// Moderation 是审核状态，只出现在作者自己的作品上，且只在带 `fields=moderation` 时出现（见 communityFields）。
+	Moderation string `json:"moderation,omitempty"`
+	moderation string
 }
 
 const pluginSelect = `SELECT p.id,p.kind,p.plugin_id,p.name,p.description,
@@ -102,12 +105,13 @@ const pluginSelect = `SELECT p.id,p.kind,p.plugin_id,p.name,p.description,
  (SELECT count(*) FROM community_plugin_downloads WHERE pack_id=p.id),
  (SELECT count(*) FROM community_plugin_ratings WHERE pack_id=p.id),
  COALESCE((SELECT avg(stars) FROM community_plugin_ratings WHERE pack_id=p.id),0),
- p.owner_id=$1,COALESCE((SELECT stars FROM community_plugin_ratings WHERE pack_id=p.id AND user_id=$1),0),p.created_at
+ p.owner_id=$1,COALESCE((SELECT stars FROM community_plugin_ratings WHERE pack_id=p.id AND user_id=$1),0),p.created_at,
+ CASE WHEN p.owner_id=$1 THEN p.moderation ELSE '' END
  FROM community_plugins p JOIN auth_users u ON u.id=p.owner_id `
 
 func scanCommunityPlugin(row interface{ Scan(...any) error }) (CommunityPlugin, error) {
 	var p CommunityPlugin
-	err := row.Scan(&p.ID, &p.Kind, &p.PluginID, &p.Name, &p.Description, &p.Author, &p.Version, &p.License, &p.Size, &p.SHA256, &p.Downloads, &p.RatingCount, &p.RatingAverage, &p.Owned, &p.MyRating, &p.CreatedAt)
+	err := row.Scan(&p.ID, &p.Kind, &p.PluginID, &p.Name, &p.Description, &p.Author, &p.Version, &p.License, &p.Size, &p.SHA256, &p.Downloads, &p.RatingCount, &p.RatingAverage, &p.Owned, &p.MyRating, &p.CreatedAt, &p.moderation)
 	return p, err
 }
 
@@ -149,7 +153,22 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_kind")
 		return
 	}
-	rows, e := a.store.pool.Query(r.Context(), pluginSelect+`WHERE strpos(lower(p.name),lower($2))>0 AND ($3='' OR p.kind=$3) AND (p.moderation<>'removed' OR p.owner_id=$1) ORDER BY p.created_at DESC,p.id LIMIT 21 OFFSET $4`, a.communityViewer(r), search, kind, offset)
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != "mine" {
+		writeError(w, 400, "invalid_scope")
+		return
+	}
+	fields, ok := communityFields(r, "moderation")
+	if !ok {
+		writeError(w, 400, "invalid_fields")
+		return
+	}
+	viewer := a.communityViewer(r)
+	if scope == "mine" && viewer == "" {
+		writeError(w, 401, "user_session_required")
+		return
+	}
+	rows, e := a.store.pool.Query(r.Context(), pluginSelect+`WHERE strpos(lower(p.name),lower($2))>0 AND ($3='' OR p.kind=$3) AND ($5='' OR p.owner_id=$1) AND (p.moderation<>'removed' OR p.owner_id=$1) ORDER BY p.created_at DESC,p.id LIMIT 21 OFFSET $4`, viewer, search, kind, offset, scope)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -162,6 +181,7 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 			a.error(w, e)
 			return
 		}
+		v.Moderation = ownerModeration(fields, v.moderation)
 		items = append(items, v)
 	}
 	if e = rows.Err(); e != nil {
@@ -176,6 +196,11 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Service) communityPluginDetail(w http.ResponseWriter, r *http.Request) {
+	fields, ok := communityFields(r, "moderation")
+	if !ok {
+		writeError(w, 400, "invalid_fields")
+		return
+	}
 	v, e := scanCommunityPlugin(a.store.pool.QueryRow(r.Context(), pluginSelect+`WHERE p.id=$2 AND (p.moderation<>'removed' OR p.owner_id=$1)`, a.communityViewer(r), r.PathValue("id")))
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "plugin_not_found")
@@ -185,6 +210,7 @@ func (a *Service) communityPluginDetail(w http.ResponseWriter, r *http.Request) 
 		a.error(w, e)
 		return
 	}
+	v.Moderation = ownerModeration(fields, v.moderation)
 	write(w, 200, v)
 }
 

@@ -95,6 +95,9 @@ type CommunityCandidateSkin struct {
 	Visibility    string               `json:"visibility,omitempty"`
 	UpdatedAt     time.Time            `json:"updated_at,omitzero"`
 	RequestSHA256 string               `json:"request_sha256,omitempty"`
+	// Moderation 是审核状态，只出现在作者自己的作品上，且只在带 `fields=moderation` 时出现（见 communityFields）。
+	Moderation string `json:"moderation,omitempty"`
+	moderation string
 	// Category 是图库分类，同样只在客户端用 include=category 声明支持时出现（见 candidateItem）。
 	Category string `json:"category,omitempty"`
 }
@@ -136,15 +139,9 @@ func candidateLegacy(v CommunityCandidateSkin) CommunityCandidateSkin {
 	return v
 }
 
-// candidateSyncFields reads the fields=sync opt-in of list and detail; ok is false for any other non-empty value.
-func candidateSyncFields(r *http.Request) (sync bool, ok bool) {
-	switch r.URL.Query().Get("fields") {
-	case "":
-		return false, true
-	case "sync":
-		return true, true
-	}
-	return false, false
+// candidateFields 读取列表和详情的 `fields=` 开关：sync（同步字段和作者的私有作品）与 moderation，可单独使用，也可写成 `fields=sync,moderation`；出现其他名称时 ok 为 false。
+func candidateFields(r *http.Request) (fields map[string]bool, ok bool) {
+	return communityFields(r, "sync", "moderation")
 }
 
 const candidateSelect = `SELECT s.id,s.package_id,s.name,s.description,
@@ -154,13 +151,14 @@ const candidateSelect = `SELECT s.id,s.package_id,s.name,s.description,
  (SELECT count(*) FROM community_candidate_skin_ratings WHERE skin_id=s.id),
  COALESCE((SELECT avg(stars) FROM community_candidate_skin_ratings WHERE skin_id=s.id),0),
  s.owner_id=$1,COALESCE((SELECT stars FROM community_candidate_skin_ratings WHERE skin_id=s.id AND user_id=$1),0),s.created_at,
- s.visibility,s.updated_at,CASE WHEN s.owner_id=$1 THEN s.request_sha256 ELSE '' END,s.category
+ s.visibility,s.updated_at,CASE WHEN s.owner_id=$1 THEN s.request_sha256 ELSE '' END,s.category,
+ CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END
  FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id
  CROSS JOIN LATERAL (SELECT COALESCE(sum(size),0) AS size,count(*) AS files FROM community_candidate_skin_files WHERE skin_id=s.id) f `
 
 func scanCandidateSkin(row interface{ Scan(...any) error }) (CommunityCandidateSkin, error) {
 	var s CommunityCandidateSkin
-	err := row.Scan(&s.ID, &s.PackageID, &s.Name, &s.Description, &s.Author, &s.Version, &s.License.Code, &s.License.Assets, &s.License.Source, &s.Size, &s.FileCount, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.CreatedAt, &s.Visibility, &s.UpdatedAt, &s.RequestSHA256, &s.Category)
+	err := row.Scan(&s.ID, &s.PackageID, &s.Name, &s.Description, &s.Author, &s.Version, &s.License.Code, &s.License.Assets, &s.License.Source, &s.Size, &s.FileCount, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.CreatedAt, &s.Visibility, &s.UpdatedAt, &s.RequestSHA256, &s.Category, &s.moderation)
 	return s, err
 }
 
@@ -400,11 +398,12 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, "invalid_scope")
 		return
 	}
-	sync, ok := candidateSyncFields(r)
+	fields, ok := candidateFields(r)
 	if !ok {
 		writeError(w, 400, "invalid_fields")
 		return
 	}
+	sync := fields["sync"]
 	category := r.URL.Query().Get("category")
 	if category != "" && !validCandidateSkinCategory(category) {
 		writeError(w, 400, "invalid_category")
@@ -434,7 +433,9 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 			a.error(w, e)
 			return
 		}
-		items = append(items, candidateItem(v, sync, withCategory))
+		v = candidateItem(v, sync, withCategory)
+		v.Moderation = ownerModeration(fields, v.moderation)
+		items = append(items, v)
 	}
 	if e = rows.Err(); e != nil {
 		a.error(w, e)
@@ -447,11 +448,12 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 	write(w, 200, map[string]any{"skins": items, "has_more": more})
 }
 func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Request) {
-	sync, ok := candidateSyncFields(r)
+	fields, ok := candidateFields(r)
 	if !ok {
 		writeError(w, 400, "invalid_fields")
 		return
 	}
+	sync := fields["sync"]
 	withCategory, ok := candidateIncludeCategory(r)
 	if !ok {
 		writeError(w, 400, "invalid_include")
@@ -467,7 +469,9 @@ func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Reques
 		a.error(w, e)
 		return
 	}
-	write(w, 200, candidateItem(v, sync, withCategory))
+	v = candidateItem(v, sync, withCategory)
+	v.Moderation = ownerModeration(fields, v.moderation)
+	write(w, 200, v)
 }
 func (a *Service) communityCandidatePreview(w http.ResponseWriter, r *http.Request) {
 	var path string
