@@ -1,11 +1,10 @@
 schema_version = 1
 kind = "phrase_table"
-id = "fixture-phrases"
-name = "Fixture"
+id = "office-phrases"
+name = "办公短语"
 version = "1.0.0"
 license = "CC0-1.0"
-author = "MSIME"
-description = "Shared parser fixture"
+author = "Fixture"
 permissions = []
 
 [[phrases]]
@@ -18,4 +17,8 @@ text = "电话号码"
 
 [[phrases]]
 key = "yx"
-text = "邮箱：user@example.com"
+text = "someone@example.com"
+
+[[phrases]]
+key = "zfh"
+text = "😀 表情也可以"

@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// pluginFixtureRoot 存放与客户端解析器共用的插件包 fixture：valid/<用例>/ 下的每个目录都必须被接受，invalid/<用例>/ 下的每个目录都必须被拒绝。客户端仓库的 plugins 测试放着同样内容的一份，两边对同一批包给出相同结论，Go 校验器才算精确镜像了客户端语法。
+// pluginFixtureRoot 存放与客户端解析器共用的插件包 fixture：valid/<kind>-<用例>/ 下的每个目录都必须被接受且类型与目录名前缀一致，invalid/<kind>-<用例>/ 下的每个目录都必须被拒绝。客户端仓库的 crates/client-core/tests/fixtures/plugin-packs 放着同样内容的一份，两边对同一批包给出相同结论，Go 校验器才算精确镜像了客户端语法。
 const pluginFixtureRoot = "testdata/plugin-packs"
 
 // pluginFixtureZip 把一个 fixture 目录按文件名排序打成 zip，文件放在 zip 根部。
@@ -50,15 +50,17 @@ func TestPluginFixturePacks(t *testing.T) {
 				if group == "invalid" && code == "" {
 					t.Fatal("accepted", pack.Kind, pack.ID)
 				}
-				if group == "valid" && !slices.Contains(pluginKinds, pack.Kind) {
+				kind, _, _ := strings.Cut(entry.Name(), "-")
+				if group == "valid" && pack.Kind != kind {
 					t.Fatal(pack.Kind)
 				}
 			})
-			seen[group+"/"+strings.SplitN(entry.Name(), "-", 2)[0]]++
+			kind, _, _ := strings.Cut(entry.Name(), "-")
+			seen[group+"/"+kind]++
 		}
 	}
 	// 每种新类型都至少有一个接受和一个拒绝的用例，fixture 目录被误删时测试不会悄悄变空。
-	for _, prefix := range []string{"phrase", "helpcode", "wordbook", "symbol"} {
+	for _, prefix := range []string{"phrase_table", "helpcode", "wordbook", "symbol_set"} {
 		if seen["valid/"+prefix] == 0 || seen["invalid/"+prefix] == 0 {
 			t.Fatal("fixtures missing for", prefix, seen)
 		}
@@ -171,8 +173,7 @@ func TestCommunityPluginKindsDeclaration(t *testing.T) {
 	// 每种新类型发布一个包，走完整的发布路径，同时证明数据库约束接受它们。
 	newKinds := map[string]string{}
 	for i, kind := range []string{"phrase_table", "helpcode", "wordbook", "symbol_set"} {
-		dir := map[string]string{"phrase_table": "phrase-table-basic", "helpcode": "helpcode-basic", "wordbook": "wordbook-basic", "symbol_set": "symbol-set-basic"}[kind]
-		archive := pluginFixtureZip(t, filepath.Join(pluginFixtureRoot, "valid", dir))
+		archive := pluginFixtureZip(t, filepath.Join(pluginFixtureRoot, "valid", kind+"-basic"))
 		pack, code := validPluginArchive(archive)
 		if code != "" {
 			t.Fatal(kind, code)
