@@ -194,6 +194,19 @@ func (a *Service) resourcePublish(w http.ResponseWriter, r *http.Request) {
 		a.error(w, err)
 		return
 	}
+	// A retry of a publication that already committed is answered before screening, so a word added to the list since then cannot turn the retry of live content into 422 or count its hits again. The locked probe in the transaction stays authoritative.
+	var owner, kind string
+	var revision int
+	var same bool
+	err = a.store.pool.QueryRow(r.Context(), `SELECT owner_id,kind,revision,name=$2 AND description=$3 AND content=$4::jsonb FROM community_resources WHERE id=$1`, input.ID, input.Name, input.Description, raw).Scan(&owner, &kind, &revision, &same)
+	if err == nil && owner == p.UserID && kind == input.Kind && same {
+		write(w, 200, map[string]any{"id": input.ID, "revision": revision})
+		return
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		a.error(w, err)
+		return
+	}
 	flag, ok := a.screenUpload(w, r, input.Name, input.Description, resourceScreenText(content))
 	if !ok {
 		return
@@ -204,9 +217,6 @@ func (a *Service) resourcePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var owner, kind string
-	var revision int
-	var same bool
 	err = tx.QueryRow(r.Context(), `SELECT owner_id,kind,revision,name=$2 AND description=$3 AND content=$4::jsonb FROM community_resources WHERE id=$1 FOR UPDATE`, input.ID, input.Name, input.Description, raw).Scan(&owner, &kind, &revision, &same)
 	if err == nil {
 		if owner != p.UserID || kind != input.Kind {

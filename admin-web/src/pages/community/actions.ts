@@ -7,13 +7,18 @@ import { removeReasons } from "../../api/community";
 import { useConfirm } from "../../ui/confirm";
 import { useToast } from "../../ui/toast";
 
-// A moderation conflict means another reviewer removed the item first, which reads better than the client's generic conflict copy.
+// A moderation conflict means another reviewer changed the item's state or the author edited it since it was loaded, which reads better than the client's generic conflict copy.
 function failure(error: unknown): string {
-  return isAPIError(error, "conflict") ? "该内容已被其他审核员下架，未做改动。" : errorMessage(error);
+  return isAPIError(error, "conflict") ? "该内容刚被其他审核员处理或被作者修改，未做改动，请查看最新内容后重试。" : errorMessage(error);
 }
 
-// Target is what an action needs to know about an item, from a list row or a detail.
-export type Target = { section: Section; id: string; name: string; moderation: Moderation; moderation_reason?: string | null };
+// Target is what an action needs to know about an item, from a list row or a detail. updated_at is the version the moderator is looking at (only editable sections have one) and previous_moderation is a removed item's restore state.
+export type Target = { section: Section; id: string; name: string; moderation: Moderation; moderation_reason?: string | null; previous_moderation?: Moderation | null; updated_at?: string | null };
+
+// approveValue pins an approval to the state and version the moderator saw, so a stale card cannot republish a removed item or publish an unreviewed edit.
+function approveValue(target: Target) {
+  return target.updated_at ? { from: target.moderation, updated_at: target.updated_at } : { from: target.moderation };
+}
 
 // useModeration wraps approve_content, remove_content and restore_content with the confirm dialog, toasts and the 撤销 that calls the reverse action.
 export function useModeration() {
@@ -38,17 +43,22 @@ export function useModeration() {
     }
   }, [api, refresh]);
 
-  // undoTo puts one item back into the state it had before an action.
+  // undoTo puts one item back into the state it had before an action; a removed item gets its own restore state back, so a later restore does what it would have done before.
   const undoTo = useCallback((target: Target) => {
     const { section, id } = target;
-    if (target.moderation === "removed") return run({ action: "remove_content", section, id, reason: target.moderation_reason || "恢复下架状态" });
+    if (target.moderation === "removed") {
+      const reason = target.moderation_reason || "恢复下架状态";
+      return target.previous_moderation && target.previous_moderation !== "removed"
+        ? run({ action: "remove_content", section, id, reason, value: { previous: target.previous_moderation } })
+        : run({ action: "remove_content", section, id, reason });
+    }
     return run({ action: "restore_content", section, id, value: { to: target.moderation } });
   }, [run]);
 
   const approve = useCallback(async (target: Target) => {
     if (target.moderation === "approved") return;
     try {
-      await run({ action: "approve_content", section: target.section, id: target.id });
+      await run({ action: "approve_content", section: target.section, id: target.id, value: approveValue(target) });
     } catch (error) {
       toast(`操作失败：${errorMessage(error)}`);
       return;

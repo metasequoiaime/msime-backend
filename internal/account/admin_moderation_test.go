@@ -797,3 +797,148 @@ func TestUserDataTransactionRefusesBannedUser(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A stale approval pinned to the state and version the moderator saw changes nothing once another moderator removed the item or the author edited it.
+func TestPinnedApprovalRefusesStaleTargets(t *testing.T) {
+	db, a, owner, _, call := moderationFixture(t)
+	ctx := context.Background()
+	// Another moderator rejected skin-a while this one still saw it as pending.
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","id":"skin-a","reason":"侵犯版权或商标"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-a","value":{"from":"pending"}}`); w.Code != 409 || !strings.Contains(w.Body.String(), `"conflict"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, reason, _ := moderationState(t, db, "community_skins", "skin-a"); state != "removed" || reason == nil || *reason != "侵犯版权或商标" {
+		t.Fatal("a stale approval republished a removed item", state, reason)
+	}
+	// Approving the removal deliberately, from the state it is in, still works.
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-a","value":{"from":"removed"}}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+
+	// The moderator reviewed version 1 of a reply; the author then republished new content.
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	resource := "b6334455-1234-4234-8234-123456789abc"
+	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"模板","description":"","content":{"prompt":"礼貌回复"}}`, owner.AccessToken, 201)
+	var list struct {
+		Items []struct {
+			UpdatedAt string `json:"updated_at"`
+		}
+	}
+	if w := call("GET", "/api/replies?q="+resource, ""); json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list.Items) != 1 || list.Items[0].UpdatedAt == "" {
+		t.Fatal(w.Body.String())
+	}
+	reviewed := list.Items[0].UpdatedAt
+	time.Sleep(2 * time.Millisecond)
+	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"模板","description":"","content":{"prompt":"没人审过的新内容"},"revision":1}`, owner.AccessToken, 200)
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"replies","id":"`+resource+`","value":{"from":"pending","updated_at":"`+reviewed+`"}}`); w.Code != 409 {
+		t.Fatal("an unreviewed edit was approved", w.Code, w.Body.String())
+	}
+	if state, _, _, _ := moderationState(t, db, "community_resources", resource); state != "pending" {
+		t.Fatal(state)
+	}
+	// The detail's updated_at is the same value the list carries, so a pin from either matches the current version.
+	var detail struct {
+		UpdatedAt string `json:"updated_at"`
+	}
+	if w := call("GET", "/api/replies/"+resource, ""); json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.UpdatedAt == "" {
+		t.Fatal(w.Body.String())
+	}
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"replies","id":"`+resource+`","value":{"from":"pending","updated_at":"`+detail.UpdatedAt+`"}}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+
+	// A pinned batch is all or nothing.
+	if _, err := db.pool.Exec(ctx, `UPDATE community_skins SET moderation='pending' WHERE id='skin-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"skins","ids":["skin-a","skin-b"],"value":{"from":"pending"}}`); w.Code != 409 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, _, _ := moderationState(t, db, "community_skins", "skin-a"); state != "pending" {
+		t.Fatal("a refused batch approved part of its items", state)
+	}
+	for _, body := range []string{
+		`{"action":"approve_content","section":"skins","id":"skin-a","value":{"from":"approved"}}`,
+		`{"action":"approve_content","section":"skins","id":"skin-a","value":{"from":"pending","updated_at":"2026-01-01T00:00:00Z"}}`,
+		`{"action":"approve_content","section":"skins","id":"skin-a","value":{"from":"pending","extra":1}}`,
+	} {
+		if w := call("POST", "/api/actions", body); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_value") {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+}
+
+// Undoing the approval of a rejected item puts it back with the restore state it had, so a later restore returns it to review instead of publishing it.
+func TestUndoingApprovalOfRemovedItemKeepsItsRestoreState(t *testing.T) {
+	db, _, _, _, call := moderationFixture(t)
+	for _, body := range []string{
+		`{"action":"remove_content","section":"skins","id":"skin-a","reason":"内容低俗"}`,
+		`{"action":"approve_content","section":"skins","id":"skin-a","value":{"from":"removed"}}`,
+		`{"action":"remove_content","section":"skins","id":"skin-a","reason":"内容低俗","value":{"previous":"pending"}}`,
+	} {
+		if w := call("POST", "/api/actions", body); w.Code != 200 {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+	if state, previous, _, _ := moderationState(t, db, "community_skins", "skin-a"); state != "removed" || previous == nil || *previous != "pending" {
+		t.Fatal(state, previous)
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"skins","id":"skin-a"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, _, _ := moderationState(t, db, "community_skins", "skin-a"); state != "pending" {
+		t.Fatal("a restore published an item that was never approved", state)
+	}
+	// Removing an already removed item again keeps the first removal's restore state, whatever previous says.
+	for _, body := range []string{
+		`{"action":"remove_content","section":"skins","id":"skin-b","reason":"内容低俗"}`,
+		`{"action":"remove_content","section":"skins","id":"skin-b","reason":"质量不达标","value":{"previous":"pending"}}`,
+	} {
+		if w := call("POST", "/api/actions", body); w.Code != 200 {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+	if _, previous, _, _ := moderationState(t, db, "community_skins", "skin-b"); previous == nil || *previous != "approved" {
+		t.Fatal(previous)
+	}
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","id":"skin-a","reason":"内容低俗","value":{"previous":"removed"}}`); w.Code != 400 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// A retry of a publication that is already live succeeds even after a block-level word that matches it was added, and counts no hits.
+func TestPublishRetryIsAnsweredBeforeScreening(t *testing.T) {
+	db, a, owner, _, _ := moderationFixture(t)
+	ctx := context.Background()
+	if _, err := db.pool.Exec(ctx, `TRUNCATE admin_sensitive_words,admin_sensitive_hits`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.pool.Exec(context.Background(), `TRUNCATE admin_sensitive_words,admin_sensitive_hits`)
+	})
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	skin := "b7334455-1234-4234-8234-123456789abc"
+	resource := "b8334455-1234-4234-8234-123456789abc"
+	skinBody := `{"id":"` + skin + `","name":"晚霞","description":"示例","design":` + communityFixture + `}`
+	resourceBody := `{"id":"` + resource + `","kind":"reply","name":"晚霞模板","description":"","content":{"prompt":"礼貌回复"}}`
+	apiRequest(t, mux, "POST", "/v1/community/skins", skinBody, owner.AccessToken, 201)
+	apiRequest(t, mux, "POST", "/v1/community/resources", resourceBody, owner.AccessToken, 201)
+	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_sensitive_words(pattern,category,level,created_by) VALUES('晚霞','ad','block','test')`); err != nil {
+		t.Fatal(err)
+	}
+	a.sensitive.invalidate()
+	apiRequest(t, mux, "POST", "/v1/community/skins", skinBody, owner.AccessToken, 200)
+	apiRequest(t, mux, "POST", "/v1/community/resources", resourceBody, owner.AccessToken, 200)
+	a.sensitive.mu.Lock()
+	pending := len(a.sensitive.pending)
+	a.sensitive.mu.Unlock()
+	if pending != 0 {
+		t.Fatal("retries counted sensitive hits", pending)
+	}
+	// A changed upload is still screened.
+	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"晚霞模板","description":"","content":{"prompt":"新内容"},"revision":1}`, owner.AccessToken, 422)
+}
