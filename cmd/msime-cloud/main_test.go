@@ -62,10 +62,11 @@ func (f *fakeCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if authorization == "" {
 				authorization = "https://accounts.google.com/o/oauth2/auth?" + url.Values{"redirect_uri": {target}, "state": {"s-123"}, "client_id": {"synthetic"}}.Encode()
 			}
-			reply(200, map[string]any{"challenge_id": "g1", "expires_in": 600, "nonce": "n", "authorization_url": authorization})
+			// The API answers a new challenge with 201 Created.
+			reply(201, map[string]any{"challenge_id": "g1", "expires_in": 600, "nonce": "n", "authorization_url": authorization})
 			return
 		}
-		reply(200, map[string]any{"challenge_id": "c1", "expires_in": 300})
+		reply(201, map[string]any{"challenge_id": "c1", "expires_in": 300})
 	case "POST /v1/auth/login":
 		if !(body["challenge_id"] == "c1" && body["credential"] == "123456") && !(body["challenge_id"] == "g1" && body["credential"] == "google-code") {
 			reply(401, map[string]any{"error": map[string]string{"code": "invalid_credential"}})

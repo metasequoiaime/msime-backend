@@ -27,7 +27,7 @@ const (
 
 const callbackPage = `<!doctype html><meta charset="utf-8"><title>水杉输入法</title><p>%s</p>`
 
-// postJSON sends body to path on server without credentials and decodes a 200 answer into v; any other answer is printed and returned as a statusError.
+// postJSON sends body to path on server without credentials and decodes a 2xx answer into v (the API answers a new challenge with 201, the admin site's start with 200); any other answer is printed and returned as a statusError.
 func (c cli) postJSON(server, path string, body any, v any) error {
 	data, _ := json.Marshal(body)
 	response, err := c.do(server, request{method: "POST", path: path, body: data, contentType: "application/json"}, "")
@@ -39,7 +39,7 @@ func (c cli) postJSON(server, path string, body any, v any) error {
 	if err != nil {
 		return err
 	}
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode < 200 || response.StatusCode > 299 {
 		fmt.Fprintln(c.stdout, strings.TrimSpace(string(data)))
 		return statusError{response.Status}
 	}
