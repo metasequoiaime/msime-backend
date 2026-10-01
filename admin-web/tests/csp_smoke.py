@@ -38,6 +38,17 @@ FIXTURES = {
     "/api/notifications/read": {"ok": True},
     "/api/search": {"items": [{"kind": "user", "id": "u1", "title": "smoke-user", "where": "用户账号", "target": "users"}]},
     "/api/auth/logout": {"ok": True},
+    # Users page (U5): stats tiles, one list page and the detail the ?focus=u1 search result opens.
+    "/api/users/stats": {"total": 2, "new_7d": 1, "sync_ratio": 0.5, "banned": 1, "roles": {"maintainer": 1, "user": 1}},
+    "/api/users": {"items": [
+        {"id": "u1", "display_name": "smoke-user", "created_at": "2026-09-01T00:00:00Z", "sessions": 1, "devices": 1, "last_active": "2026-10-01T00:00:00Z", "contact": "s***@example.com", "contact_kind": "email", "role": "maintainer", "banned": False, "banned_at": None, "ban_reason": ""},
+        {"id": "u2", "display_name": "", "created_at": "2026-09-02T00:00:00Z", "sessions": 0, "devices": 0, "last_active": None, "contact": "+86****2201", "contact_kind": "phone", "role": "user", "banned": True, "banned_at": "2026-09-30T00:00:00Z", "ban_reason": "发布广告导流"},
+    ], "page": 1, "total": 2, "has_more": False},
+    "/api/users/u1": {"id": "u1", "display_name": "smoke-user", "created_at": "2026-09-01T00:00:00Z", "providers": ["email"], "role": "maintainer", "contact": "s***@example.com", "contact_kind": "email",
+                      "banned": False, "banned_at": None, "ban_reason": "", "banned_by": "", "sync": True, "last_active": "2026-10-01T00:00:00Z", "active_sessions": 1, "total_sessions": 1, "skins": 1, "candidate_skins": 0, "plugins": 0, "dictionaries": 0, "replies": 0,
+                      "sessions": [{"id": "s1", "created_at": "2026-09-30T00:00:00Z", "expires_at": "2026-10-30T00:00:00Z", "last_active": "2026-10-01T00:00:00Z", "user_agent": "MSIME/0.5.4 (Windows 11)", "status": "active"}],
+                      "works": [{"section": "skins", "id": "k1", "name": "水杉秋色", "moderation": "approved", "moderation_reason": "", "created_at": "2026-09-15T00:00:00Z", "downloads": 3880, "saves": 0}],
+                      "history": [{"id": 1, "action": "revoke_session", "actor": "owner@example.com", "detail": {}, "created_at": "2026-09-20T00:00:00Z"}]},
 }
 
 
@@ -175,6 +186,13 @@ def main() -> int:
                 expect(page.get_by_role("option", name=re.compile("smoke-user"))).to_be_visible()
                 page.keyboard.press("Enter")
                 page.wait_for_url(re.compile(r"/users\?focus=u1$"))
+                # The focus parameter opens the user drawer with the fixture detail; Escape closes it before the shell checks continue.
+                drawer = page.get_by_role("dialog", name="smoke-user")
+                expect(drawer).to_contain_text("MSIME/0.5.4 (Windows 11)")
+                expect(drawer).to_contain_text("水杉秋色")
+                page.keyboard.press("Escape")
+                expect(drawer).to_be_hidden()
+                expect(page.get_by_role("table", name="用户列表")).to_contain_text("解除封禁")
                 violations("search")
 
                 page.get_by_role("button", name="收起侧栏").click()

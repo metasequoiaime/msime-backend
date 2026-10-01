@@ -2,16 +2,51 @@ package account
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 )
 
 // Users page (unit U5): the user list, session revocation, bans and user statistics.
 
-// usersList serves GET /api/users.
+// ErrBanned is returned by login, refresh and session authentication for an account an admin banned. It wraps ErrInvalid, so a caller that only knows ErrInvalid still treats the account as having no valid credentials; the login and refresh handlers answer it with 403 account_banned.
+var ErrBanned = fmt.Errorf("account_banned: %w", ErrInvalid)
+
+// banModerationReason marks community content a ban removed, so unbanning restores exactly that content and nothing a moderator removed for its own reasons.
+const banModerationReason = "owner_banned"
+
+// communityModeratedTables are the four community tables that carry owner_id and the moderation columns. Table names in ban statements only ever come from this list.
+var communityModeratedTables = []string{"community_skins", "community_resources", "community_candidate_skins", "community_plugins"}
+
+// userVerifiedEmailsSQL yields the lowercase verified emails of the user u: an email-code identity's subject is a verified address, and a provider identity counts when the provider verified its email claim.
+const userVerifiedEmailsSQL = `SELECT lower(CASE WHEN i.provider='email' THEN i.subject ELSE i.email END) FROM auth_identities i WHERE i.user_id=u.id AND (i.provider='email' OR (i.email_verified AND i.email<>''))`
+
+// userRoleSQL is the console role of the user u: the role of an enabled admin member whose email matches one of the user's verified emails (maintainer first), otherwise 'user'.
+const userRoleSQL = `COALESCE((SELECT m.role FROM admin_members m WHERE m.enabled AND m.email IN (` + userVerifiedEmailsSQL + `)
+ ORDER BY CASE m.role WHEN 'maintainer' THEN 0 WHEN 'operator' THEN 1 WHEN 'reviewer' THEN 2 WHEN 'readonly' THEN 3 ELSE 4 END,m.role LIMIT 1),'user')`
+
+// userContactSQL picks the user's primary contact (an email-code address, then a provider email, then a phone number) and masks it in the database, so the console never receives a full address or number: "j***@gmail.com", "+86****2201".
+const userContactSQL = `LEFT JOIN LATERAL (SELECT CASE WHEN c.kind='phone' THEN left(c.value,3)||'****'||right(c.value,4) ELSE left(c.value,1)||'***@'||split_part(c.value,'@',2) END AS contact,c.kind AS contact_kind FROM (
+ SELECT CASE WHEN i.provider='phone' THEN 'phone' ELSE 'email' END AS kind,CASE WHEN i.provider IN ('email','phone') THEN i.subject ELSE i.email END AS value,
+ CASE i.provider WHEN 'email' THEN 0 WHEN 'phone' THEN 2 ELSE 1 END AS rank,i.created_at
+ FROM auth_identities i WHERE i.user_id=u.id AND (i.provider IN ('email','phone') OR i.email LIKE '_%@_%')) c ORDER BY c.rank,c.created_at LIMIT 1) contact ON true`
+
+// userActivitySQL counts the user's active sessions and estimates the last activity: a session's access token is reissued on every refresh with a 15 minute lifetime, so access_expires minus 15 minutes is when the session was last refreshed.
+const userActivitySQL = `LEFT JOIN LATERAL (SELECT count(*) FILTER (WHERE NOT s.revoked AND s.expires_at>now()) AS devices,
+ max(greatest(s.created_at,s.access_expires-interval '15 minutes')) AS last_active FROM auth_sessions s WHERE s.user_id=u.id) activity ON true`
+
+// usersList serves GET /api/users. sessions is kept next to devices for older consoles; contact is already masked, so the page search never matches a full address either.
 var usersList = adminList{
-	query: `SELECT u.id,u.display_name,u.created_at,(SELECT count(*) FROM auth_sessions s WHERE s.user_id=u.id AND NOT revoked AND expires_at>now()) AS sessions FROM auth_users u`,
+	query: `SELECT u.id,u.display_name,u.created_at,activity.devices AS sessions,activity.devices,activity.last_active,
+ COALESCE(contact.contact,'') AS contact,COALESCE(contact.contact_kind,'') AS contact_kind,` + userRoleSQL + ` AS role,
+ u.banned_at IS NOT NULL AS banned,u.banned_at,COALESCE(u.ban_reason,'') AS ban_reason
+ FROM auth_users u ` + userContactSQL + `
+ ` + userActivitySQL,
+	filters: []listFilter{{param: "role", field: "role", max: 32}},
 }
 
 // actionRevokeSession revokes one session (id) of one user (user_id).
@@ -54,17 +89,148 @@ func actionRevokeSessions(a *Service, ctx context.Context, tx pgx.Tx, v actionRe
 	return actionResult{Affected: tag.RowsAffected()}, nil
 }
 
+// lockUserForBan locks the user row and returns its display name (the default name when unset) and whether it is banned; a missing user is 404 not_found.
+func lockUserForBan(ctx context.Context, tx pgx.Tx, id string) (string, bool, error) {
+	var name string
+	var banned bool
+	err := tx.QueryRow(ctx, `SELECT COALESCE(NULLIF(btrim(display_name),''),'水杉小鹿·'||upper(left(id,6))),banned_at IS NOT NULL FROM auth_users WHERE id=$1 FOR UPDATE`, id).Scan(&name, &banned)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, actionFail(404, "not_found")
+	}
+	return name, banned, err
+}
+
 // actionBanUser bans the user id with reason: in one transaction it sets auth_users.banned_*, revokes every session and removes the user's community content with moderation_reason 'owner_banned'.
 func actionBanUser(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
-	return actionResult{}, errNotImplemented
+	if err := requireActionID(v); err != nil {
+		return actionResult{}, err
+	}
+	reason := strings.TrimSpace(v.Reason)
+	if reason == "" {
+		return actionResult{}, actionFail(400, "invalid_reason")
+	}
+	name, banned, err := lockUserForBan(ctx, tx, v.ID)
+	if err != nil {
+		return actionResult{}, err
+	}
+	if banned {
+		return actionResult{}, actionFail(409, "already_banned")
+	}
+	actor := adminActor(ctx)
+	if _, err = tx.Exec(ctx, `UPDATE auth_users SET banned_at=now(),ban_reason=$2,banned_by=$3 WHERE id=$1`, v.ID, reason, actor); err != nil {
+		return actionResult{}, err
+	}
+	sessions, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked=true WHERE user_id=$1 AND NOT revoked`, v.ID)
+	if err != nil {
+		return actionResult{}, err
+	}
+	var removed int64
+	for _, table := range communityModeratedTables {
+		// Content a moderator already removed keeps its own reason, so unbanning leaves it removed.
+		tag, err := tx.Exec(ctx, `UPDATE `+table+` SET previous_moderation=moderation,moderation='removed',moderation_reason=$2,moderated_by=$3,moderated_at=now() WHERE owner_id=$1 AND moderation<>'removed'`, v.ID, banModerationReason, actor)
+		if err != nil {
+			return actionResult{}, err
+		}
+		removed += tag.RowsAffected()
+	}
+	return actionResult{
+		Affected: 1,
+		Detail:   map[string]any{"name": name, "reason": reason, "sessions": sessions.RowsAffected(), "removed": removed},
+		Extra:    map[string]any{"sessions": sessions.RowsAffected(), "removed": removed},
+	}, nil
 }
 
 // actionUnbanUser lifts the ban on the user id and restores only the content the ban removed.
 func actionUnbanUser(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
-	return actionResult{}, errNotImplemented
+	if err := requireActionID(v); err != nil {
+		return actionResult{}, err
+	}
+	name, banned, err := lockUserForBan(ctx, tx, v.ID)
+	if err != nil {
+		return actionResult{}, err
+	}
+	if !banned {
+		return actionResult{}, actionFail(409, "not_banned")
+	}
+	if _, err = tx.Exec(ctx, `UPDATE auth_users SET banned_at=NULL,ban_reason=NULL,banned_by=NULL WHERE id=$1`, v.ID); err != nil {
+		return actionResult{}, err
+	}
+	actor := adminActor(ctx)
+	var restored int64
+	for _, table := range communityModeratedTables {
+		// A row restored to pending was never reviewed, so it gets no reviewer; a row restored to approved records who put it back.
+		tag, err := tx.Exec(ctx, `UPDATE `+table+` SET moderation=COALESCE(previous_moderation,'approved'),previous_moderation=NULL,moderation_reason=NULL,
+ moderated_by=CASE WHEN previous_moderation='pending' THEN NULL ELSE $3 END,moderated_at=CASE WHEN previous_moderation='pending' THEN NULL ELSE now() END
+ WHERE owner_id=$1 AND moderation='removed' AND moderation_reason=$2`, v.ID, banModerationReason, actor)
+		if err != nil {
+			return actionResult{}, err
+		}
+		restored += tag.RowsAffected()
+	}
+	detail := map[string]any{"name": name, "restored": restored}
+	if v.Reason != "" {
+		detail["reason"] = v.Reason
+	}
+	return actionResult{Affected: 1, Detail: detail, Extra: map[string]any{"restored": restored}}, nil
 }
 
-// adminUserStats serves GET /api/users/stats.
+// adminUserStats serves GET /api/users/stats: account totals for the stat tiles and the per-role counts for the role filter chips, computed with the same role rule as the list.
 func (a *Service) adminUserStats(w http.ResponseWriter, r *http.Request, _ string) {
-	notImplemented(w)
+	var total, new7d, banned, synced int64
+	err := a.store.pool.QueryRow(r.Context(), `SELECT count(*),count(*) FILTER (WHERE created_at>now()-interval '7 days'),count(*) FILTER (WHERE banned_at IS NOT NULL),
+ (SELECT count(*) FROM user_preferences) FROM auth_users`).Scan(&total, &new7d, &banned, &synced)
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	rows, err := a.store.pool.Query(r.Context(), `SELECT role,count(*) FROM (SELECT `+userRoleSQL+` AS role FROM auth_users u) x GROUP BY role`)
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	defer rows.Close()
+	roles := map[string]int64{}
+	for rows.Next() {
+		var role string
+		var count int64
+		if err = rows.Scan(&role, &count); err != nil {
+			a.error(w, err)
+			return
+		}
+		roles[role] = count
+	}
+	if err = rows.Err(); err != nil {
+		a.error(w, err)
+		return
+	}
+	ratio := 0.0
+	if total > 0 {
+		ratio = float64(synced) / float64(total)
+	}
+	write(w, 200, map[string]any{"total": total, "new_7d": new7d, "sync_ratio": ratio, "banned": banned, "roles": roles})
+}
+
+type sessionUserAgentKey struct{}
+
+// withSessionUserAgent carries the login request's User-Agent to newSession, which records it on the session it creates.
+func withSessionUserAgent(ctx context.Context, userAgent string) context.Context {
+	return context.WithValue(ctx, sessionUserAgentKey{}, userAgent)
+}
+
+// sessionUserAgent is the User-Agent newSession stores: valid UTF-8 without control characters, cut to the 256 characters the auth_sessions check allows.
+func sessionUserAgent(ctx context.Context) string {
+	raw, _ := ctx.Value(sessionUserAgentKey{}).(string)
+	var b strings.Builder
+	n := 0
+	for _, c := range strings.ToValidUTF8(raw, "") {
+		if n == 256 {
+			break
+		}
+		if unicode.IsControl(c) {
+			continue
+		}
+		b.WriteRune(c)
+		n++
+	}
+	return strings.TrimSpace(b.String())
 }

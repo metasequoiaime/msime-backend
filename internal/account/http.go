@@ -513,7 +513,11 @@ func (a *Service) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	t, e := a.store.completeWith(r.Context(), c, identity, grant)
+	t, e := a.store.completeWith(withSessionUserAgent(r.Context(), r.UserAgent()), c, identity, grant)
+	if errors.Is(e, ErrBanned) {
+		writeError(w, 403, "account_banned")
+		return
+	}
 	if e != nil {
 		a.error(w, e)
 		return
@@ -528,6 +532,10 @@ func (a *Service) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, e := a.store.Refresh(r.Context(), v.RefreshToken)
+	if errors.Is(e, ErrBanned) {
+		writeError(w, 403, "account_banned")
+		return
+	}
 	if e != nil {
 		a.error(w, e)
 		return
