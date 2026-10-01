@@ -474,7 +474,8 @@ func TestCommunityCandidateSkinLifecycle(t *testing.T) {
 		t.Fatal(w.Body.String(), err)
 	}
 
-	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+id+"/rating", `{"stars":4}`, other.AccessToken, 403)
+	// 登录即可评分，不需要先下载。
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+id+"/rating", `{"stars":4}`, other.AccessToken, 200)
 	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/missing/rating", `{"stars":4}`, other.AccessToken, 404)
 	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+id+"/rating", `{"stars":6}`, other.AccessToken, 400)
 	apiRequest(t, mux, "POST", "/v1/community/candidate-skins/missing/download", ``, other.AccessToken, 404)

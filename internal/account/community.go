@@ -493,14 +493,26 @@ func (a *Service) communityRate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_rating")
 		return
 	}
+	// 登录即可评分，不再要求先下载；仍然不能给自己的作品评分，已下架的作品不能评。
 	result, e := a.store.pool.Exec(r.Context(), `INSERT INTO community_skin_ratings(skin_id,user_id,stars)
- SELECT s.id,$2,$3 FROM community_skins s WHERE s.id=$1 AND s.owner_id<>$2 AND s.moderation<>'removed' AND EXISTS(SELECT 1 FROM community_skin_downloads WHERE skin_id=s.id AND user_id=$2)
+ SELECT s.id,$2,$3 FROM community_skins s WHERE s.id=$1 AND s.owner_id<>$2 AND s.moderation<>'removed'
  ON CONFLICT(skin_id,user_id) DO UPDATE SET stars=excluded.stars`, r.PathValue("id"), p.UserID, input.Stars)
 	if e != nil {
 		a.error(w, e)
 		return
 	}
 	if result.RowsAffected() == 0 {
+		// 不存在或已下架（作者本人除外）时返回 404，与详情接口一致；剩下的只可能是自己的作品，沿用客户端已经认识的错误码。
+		var own bool
+		e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_skins WHERE id=$1 AND owner_id=$2)`, r.PathValue("id"), p.UserID).Scan(&own)
+		if e != nil {
+			a.error(w, e)
+			return
+		}
+		if !own {
+			writeError(w, 404, "skin_not_found")
+			return
+		}
 		writeError(w, 403, "download_before_rating_or_own_skin")
 		return
 	}

@@ -57,7 +57,8 @@ func TestResourcePublishVersionSaveRatingIsolation(t *testing.T) {
 	check(call("POST", "/v1/community/resources", body, owner.AccessToken), 201)
 	check(call("POST", "/v1/community/resources", body, owner.AccessToken), 200)
 	check(call("POST", "/v1/community/resources", body, reader.AccessToken), 409)
-	check(call("PUT", path+"/rating", `{"stars":5}`, reader.AccessToken), 403)
+	// 登录即可评分，不需要先收藏。
+	check(call("PUT", path+"/rating", `{"stars":5}`, reader.AccessToken), 200)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)

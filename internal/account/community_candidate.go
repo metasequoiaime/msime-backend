@@ -762,15 +762,16 @@ func (a *Service) communityCandidateRate(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, "invalid_rating")
 		return
 	}
+	// 登录即可评分，不再要求先下载；仍然不能给自己的作品评分。
 	result, e := a.store.pool.Exec(r.Context(), `INSERT INTO community_candidate_skin_ratings(skin_id,user_id,stars)
- SELECT s.id,$2,$3 FROM community_candidate_skins s WHERE s.id=$1 AND s.visibility='public' AND s.moderation<>'removed' AND s.owner_id<>$2 AND EXISTS(SELECT 1 FROM community_candidate_skin_downloads WHERE skin_id=s.id AND user_id=$2)
+ SELECT s.id,$2,$3 FROM community_candidate_skins s WHERE s.id=$1 AND s.visibility='public' AND s.moderation<>'removed' AND s.owner_id<>$2
  ON CONFLICT(skin_id,user_id) DO UPDATE SET stars=excluded.stars`, r.PathValue("id"), p.UserID, input.Stars)
 	if e != nil {
 		a.error(w, e)
 		return
 	}
 	if result.RowsAffected() == 0 {
-		// A missing or private skin is 404; an existing public one the caller owns or has not downloaded is 403.
+		// 不存在、私有或已下架的作品返回 404；剩下的公开作品只可能是自己的，沿用客户端已经认识的 403 错误码。
 		var exists bool
 		if e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_candidate_skins WHERE id=$1 AND visibility='public' AND moderation<>'removed')`, r.PathValue("id")).Scan(&exists); e != nil {
 			a.error(w, e)
