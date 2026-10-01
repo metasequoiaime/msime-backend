@@ -119,6 +119,13 @@
       "username": "",
       "password_env": "MSIME_SMTP_PASSWORD",
       "from": ""
+    },
+    "avatars": {
+      "bucket": "",
+      "public_base_url": "https://media.msime.app",
+      "account_id_env": "MSIME_R2_ACCOUNT_ID",
+      "access_key_id_env": "MSIME_R2_ACCESS_KEY_ID",
+      "secret_access_key_env": "MSIME_R2_SECRET_ACCESS_KEY"
     }
   }
 }
