@@ -1,6 +1,6 @@
 # API 回归测试
 
-范围以当前 OpenAPI 的 **84 个 method + path 操作**为准，另登记 **22 个后台与文档操作**（自动支持的 HEAD、文档静态资源在对应文档用例中验证）。逐接口的业务测试索引见 [api-coverage.json](../internal/server/testdata/api-coverage.json)。索引中的引用指向真实测试函数，不以文件名或覆盖率代替行为验证。
+范围以当前 OpenAPI 的 **103 个 method + path 操作**为准，另登记 **26 个后台与文档操作**（自动支持的 HEAD、文档静态资源在对应文档用例中验证）。逐接口的业务测试索引见 [api-coverage.json](../internal/server/testdata/api-coverage.json)。索引中的引用指向真实测试函数，不以文件名或覆盖率代替行为验证。
 
 ## 覆盖内容
 

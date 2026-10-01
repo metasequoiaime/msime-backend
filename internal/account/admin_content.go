@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// adminContent reads community content using fixed queries per kind; candidate skins include the private rows of accounts' synced libraries, marked by visibility.
+// adminContent reads community content using fixed queries per kind; candidate skins include the private rows of accounts' synced libraries, marked by visibility, and plugin packs return their manifest but never the archive.
 func (a *Service) adminContent(w http.ResponseWriter, r *http.Request, section, id string) {
 	if !resourceText(id, 1, 128, false) || strings.Contains(id, "/") {
 		writeError(w, 400, "invalid_id")
@@ -32,6 +32,14 @@ func (a *Service) adminContent(w http.ResponseWriter, r *http.Request, section, 
  'rating_count',(SELECT count(*) FROM community_candidate_skin_ratings WHERE skin_id=s.id),
  'rating_average',(SELECT COALESCE(avg(stars),0) FROM community_candidate_skin_ratings WHERE skin_id=s.id))
  FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id WHERE s.id=$1`
+	} else if section == "plugins" {
+		// Metadata, the manifest text and the archive digest only; archive bytes never leave the database through the admin API.
+		query = `SELECT json_build_object('id',p.id,'kind',p.kind,'plugin_id',p.plugin_id,'name',p.name,'description',p.description,'owner_id',p.owner_id,'author',u.display_name,'created_at',p.created_at,'version',p.version,'license',p.license,
+ 'size',p.size,'sha256',p.sha256,'content',convert_from(p.manifest,'UTF8'),
+ 'downloads',(SELECT count(*) FROM community_plugin_downloads WHERE pack_id=p.id),
+ 'rating_count',(SELECT count(*) FROM community_plugin_ratings WHERE pack_id=p.id),
+ 'rating_average',(SELECT COALESCE(avg(stars),0) FROM community_plugin_ratings WHERE pack_id=p.id))
+ FROM community_plugins p JOIN auth_users u ON u.id=p.owner_id WHERE p.id=$1`
 	} else {
 		kind := "dictionary"
 		if section == "replies" {

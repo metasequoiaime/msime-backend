@@ -76,18 +76,18 @@ func TestStartupMigratesAnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an empty database did not migrate itself at startup: %v", err)
 	}
-	// 用户表、社区表、管理后台表、译文缓存和候选框皮肤包都归同一次迁移管,少一张都说明自动迁移漏了一段 schema。
+	// 用户表、社区表、管理后台表、译文缓存、候选框皮肤包和插件社区都归同一次迁移管,少一张都说明自动迁移漏了一段 schema。
 	var tables int
 	if err = admin.QueryRow(context.Background(), `SELECT count(*) FROM information_schema.tables
  WHERE table_schema=$1 AND table_name IN
- ('auth_users','user_preferences','user_dictionary_entries','community_skins','admin_members','translation_cache','candidate_skins','candidate_skin_resources','community_candidate_skins','community_candidate_skin_files','community_candidate_skin_downloads','community_candidate_skin_ratings')`,
+ ('auth_users','user_preferences','user_dictionary_entries','community_skins','admin_members','translation_cache','candidate_skins','candidate_skin_resources','community_candidate_skins','community_candidate_skin_files','community_candidate_skin_downloads','community_candidate_skin_ratings','community_plugins','community_plugin_downloads','community_plugin_ratings')`,
 		schema).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
 	s.CloseAccounts()
 	s.Close()
-	if tables != 12 {
-		t.Fatalf("startup migration created %d of 12 expected tables", tables)
+	if tables != 15 {
+		t.Fatalf("startup migration created %d of 15 expected tables", tables)
 	}
 
 	// 再起一次。迁移必须可重复执行 —— 多副本滚动升级时每个副本都会走这条路。

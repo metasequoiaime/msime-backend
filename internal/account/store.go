@@ -36,6 +36,9 @@ var candidateSkinSchema string
 
 //go:embed community_candidate_skin_schema.sql
 var communityCandidateSkinSchema string
+
+//go:embed community_plugin_schema.sql
+var communityPluginSchema string
 var ErrInvalid = errors.New("invalid_credentials")
 var ErrLimited = errors.New("rate_limit_exceeded")
 var ErrConflict = errors.New("identity_already_linked")
@@ -140,7 +143,7 @@ func (s *Store) MigrateAs(ctx context.Context, role string) error {
 			return e
 		}
 	}
-	if _, e = tx.Exec(ctx, schema+"\n"+userDataSchema+"\n"+communitySchema+"\n"+adminSchema+"\n"+translationSchema+"\n"+candidateSkinSchema+"\n"+communityCandidateSkinSchema); e != nil {
+	if _, e = tx.Exec(ctx, schema+"\n"+userDataSchema+"\n"+communitySchema+"\n"+adminSchema+"\n"+translationSchema+"\n"+candidateSkinSchema+"\n"+communityCandidateSkinSchema+"\n"+communityPluginSchema); e != nil {
 		return e
 	}
 	return tx.Commit(ctx)
@@ -170,6 +173,9 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_candidate_skin_files ccf ON false
  LEFT JOIN community_candidate_skin_downloads ccd ON ccd.user_id=u.id
  LEFT JOIN community_candidate_skin_ratings ccr ON ccr.user_id=u.id
+ LEFT JOIN community_plugins cpl ON cpl.owner_id=u.id
+ LEFT JOIN community_plugin_downloads cpd ON cpd.user_id=u.id
+ LEFT JOIN community_plugin_ratings cpr ON cpr.user_id=u.id
  LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture='' AND ai.updated_at IS NULL
  LEFT JOIN auth_challenges ch ON false AND ch.code_verifier||ch.redirect_uri=''
  LEFT JOIN auth_provider_tokens pt ON false WHERE false`).Scan(&n)

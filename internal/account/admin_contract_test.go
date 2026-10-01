@@ -21,11 +21,11 @@ func TestAdminHTTPValidationAndAuditAtomicity(t *testing.T) {
 	for _, body := range []string{`{`, `{} {}`, `{"action":"resolve_crash","id":"missing","extra":true}`, `{"action":"unknown","id":"missing"}`, `{"action":"resolve_crash","id":""}`, `{"action":"revoke_session","id":"missing"}`} {
 		apiRequest(t, handler, "POST", "/api/actions", body, "", 400)
 	}
-	for _, action := range []string{"delete_skin", "delete_candidate_skin", "delete_dictionary", "delete_reply", "resolve_crash", "reopen_crash"} {
+	for _, action := range []string{"delete_skin", "delete_candidate_skin", "delete_plugin", "delete_dictionary", "delete_reply", "resolve_crash", "reopen_crash"} {
 		apiRequest(t, handler, "POST", "/api/actions", `{"action":"`+action+`","id":"missing"}`, "", 404)
 	}
 	apiRequest(t, handler, "POST", "/api/actions", `{"action":"revoke_sessions","id":"missing"}`, "", 404)
-	for _, path := range []string{"users", "downloads", "crashes", "skins", "candidate-skins", "dictionaries", "replies", "audit"} {
+	for _, path := range []string{"users", "downloads", "crashes", "skins", "candidate-skins", "plugins", "dictionaries", "replies", "audit"} {
 		apiRequest(t, handler, "GET", "/api/"+path+"?page=10001", "", "", 400)
 		apiRequest(t, handler, "GET", "/api/"+path+"?q="+strings.Repeat("a", 201), "", "", 400)
 		apiRequest(t, handler, "POST", "/api/"+path, `{}`, "", 405)
