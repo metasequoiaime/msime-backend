@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // moderationFixture seeds one item per section for owner and returns a console caller with every permission.
@@ -533,6 +534,8 @@ func TestModerationUndoEdgesAndBannedOwners(t *testing.T) {
 	for _, body := range []string{
 		`{"action":"restore_content","section":"skins","id":"skin-a"}`,
 		`{"action":"approve_content","section":"skins","ids":["skin-a","skin-b"]}`,
+		// Any row of a banned author is refused, not only removed ones.
+		`{"action":"approve_content","section":"dictionaries","id":"dict-a"}`,
 	} {
 		if w := call("POST", "/api/actions", body); w.Code != 409 || !strings.Contains(w.Body.String(), "owner_banned") {
 			t.Fatal(body, w.Code, w.Body.String())
@@ -723,5 +726,70 @@ func TestRestoredPendingItemsAreScreenedAgain(t *testing.T) {
 	a.sensitive.mu.Unlock()
 	if pending != 0 {
 		t.Fatal("restores counted sensitive hits", pending)
+	}
+}
+
+// An approval racing a ban waits for the ban (both lock the author's row) and then refuses, so the banned author's item is not published again.
+func TestApproveWaitsForConcurrentBan(t *testing.T) {
+	db, _, owner, _, call := moderationFixture(t)
+	ctx := t.Context()
+	ban, err := db.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ban.Rollback(ctx)
+	if _, err = ban.Exec(ctx, `SELECT 1 FROM auth_users WHERE id=$1 FOR UPDATE`, owner.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ban.Exec(ctx, `UPDATE auth_users SET banned_at=now(),ban_reason='race' WHERE id=$1`, owner.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ban.Exec(ctx, `UPDATE community_skins SET previous_moderation=moderation,moderation='removed',moderation_reason='owner_banned' WHERE owner_id=$1`, owner.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() { result <- call("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-a"}`) }()
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		var waiting bool
+		if err = db.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT u.banned_at IS NOT NULL%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case w := <-result:
+			t.Fatal("approval finished before the ban committed", w.Code, w.Body.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("approval never waited on the ban")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err = ban.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w := <-result; w.Code != 409 || !strings.Contains(w.Body.String(), "owner_banned") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, reason, _ := moderationState(t, db, "community_skins", "skin-a"); state != "removed" || reason == nil || *reason != "owner_banned" {
+		t.Fatal(state, reason)
+	}
+}
+
+// A publish whose session was checked before the ban cannot write once the ban has committed: the write transaction reads banned_at under the author's row lock.
+func TestUserDataTransactionRefusesBannedUser(t *testing.T) {
+	db, _, owner, _, _ := moderationFixture(t)
+	ctx := t.Context()
+	if _, err := db.pool.Exec(ctx, `UPDATE auth_users SET banned_at=now() WHERE id=$1`, owner.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.pool.Exec(context.Background(), `UPDATE auth_users SET banned_at=NULL WHERE id=$1`, owner.User.ID) })
+	if tx, err := db.userDataTransaction(ctx, owner.User.ID); !errors.Is(err, ErrBanned) {
+		if tx != nil {
+			tx.Rollback(ctx)
+		}
+		t.Fatal(err)
 	}
 }

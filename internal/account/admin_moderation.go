@@ -164,13 +164,17 @@ func moderationResult(v actionRequest, changed []moderatedItem, extra map[string
 	return actionResult{Affected: affected, Target: v.Section, Detail: detail}
 }
 
-// bannedOwnerGuard fails with 409 owner_banned when a removed row among ids belongs to a banned account: the ban removed it, and only unbanning the account brings it back, so a moderator cannot republish a banned author's work.
+// bannedOwnerGuard fails with 409 owner_banned when any row among ids belongs to a banned account: the ban removed it, and only unbanning the account brings it back, so a moderator cannot republish a banned author's work. The owners' rows are locked FOR SHARE, which conflicts with the FOR UPDATE that ban_user and unban_user take first: a ban running concurrently is waited for and its committed state read, and a ban that starts later waits until this approval or restore has committed, so its own UPDATE then removes the row again.
 func bannedOwnerGuard(ctx context.Context, tx pgx.Tx, section moderationTable, ids []string) error {
-	var banned bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM `+section.table+section.match()+` AND moderation='removed' AND EXISTS(SELECT 1 FROM auth_users u WHERE u.id=owner_id AND u.banned_at IS NOT NULL))`, ids).Scan(&banned); err != nil {
+	rows, err := tx.Query(ctx, `SELECT u.banned_at IS NOT NULL FROM auth_users u WHERE u.id IN (SELECT owner_id FROM `+section.table+section.match()+`) ORDER BY u.id FOR SHARE OF u`, ids)
+	if err != nil {
 		return err
 	}
-	if banned {
+	banned, err := pgx.CollectRows(rows, pgx.RowTo[bool])
+	if err != nil {
+		return err
+	}
+	if slices.Contains(banned, true) {
 		return actionFail(409, "owner_banned")
 	}
 	return nil

@@ -134,8 +134,8 @@ func actionBanUser(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) 
 	}
 	var removed int64
 	for _, table := range communityModeratedTables {
-		// Content a moderator already removed keeps its own reason, so unbanning leaves it removed.
-		tag, err := tx.Exec(ctx, `UPDATE `+table+` SET previous_moderation=moderation,moderation='removed',moderation_reason=$2,moderated_by=$3,moderated_at=now() WHERE owner_id=$1 AND moderation<>'removed'`, v.ID, banModerationReason, actor)
+		// Content a moderator already removed keeps its own reason, so unbanning leaves it removed. moderated_by and moderated_at keep the last real review: the ban is in the audit log, and counting it as a review would inflate the personal page's moderation stats.
+		tag, err := tx.Exec(ctx, `UPDATE `+table+` SET previous_moderation=moderation,moderation='removed',moderation_reason=$2 WHERE owner_id=$1 AND moderation<>'removed'`, v.ID, banModerationReason)
 		if err != nil {
 			return actionResult{}, err
 		}
@@ -163,14 +163,12 @@ func actionUnbanUser(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest
 	if _, err = tx.Exec(ctx, `UPDATE auth_users SET banned_at=NULL,ban_reason=NULL,banned_by=NULL WHERE id=$1`, v.ID); err != nil {
 		return actionResult{}, err
 	}
-	actor := adminActor(ctx)
 	var restored int64
 	restoredIDs := map[string][]string{}
 	for _, table := range communityModeratedTables {
-		// A row restored to pending was never reviewed, so it gets no reviewer; a row restored to approved records who put it back.
-		rows, err := tx.Query(ctx, `UPDATE `+table+` SET moderation=COALESCE(previous_moderation,'approved'),previous_moderation=NULL,moderation_reason=NULL,
- moderated_by=CASE WHEN previous_moderation='pending' THEN NULL ELSE $3 END,moderated_at=CASE WHEN previous_moderation='pending' THEN NULL ELSE now() END
- WHERE owner_id=$1 AND moderation='removed' AND moderation_reason=$2 RETURNING id`, v.ID, banModerationReason, actor)
+		// The ban left moderated_by and moderated_at alone, so a restored row gets back its state before the ban, reviewer included.
+		rows, err := tx.Query(ctx, `UPDATE `+table+` SET moderation=COALESCE(previous_moderation,'approved'),previous_moderation=NULL,moderation_reason=NULL
+ WHERE owner_id=$1 AND moderation='removed' AND moderation_reason=$2 RETURNING id`, v.ID, banModerationReason)
 		if err != nil {
 			return actionResult{}, err
 		}

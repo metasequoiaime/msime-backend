@@ -132,6 +132,11 @@ func TestAdminBanAndUnbanUser(t *testing.T) {
 	if state, _, _ := moderationOf(t, db, "community_skins", "other-skin"); state != "approved" {
 		t.Fatal("other user's content removed", state)
 	}
+	// The ban is not a review: the removed rows keep their reviewer and review time, so the personal page's stats do not count it.
+	var reviewed int
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM (SELECT moderated_by FROM community_skins WHERE owner_id=$1 UNION ALL SELECT moderated_by FROM community_resources WHERE owner_id=$1 UNION ALL SELECT moderated_by FROM community_plugins WHERE owner_id=$1) x WHERE moderated_by IS NOT NULL`, uid).Scan(&reviewed); err != nil || reviewed != 0 {
+		t.Fatal("ban stamped a reviewer", reviewed, err)
+	}
 	var detail map[string]any
 	var raw []byte
 	if err := db.pool.QueryRow(ctx, `SELECT detail FROM admin_audit WHERE action='ban_user' AND target=$1 AND actor=$2`, uid, usersOwner.Actor).Scan(&raw); err != nil || json.Unmarshal(raw, &detail) != nil || detail["reason"] != "发布广告导流：多次" || detail["removed"] != float64(3) || detail["name"] == "" {

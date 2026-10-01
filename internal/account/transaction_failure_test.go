@@ -251,7 +251,9 @@ func testUserDataTransactions(t *testing.T, native bool) {
 	}
 	operations["admin set lanzou url"] = func(s *Store, f fixture) error {
 		w := httptest.NewRecorder()
-		(&Service{store: s}).adminSiteSettings(w, jsonRequest("POST", "/api/site-settings", `{"lanzou_url":"https://example.com/`+f.user.User.ID+`"}`, ""))
+		r := jsonRequest("POST", "/api/site-settings", `{"lanzou_url":"https://example.com/`+f.user.User.ID+`"}`, "")
+		r = r.WithContext(WithAdminAccess(r.Context(), AdminAccess{Actor: "legacy-token", Role: RoleMaintainer, Permissions: AllAdminPermissions()}))
+		(&Service{store: s}).adminSiteSettings(w, r)
 		if w.Code != 200 {
 			return fmt.Errorf("HTTP %d: %s", w.Code, w.Body.String())
 		}
