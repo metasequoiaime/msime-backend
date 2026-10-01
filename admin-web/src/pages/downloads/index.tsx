@@ -72,7 +72,9 @@ function Stats({ summary }: { summary: DownloadsSummary | undefined }) {
 
 export default function DownloadsPage() {
   const api = useAPI();
-  const { platform = "all" } = usePageSearch();
+  const { platform: requested = "all" } = usePageSearch();
+  // An unknown ?platform= value (a stale or hand-edited link) shows every row, matching the highlighted 全部 chip.
+  const platform = requested === "all" || requested === "other" || knownPlatforms.has(requested) ? requested : "all";
   const setSearch = useSetPageSearch();
   const query = useQuery({
     queryKey: keys.page("downloads", "summary"),
@@ -101,7 +103,7 @@ export default function DownloadsPage() {
   const empty = rows && rows.length === 0;
   // The table toolbar gives its left slot no basis, so on phones the chips would collapse into a narrow column; there they get their own scrollable row above the table.
   const mobile = useMediaQuery(MOBILE_QUERY);
-  const filter = <FilterChips label="平台" value={chips.some(chip => chip.key === platform) ? platform : "all"} onChange={key => setSearch({ platform: key === "all" ? undefined : key })} options={chips}
+  const filter = <FilterChips label="平台" value={platform} onChange={key => setSearch({ platform: key === "all" ? undefined : key })} options={chips}
     className={mobile ? "-mx-1 flex-nowrap overflow-x-auto px-1 pb-1 whitespace-nowrap" : undefined} />;
 
   return <>

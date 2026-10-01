@@ -150,6 +150,8 @@ def main() -> int:
                 page.get_by_role("radio", name=re.compile("^Android")).click()
                 page.wait_for_url(re.compile(r"/downloads\?platform=android$"))
                 expect(page.get_by_role("table", name="下载记录")).not_to_contain_text("GitHub Release")
+                page.goto(base + "/downloads?platform=bogus")
+                expect(page.get_by_role("table", name="下载记录")).to_contain_text("GitHub Release")
                 violations("downloads")
 
                 for old, new in REDIRECTS.items():

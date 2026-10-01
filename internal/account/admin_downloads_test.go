@@ -114,6 +114,9 @@ func TestReleaseTagPlatform(t *testing.T) {
 		{"v1.2.3", "msime-1.2.3.AppImage", "linux", "v1.2.3"},
 		{"v1.2.3", "msime-android-1.2.3.apk", "android", "v1.2.3"},
 		{"nightly", "source.tar.gz", "", "nightly"},
+		{"HarmonyOS-v1.0.0", "msime.hap", "harmony", "v1.0.0"},
+		{"msime-v1.2.3", "msime-1.2.3-setup.exe", "windows", "msime-v1.2.3"},
+		{"release-2026", "notes.pdf", "", "release-2026"},
 	} {
 		platform, version := releaseTagPlatform(tc.tag, tc.asset)
 		if platform != tc.platform || version != tc.version {

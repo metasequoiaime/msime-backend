@@ -186,10 +186,15 @@ SELECT repo,tag,asset,COALESCE(sum(delta) FILTER (WHERE day=$2),0),sum(delta)
 // releaseTag splits the configured tag convention "<platform>-v<version>", for example windows-v0.5.4.
 var releaseTag = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9]*)-(v?[0-9][0-9A-Za-z.+_-]*)$`)
 
+// releaseTagPlatforms are the tag prefixes that name a platform; any other prefix (a product name such as msime-v1.2.3) is not a platform, so such tags fall back to the installer extension.
+var releaseTagPlatforms = map[string]string{"windows": "windows", "win": "windows", "macos": "macos", "mac": "macos", "osx": "macos", "linux": "linux", "android": "android", "ios": "ios", "harmony": "harmony", "harmonyos": "harmony", "ohos": "harmony"}
+
 // releaseTagPlatform derives the platform and version of a release asset: from the tag when it follows the platform prefix convention, otherwise the whole tag is the version and the installer extension names the platform. An unknown platform is empty.
 func releaseTagPlatform(tag, asset string) (string, string) {
 	if m := releaseTag.FindStringSubmatch(tag); m != nil {
-		return strings.ToLower(m[1]), m[2]
+		if platform, ok := releaseTagPlatforms[strings.ToLower(m[1])]; ok {
+			return platform, m[2]
+		}
 	}
 	name := strings.ToLower(asset)
 	for _, rule := range []struct{ platform, suffixes string }{
