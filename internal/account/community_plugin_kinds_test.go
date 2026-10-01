@@ -1,8 +1,11 @@
 package account
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -138,5 +141,115 @@ func TestPluginArchiveKeepsDataBytes(t *testing.T) {
 	}
 	if len(members["words.tsv"].data) != 4000 || string(members["NOTES.TXT"].data) != "note" || members["big.txt"].data != nil || members["click.wav"].data != nil || members["big.txt"].size != len(big) {
 		t.Fatal(len(members["words.tsv"].data), len(members["NOTES.TXT"].data), len(members["big.txt"].data), len(members["click.wav"].data))
+	}
+}
+
+func TestCommunityPluginKindsDeclaration(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	owner := complete(t, store, Identity{"apple", "plugin-kinds-owner"})
+	c := pluginClient{t, &Service{store: store}}
+	legacy := "ab334455-1234-1234-1234-0000000000a1"
+	if w := c.do("POST", "/v1/community/plugins", pluginPublishBody(legacy, "按键音", "sound", "community-clicks", "1.0.0", pluginSoundZip(t)), owner.AccessToken); w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	get := func(path, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		return c.do("GET", path, "", token)
+	}
+	queries := []string{"", "?scope=mine", "?q=%E6%8C%89", "?kinds=", "?kinds=bogus", "?kinds=bogus,,theme"}
+	before := map[string]string{}
+	for _, query := range queries {
+		w := get("/v1/community/plugins"+query, owner.AccessToken)
+		if w.Code != 200 {
+			t.Fatal(query, w.Code, w.Body.String())
+		}
+		before[query] = w.Body.String()
+	}
+	detailBefore := get("/v1/community/plugins/"+legacy, owner.AccessToken).Body.String()
+
+	// 每种新类型发布一个包，走完整的发布路径，同时证明数据库约束接受它们。
+	newKinds := map[string]string{}
+	for i, kind := range []string{"phrase_table", "helpcode", "wordbook", "symbol_set"} {
+		dir := map[string]string{"phrase_table": "phrase-table-basic", "helpcode": "helpcode-basic", "wordbook": "wordbook-basic", "symbol_set": "symbol-set-basic"}[kind]
+		archive := pluginFixtureZip(t, filepath.Join(pluginFixtureRoot, "valid", dir))
+		pack, code := validPluginArchive(archive)
+		if code != "" {
+			t.Fatal(kind, code)
+		}
+		id := fmt.Sprintf("ab334455-1234-1234-1234-0000000000b%d", i)
+		if w := c.do("POST", "/v1/community/plugins", pluginPublishBody(id, "按"+kind, kind, pack.ID, pack.Version, archive), owner.AccessToken); w.Code != 201 {
+			t.Fatal(kind, w.Code, w.Body.String())
+		}
+		newKinds[kind] = id
+	}
+
+	// 不声明或只声明不认识的类型时，响应与库里没有新类型时逐字节相同；scope=mine 同样过滤。
+	for _, query := range queries {
+		if w := get("/v1/community/plugins"+query, owner.AccessToken); w.Code != 200 || w.Body.String() != before[query] {
+			t.Fatal(query, w.Code, w.Body.String())
+		}
+	}
+	if w := get("/v1/community/plugins/"+legacy, owner.AccessToken); w.Body.String() != detailBefore {
+		t.Fatal(w.Body.String())
+	}
+	list := func(query string) []string {
+		t.Helper()
+		w := get("/v1/community/plugins"+query, owner.AccessToken)
+		var v struct {
+			Plugins []CommunityPlugin `json:"plugins"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &v) != nil {
+			t.Fatal(query, w.Code, w.Body.String())
+		}
+		kinds := []string{}
+		for _, p := range v.Plugins {
+			kinds = append(kinds, p.Kind)
+		}
+		slices.Sort(kinds)
+		return kinds
+	}
+	for query, want := range map[string][]string{
+		"?kinds=helpcode":                                  {"helpcode", "sound"},
+		"?kinds=helpcode,bogus":                            {"helpcode", "sound"},
+		"?kinds=helpcode&scope=mine":                       {"helpcode", "sound"},
+		"?kinds=wordbook,symbol_set,sound":                 {"sound", "symbol_set", "wordbook"},
+		"?kinds=helpcode,symbol_set,phrase_table,wordbook": {"helpcode", "phrase_table", "sound", "symbol_set", "wordbook"},
+		// `kind` 自己就是一种声明：按新类型筛选时不需要再带 `kinds`。
+		"?kind=phrase_table":                  {"phrase_table"},
+		"?kind=sound&kinds=helpcode":          {"sound"},
+		"?kind=wordbook&kinds=helpcode,bogus": {"wordbook"},
+	} {
+		if got := list(query); !slices.Equal(got, want) {
+			t.Errorf("%s: got %v, want %v", query, got, want)
+		}
+	}
+	if w := get("/v1/community/plugins?kind=bogus", ""); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_kind") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+
+	// 详情：没有声明该类型时与不存在相同，声明后可见；下载、评分和删除不看声明。
+	for kind, id := range newKinds {
+		if w := get("/v1/community/plugins/"+id, owner.AccessToken); w.Code != 404 || !strings.Contains(w.Body.String(), "plugin_not_found") {
+			t.Fatal(kind, w.Code, w.Body.String())
+		}
+		if w := get("/v1/community/plugins/"+id+"?kinds=bogus", ""); w.Code != 404 {
+			t.Fatal(kind, w.Code)
+		}
+		var item CommunityPlugin
+		if w := get("/v1/community/plugins/"+id+"?kinds="+kind, ""); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &item) != nil || item.Kind != kind {
+			t.Fatal(kind, w.Code, w.Body.String())
+		}
+		var download pluginDownload
+		if w := c.do("POST", "/v1/community/plugins/"+id+"/download", "{}", owner.AccessToken); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &download) != nil || download.Kind != kind {
+			t.Fatal(kind, w.Code, w.Body.String())
+		}
+	}
+	if w := c.do("DELETE", "/v1/community/plugins/"+newKinds["wordbook"], "", owner.AccessToken); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var stored int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM community_plugins WHERE kind IN ('helpcode','symbol_set','phrase_table')`).Scan(&stored); err != nil || stored != 3 {
+		t.Fatal(stored, err)
 	}
 }
