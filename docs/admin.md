@@ -43,7 +43,7 @@
    ```
 
 4. Google 登录模式不需要 `MSIME_ADMIN_TOKEN`。保留它时，登录页额外提供「管理员密钥登录」作为兼容入口；不配置 Google 时仍需要至少 32 字节的独立随机管理员密钥。管理员密钥不能以 `msime_pat_` 开头，这个前缀留给个人访问令牌，配置校验会拒绝。不要把任何密钥放进前端源码、安装包或版本库。
-5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表或列，会自动执行 `internal/account/admin_schema.sql` 和 `internal/account/admin_ops_schema.sql`，两者都是幂等的追加式迁移。运行账号按最小权限只有 DML 时，先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`，再给运行角色授予新表的 `SELECT, INSERT, UPDATE, DELETE` 以及 bigserial 序列的 `USAGE, SELECT`。新表包括 `admin_roles`、`admin_role_permissions`、`admin_tokens`、`admin_notifications`、`admin_notification_reads`、`admin_preferences`、`admin_notices`、`admin_crash_groups`、`admin_service_metrics`、`admin_service_daily`、`admin_incidents`、`admin_sensitive_words`、`admin_sensitive_hits`、`release_asset_snapshots`、`community_reports`、`word_submissions` 和 `site_settings`；已有的 `admin_members`、`admin_sessions`、`admin_audit`、`admin_events` 和四张社区表新增了列。后台启用而表既不存在又补不上时，服务拒绝启动并在错误里说明原因。
+5. 运行账号有 DDL 权限时不需要单独迁移：启动时发现缺少后台表或列，会自动执行 `internal/account/admin_schema.sql` 和 `internal/account/admin_ops_schema.sql`，两者都是幂等的追加式迁移。运行账号按最小权限只有 DML 时，先用有 DDL 权限的账号执行 `./msime-server -config /config/config.json -migrate-users`，再给运行角色授予新表的 `SELECT, INSERT, UPDATE, DELETE` 以及 bigserial 序列的 `USAGE, SELECT`。新表包括 `admin_roles`、`admin_role_permissions`、`admin_tokens`、`admin_notifications`、`admin_notification_reads`、`admin_preferences`、`admin_notices`、`admin_crash_groups`、`admin_service_metrics`、`admin_service_daily`、`admin_service_minutes`、`admin_service_verdicts`、`admin_incidents`、`admin_sensitive_words`、`admin_sensitive_hits`、`release_asset_snapshots`、`community_reports`、`word_submissions` 和 `site_settings`；已有的 `admin_members`、`admin_sessions`、`admin_audit`、`admin_events` 和四张社区表新增了列。后台启用而表既不存在又补不上时，服务拒绝启动并在错误里说明原因。
 6. 正常启动镜像，容器中的 `listen` 应为 `0.0.0.0:8080`。把 `admin.msime.app` 的 DNS 指向入口，在入口终止 HTTPS，把该域名的请求转发到相同的 Go 端口，并保留原始 Host。Go 不信任 `X-Forwarded-Host`。
 
 示例 Nginx HTTPS 虚拟主机（证书路径、后端地址按部署调整）：
@@ -199,7 +199,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 - **发布管理**：每个平台一张卡片，显示最新版本、状态和检查清单。「CI 全部通过」取自 tag 所在提交的 check run；「签名与公证」只有 workflow 里存在名为 `sign` 的 check run 时才显示；「更新日志已填写」看 release 说明是否为空；需要商店 API 的平台，商店一项显示「需手动」。历史版本从每个仓库最近 100 个 release 中按 `tag_prefix` 过滤：草稿为「待发布」，prerelease 为「公开测试」，正式版为「已发布」，带撤回标记的为「已撤回」。说明按 `### 新增 / 修复 / 改进 / 说明 / 待办` 分类显示。可以触发发布流水线、编辑说明和撤回版本；撤回会改为 prerelease、在说明开头加撤回标记，并把上一个正式版设为 latest。
 - **云端监控**：每个上游服务近 24 小时（按整点滚动，不是 UTC 自然日）的调用数、P95、错误率和逐小时曲线，以及本月（UTC）用量与 `admin.services` 中额度的对比；金额按用量乘以 `unit_price` 估算。只记录服务、耗时和状态类别，不记录请求内容。
 - **崩溃上报**：按签名分组（平台、规范化后的错误信息和第一个非系统栈帧，取 SHA-256 的前 16 位）。同一问题出现在不同平台时分成各自的分组，分别在对应平台的仓库跟进；平台先归一（win 归 windows，mac、darwin 归 macos，ipados 归 ios，harmony、ohos 归 harmonyos，其余转小写），所以同一平台的不同写法仍在一组，分组的平台创建后不再变化。列表显示 7 天次数、与前 7 天的环比、新出现标记和影响设备数（按 `install_id` 去重）。状态为未处理、已知问题、已修复；可以在平台对应的仓库建 Issue，状态随之改为已知问题并记录链接。Issue 已在 GitHub 创建但链接写不回数据库时，服务返回 503 `issue_not_recorded` 并带上 `issue_url`，页面在提示条中显示这个链接，并在本次打开页面期间把该分组当作已有 Issue，不再提供「建 Issue」，以免重复创建；刷新后链接只能从服务日志中找回，应先把分组标记为已知问题。已修复的分组再次崩溃时不会自动重新打开。
-- **系统状态**：每 60 秒探测数据库，并汇总最近 5 分钟的上游指标，错误率或 P95 超过 `slow_ms` 判为降级；每日可用分钟数保留 60 天。降级时自动开启故障事件，恢复时自动关闭；也可以通过 `open_incident`、`update_incident`、`resolve_incident` 手动管理。只展示数据库和已配置的上游服务。
+- **系统状态**：每 60 秒探测数据库，并汇总最近 5 个完整分钟的上游指标，错误率或 P95 超过 `slow_ms` 判为降级；每日可用分钟数保留 60 天。连续 3 次判为降级或不可用时自动开启故障事件，之后连续 5 次正常时自动关闭；同一段异常里自动事件被管理员手动关闭后不会再自动开启。也可以通过 `open_incident`、`update_incident`、`resolve_incident` 手动管理。只展示数据库和已配置的上游服务。多副本部署时的分工见下方「系统状态的多副本行为」。
 - **权限日志**：角色与权限矩阵、成员列表（所有者排在最前，显示会话数和最近活动），以及操作日志（`/api/audit`，可按 `action` 精确筛选、按 `actor` 模糊筛选，文案由 `action` 和 `detail` 生成）。
 - **个人中心**：资料、本月处理量（词库 PR、社区审核、Issue）、社区审核的平均处理时长、通知偏好、最近 6 条本人操作、登录会话（可吊销其他会话）和个人访问令牌。「每周摘要」邮件尚未接入，开关置灰。
 
@@ -402,10 +402,22 @@ go build -o /tmp/msime-server ./cmd/msime-server
 
 PostgreSQL 集成测试需要设置 `MSIME_TEST_DATABASE_URL`，数据库名必须含 `msime_auth_test`，只能使用一次性测试库，测试会清空测试表。多个包共用一个库时，用 `go test -p 1 ./...` 串行运行。
 
+## 系统状态的多副本行为
+
+- 每个副本每分钟开始后约 2 秒探测一次数据库（记为 `database` 服务的一次调用），并把本副本的调用计数写入数据库：按小时写入 `admin_service_metrics`（云端监控和当日 P95 使用），按分钟写入 `admin_service_minutes`（调用数、失败数和固定分桶的耗时直方图，各副本累加到同一行）。进程正常退出时也会写回剩余计数。
+- 只有持有状态探测主锁的副本（主副本）做判定：每分钟开始后约 20 秒，读取所有副本最近 5 个完整分钟的计数，判定每个服务的状态，写入 `admin_service_verdicts`（每个服务每分钟一行），同时把这一分钟计入 `admin_service_daily`，并开启或关闭自动故障事件。主锁是 PostgreSQL 会话级 advisory lock，持有在一条从连接池取出的专用连接上，键包含当前 schema，同一数据库里不同 schema 的部署各自选主。这条连接不归还连接池，主副本因此比其他副本多占用一条数据库连接。
+- 主副本退出时释放主锁；主副本所在节点失联时，PostgreSQL 依靠该连接上设置的 TCP keepalive（约 1 分钟）结束会话并释放主锁。其他副本每分钟都会尝试获取主锁，所以通常在 1–2 分钟内接手；接手期间状态可能停留在上一分钟，超过 3 分钟没有新判定时外壳显示「状态未知」。数据库连接必须直连 PostgreSQL 或经过会话级连接池，事务级连接池（如 PgBouncer transaction 模式）下会话锁无效。
+- 连续异常次数、连续正常次数和「本段异常是否已开过事件」存在每分钟的判定里，新主副本从数据库接着计数，不从内存重新开始；是否有未关闭的自动事件每次都从 `admin_incidents` 读取，所以一个副本不会因为自己内存里的旧状态关闭另一个副本开启的事件。`admin_service_verdicts` 以（分钟，服务）为主键，同一分钟只记一次，即使短时间内出现两个主副本，每日可用分钟数也不会重复累加。
+- `GET /api/status`、`GET /api/cloud` 和 `GET /api/shell` 的状态都读取数据库中最新一分钟的判定，任何副本回答都相同。读取失败的副本报告 `down`（它连不上存放状态的数据库）。
+- 与单副本时的差别：判定窗口是最近 5 个完整分钟，不含当前未满的一分钟，所以异常最多晚约 1 分钟被发现；P95 由各副本的分桶直方图相加后在桶内线性插值估算，与单副本时的算法相同，精度受分桶边界限制（例如 2–3 秒之间的 P95 只能估到这个桶内）。写入晚于判定时间（每分钟第 20 秒）的计数不进入这一分钟的判定，但仍计入之后 4 次判定的窗口。
+- 按分钟的计数和判定只保留 3 小时，由主副本每小时清理一次；数据库不可用时各副本在内存里保留最多 1 小时的未写入分钟计数。
+- 滚动升级期间旧版本副本仍按旧逻辑在本副本内判定并直接累加每日分钟数，与新版本并存的几分钟内当天的可用分钟数可能多计，自动事件也可能被旧副本按其内存状态开关；全部副本升级后恢复正常。新增的两张表只被新版本读写，旧版本不受影响。
+- 未启用 `auth`（没有数据库）时管理后台不能启用，状态探测不会运行，与之前相同。
+
 ## 已知限制
 
-- 多副本部署：敏感词和 GitHub 缓存都在各副本的内存中，最多有 30–60 秒的不一致（词库 PR 和新 Issue 的通知按数据库去重，不会因重启或多副本重复）；系统状态的 5 分钟窗口按副本计算，自动故障事件可能来回开关。目前按单实例部署设计。
-- 数据库本身不可用时，宕机分钟数和自动故障事件无法写入，`/api/status` 返回 503。
+- 多副本部署：敏感词和 GitHub 缓存都在各副本的内存中，最多有 30–60 秒的不一致（词库 PR 和新 Issue 的通知按数据库去重，不会因重启或多副本重复）。系统状态由一个主副本汇总所有副本的指标后统一判定，见「系统状态的多副本行为」；主副本失联后最多约 2 分钟没有新的判定。
+- 数据库本身不可用时，宕机分钟数和自动故障事件无法写入，`/api/status` 返回 503，外壳状态显示 `down`。
 - 词库 PR 只读最近 100 个；条目比较以 PR 的 `base.sha` 为准，分支创建后主干上删除的行会显示为新增。驳回时如果评论成功而关闭失败，重试会再评论一次。
 - 发布历史每个仓库只读最近 100 个 release，共用仓库的平台多时，较早的版本会从历史和每日快照中消失。并发撤回或编辑同一个 release 以最后一次为准。
 - GitHub Release 的「今日」是当天快照与前一天快照的差值，快照任务在 UTC 清晨运行时主要反映前一天的下载；页面会显示「快照截至」日期。

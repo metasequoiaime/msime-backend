@@ -63,6 +63,10 @@ type Server struct {
 	adminJobs sync.WaitGroup
 	// metrics aggregates upstream calls for the console's cloud and status pages.
 	metrics serviceMetrics
+	// statusMu serializes the status probe's judgements and guards statusLeader, the status leader lock while this replica holds it, and statusPruned, when this replica last pruned the monitoring tables.
+	statusMu     sync.Mutex
+	statusLeader *account.StatusLeader
+	statusPruned time.Time
 	// dictPRs, issues and releaseIndex are the console's per-server memory of GitHub listings: notification de-duplication and the global search indexes.
 	dictPRs      dictPRState
 	issues       issueMemory

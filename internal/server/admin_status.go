@@ -14,10 +14,16 @@ import (
 // System status (unit U10).
 
 const (
-	// statusProbeInterval is how often statusProbeJob runs.
+	// statusProbeInterval is how often statusProbeJob runs; its runs are aligned to the start of each minute so that every replica's runs line up.
 	statusProbeInterval = time.Minute
-	// statusWindowMinutes is the window of recent calls a probe judges a service by.
+	// statusFlushDelay is how long after the start of a minute every replica pings the database and flushes its metric buckets.
+	statusFlushDelay = 2 * time.Second
+	// statusJudgeDelay is how long after the start of a minute the leader judges, leaving the other replicas time to flush the minute that just ended.
+	statusJudgeDelay = 20 * time.Second
+	// statusWindowMinutes is the window of recent calls a probe judges a service by: the last five complete minutes.
 	statusWindowMinutes = 5
+	// statusStreakLookback is how recent a service's previous verdict must be to continue its streak; after a longer gap without a leader the streaks start afresh.
+	statusStreakLookback = 10 * time.Minute
 	// statusStale is how old the last probe may be before adminHealth reports unknown.
 	statusStale = 3 * statusProbeInterval
 	// statusDays is the length of the availability strip on the status page.
@@ -46,22 +52,12 @@ const (
 	stateUnknown  = "unknown"
 )
 
-// probeResult is one service's state in the latest probe.
+// probeResult is one service's state in a probe and the window it was judged on.
 type probeResult struct {
 	state  string
 	calls  int64
 	errors int64
 	p95    *int
-	// badRuns and goodRuns count consecutive probes, for opening and resolving automatic incidents; incident is whether this process believes an automatic incident is open (initially true, so the first good streak after a restart also resolves one left open).
-	badRuns, goodRuns int
-	incident          bool
-}
-
-// statusSnapshot is the latest probe, kept in serviceMetrics.
-type statusSnapshot struct {
-	checked  time.Time
-	services map[string]*probeResult
-	pruned   time.Time
 }
 
 // adminStatus serves GET /api/status: the latest probe, each service's 60-day availability and the recent incidents.
@@ -93,7 +89,12 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		byService[d.Service][d.Day.UTC().Format(time.DateOnly)] = d
 	}
-	checked, states := s.statusStates()
+	checked, states, err := s.statusStates(ctx)
+	if err != nil {
+		slog.Error("admin status failed", "reason", err.Error())
+		fail(w, 503, "auth_unavailable")
+		return
+	}
 	type dayJSON struct {
 		Day    string   `json:"day"`
 		State  string   `json:"state"`
@@ -162,23 +163,44 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	if !checked.IsZero() {
 		checkedAt = &checked
 	}
-	respond(w, 200, map[string]any{"checked_at": checkedAt, "state": s.adminHealth(ctx), "services": out, "incidents": list})
+	respond(w, 200, map[string]any{"checked_at": checkedAt, "state": statusHealth(checked, states), "services": out, "incidents": list})
 }
 
-// statusStates copies the latest probe.
-func (s *Server) statusStates() (time.Time, map[string]probeResult) {
-	s.metrics.mu.Lock()
-	defer s.metrics.mu.Unlock()
-	states := make(map[string]probeResult, len(s.metrics.status.services))
-	for key, p := range s.metrics.status.services {
-		states[key] = *p
+// statusStates reads the latest probe: the verdicts of the newest minute the status probe's leader judged, which every replica reports alike. checked is when that probe ran, zero before the first one and always without a database, where no probe runs.
+func (s *Server) statusStates(ctx context.Context) (time.Time, map[string]probeResult, error) {
+	if s.accounts == nil {
+		return time.Time{}, map[string]probeResult{}, nil
 	}
-	return s.metrics.status.checked, states
+	verdicts, err := s.accounts.LatestServiceVerdicts(ctx)
+	if err != nil {
+		return time.Time{}, nil, err
+	}
+	var checked time.Time
+	states := make(map[string]probeResult, len(verdicts))
+	for _, v := range verdicts {
+		states[v.Service] = probeResult{state: v.State, calls: v.Calls, errors: v.Errors, p95: v.P95MS}
+		if v.CheckedAt.After(checked) {
+			checked = v.CheckedAt
+		}
+	}
+	return checked, states, nil
 }
 
-// adminHealth is the overall state for the shell: ok, degraded or down, or unknown while no probe has run or the last one is stale. The database being down is down; any upstream service degraded or down is degraded.
+// adminHealth is the overall state for the shell, from the latest probe. A replica that cannot read the probe reports down, since the database it is stored in is unreachable from it, as the probe itself would have found.
 func (s *Server) adminHealth(ctx context.Context) string {
-	checked, states := s.statusStates()
+	checked, states, err := s.statusStates(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return stateUnknown
+		}
+		slog.Warn("admin health: status read failed", "reason", err.Error())
+		return stateDown
+	}
+	return statusHealth(checked, states)
+}
+
+// statusHealth is ok, degraded or down, or unknown while no probe has run or the last one is stale (the leader is gone and no replica has taken over yet). The database being down is down; any upstream service degraded or down is degraded.
+func statusHealth(checked time.Time, states map[string]probeResult) string {
 	if checked.IsZero() || time.Since(checked) > statusStale {
 		return stateUnknown
 	}
@@ -193,26 +215,66 @@ func (s *Server) adminHealth(ctx context.Context) string {
 	return stateOK
 }
 
-// statusProbeJob probes the database and the recent upstream metrics every minute until ctx ends, rolling the results into admin_service_daily and opening or resolving automatic incidents. It also flushes the metric buckets; the final flush on shutdown is left to Close, which runs it only after the streaming sessions it cancels have recorded their calls.
+// statusProbeJob runs the status probe once at startup and then every minute until ctx ends. Every replica pings the database and flushes its metric buckets each minute (statusCollect); only the replica holding the status leader lock judges the services, rolls the minute into admin_service_daily and opens or resolves automatic incidents (statusJudge). The final flush on shutdown is left to Close, which runs it only after the streaming sessions it cancels have recorded their calls; leadership is given up when the job ends, so another replica takes over at its next minute.
 func (s *Server) statusProbeJob(ctx context.Context) {
 	if s.accounts == nil {
 		return
 	}
-	ticker := time.NewTicker(statusProbeInterval)
-	defer ticker.Stop()
+	defer s.releaseStatusLeader()
 	s.statusTick(ctx, time.Now())
 	for {
-		select {
-		case <-ctx.Done():
+		minute := time.Now().Truncate(statusProbeInterval).Add(statusProbeInterval)
+		if !sleepUntil(ctx, minute.Add(statusFlushDelay)) {
 			return
-		case now := <-ticker.C:
-			s.statusTick(ctx, now)
 		}
+		pingErr := s.statusCollect(ctx)
+		if !sleepUntil(ctx, minute.Add(statusJudgeDelay)) {
+			return
+		}
+		s.statusJudge(ctx, time.Now(), pingErr)
 	}
 }
 
-// statusTick is one probe: flush the metric buckets, ping the database, judge every service by its last five minutes, roll the minute into the daily table and open or resolve automatic incidents.
+// sleepUntil waits until at and reports false if ctx ended first.
+func sleepUntil(ctx context.Context, at time.Time) bool {
+	timer := time.NewTimer(time.Until(at))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// statusTick is one whole probe at now: this replica's collection followed, if it leads, by the judgement.
 func (s *Server) statusTick(ctx context.Context, now time.Time) {
+	pingErr := s.statusCollect(ctx)
+	if ctx.Err() == nil {
+		s.statusJudge(ctx, now, pingErr)
+	}
+}
+
+// statusCollect is every replica's share of a probe: ping the database, record the ping as a call of the database service, and flush this process's metric buckets so the leader judges its calls together with the other replicas'. It returns the ping's error.
+func (s *Server) statusCollect(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+	started := time.Now()
+	pingErr := s.accounts.PingDatabase(pingCtx)
+	pingCancel()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	s.observeCall(databaseService, time.Now(), time.Since(started), pingErr != nil, 0)
+	if err := s.flushMetrics(ctx); err != nil && ctx.Err() == nil {
+		slog.Warn("status probe: metrics flush failed", "reason", err.Error())
+	}
+	return pingErr
+}
+
+// statusJudge is the leader's share of a probe at now: judge every service by the calls all replicas recorded in the last five complete minutes, continue the streaks from the previous stored verdicts, open or resolve automatic incidents, and store the verdicts, which also rolls the minute into admin_service_daily once. A replica that does not lead returns at once.
+func (s *Server) statusJudge(ctx context.Context, now time.Time, pingErr error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	logFailure := func(what string, err error) {
@@ -220,18 +282,37 @@ func (s *Server) statusTick(ctx context.Context, now time.Time) {
 			slog.Warn("status probe: "+what+" failed", "reason", err.Error())
 		}
 	}
-	logFailure("metrics flush", s.flushMetrics(ctx))
-	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
-	started := time.Now()
-	pingErr := s.accounts.PingDatabase(pingCtx)
-	pingCancel()
-	if ctx.Err() != nil {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	if !s.leadStatus(ctx, logFailure) {
 		return
 	}
-	s.observeCall(databaseService, time.Now(), time.Since(started), pingErr != nil, 0)
 	now = now.UTC()
+	minute := now.Truncate(time.Minute)
+	recent, err := s.accounts.ServiceMinutes(ctx, minute.Add(-statusWindowMinutes*time.Minute), minute)
+	if err != nil {
+		logFailure("window read", err)
+		return
+	}
+	windows := map[string]*metricCounts{}
+	for _, row := range recent {
+		if windows[row.Service] == nil {
+			windows[row.Service] = &metricCounts{}
+		}
+		windows[row.Service].add(metricCounts{calls: row.Calls, errors: row.Errors, latency: histogramFromJSON(row.Latency)})
+	}
+	previous, err := s.accounts.PreviousServiceVerdicts(ctx, minute.Add(-statusStreakLookback), minute)
+	if err != nil {
+		logFailure("previous verdicts read", err)
+		return
+	}
+	open, err := s.accounts.OpenAutoIncidents(ctx)
+	if err != nil {
+		logFailure("incidents read", err)
+		return
+	}
 	dayStart := now.Truncate(24 * time.Hour)
-	// Today's P95 per service from the stored hours plus what is still in memory (the database probe's own call above).
+	// Today's P95 per service from the stored hours plus whatever this process has not flushed yet.
 	today := map[string]*metricCounts{}
 	rows, err := s.accounts.ServiceMetrics(ctx, dayStart)
 	logFailure("daily metrics read", err)
@@ -245,10 +326,12 @@ func (s *Server) statusTick(ctx context.Context, now time.Time) {
 		today[row.Service].add(rowCounts(row))
 	}
 	services := s.statusServices()
-	probes := make([]account.ServiceProbe, 0, len(services))
-	results := make(map[string]probeResult, len(services))
+	verdicts := make([]account.ServiceVerdict, 0, len(services))
 	for _, svc := range services {
-		window := s.metrics.recent(svc.Key, now, statusWindowMinutes)
+		var window metricCounts
+		if w := windows[svc.Key]; w != nil {
+			window = *w
+		}
 		state := judgeService(window, svc.SlowMS)
 		if svc.Key == databaseService && pingErr != nil {
 			state = stateDown
@@ -257,67 +340,86 @@ func (s *Server) statusTick(ctx context.Context, now time.Time) {
 		if p95, ok := window.latency.percentile(0.95); ok {
 			result.p95 = &p95
 		}
-		probe := account.ServiceProbe{Service: svc.Key, Available: state != stateDown, Degraded: state == stateDegraded || state == stateDown}
+		v := account.ServiceVerdict{Service: svc.Key, State: state, Calls: result.calls, Errors: result.errors, P95MS: result.p95, CheckedAt: time.Now().UTC()}
+		v.Daily = account.ServiceProbe{Available: state != stateDown, Degraded: state == stateDegraded || state == stateDown}
 		if c := today[svc.Key]; c != nil {
 			if p95, ok := c.latency.percentile(0.95); ok {
-				probe.P95MS = &p95
+				v.Daily.P95MS = &p95
 			}
 		}
-		probes = append(probes, probe)
-		results[svc.Key] = result
+		prev, hasPrev := previous[svc.Key]
+		s.advanceStreak(ctx, svc, result, prev, hasPrev, open[svc.Key], &v, logFailure)
+		verdicts = append(verdicts, v)
 	}
-	logFailure("daily rollup", s.accounts.RecordServiceProbes(ctx, now, probes))
-	s.updateIncidents(ctx, services, results, logFailure)
-	s.metrics.mu.Lock()
-	pruneDue := now.Sub(s.metrics.status.pruned) >= time.Hour
-	s.metrics.mu.Unlock()
-	if pruneDue {
+	_, err = s.accounts.RecordServiceVerdicts(ctx, minute, verdicts)
+	logFailure("verdicts", err)
+	if now.Sub(s.statusPruned) >= time.Hour {
 		if err := s.accounts.PruneServiceMonitoring(ctx); err != nil {
 			logFailure("retention", err)
 		} else {
-			s.metrics.mu.Lock()
-			s.metrics.status.pruned = now
-			s.metrics.mu.Unlock()
+			s.statusPruned = now
 		}
 	}
 }
 
-// updateIncidents advances each service's good and bad streaks, opens an automatic incident after incidentOpenAfter bad probes and resolves it after incidentResolveAfter good ones, then stores the probe as the latest status.
-func (s *Server) updateIncidents(ctx context.Context, services []monitoredService, results map[string]probeResult, logFailure func(string, error)) {
-	s.metrics.mu.Lock()
-	previous := s.metrics.status.services
-	s.metrics.mu.Unlock()
-	next := make(map[string]*probeResult, len(results))
-	for _, svc := range services {
-		result := results[svc.Key]
-		result.incident = true
-		if p := previous[svc.Key]; p != nil {
-			result.badRuns, result.goodRuns, result.incident = p.badRuns, p.goodRuns, p.incident
+// advanceStreak continues a service's good or bad streak from its previous verdict into v, opening an automatic incident after incidentOpenAfter bad probes and resolving the open one after incidentResolveAfter good ones. The streaks live in the stored verdicts rather than in this process, so a new leader carries on where the last one stopped; open is read from admin_incidents, so a leader never acts on a stale belief about an incident another replica opened or resolved.
+func (s *Server) advanceStreak(ctx context.Context, svc monitoredService, result probeResult, previous account.ServiceVerdict, hasPrevious, open bool, v *account.ServiceVerdict, logFailure func(string, error)) {
+	if result.state == stateDegraded || result.state == stateDown {
+		v.BadRuns = 1
+		if hasPrevious && previous.BadRuns > 0 {
+			v.BadRuns, v.Incident = previous.BadRuns+1, previous.Incident
 		}
-		if result.state == stateDegraded || result.state == stateDown {
-			result.badRuns++
-			result.goodRuns = 0
-			if result.badRuns >= incidentOpenAfter && (result.badRuns == incidentOpenAfter || !result.incident) {
-				title, description := incidentText(svc, result)
-				_, err := s.accounts.OpenAutoIncident(ctx, svc.Key, title, description)
-				logFailure("incident open", err)
-				result.incident = err == nil
-			}
-		} else {
-			result.goodRuns++
-			result.badRuns = 0
-			if result.goodRuns >= incidentResolveAfter && result.incident {
-				_, err := s.accounts.ResolveAutoIncident(ctx, svc.Key)
-				logFailure("incident resolve", err)
-				result.incident = err != nil
-			}
+		// An open automatic incident belongs to this streak whoever opened it; once one has been opened in the streak, an admin resolving it while the service still fails is not overridden.
+		v.Incident = v.Incident || open
+		if v.BadRuns >= incidentOpenAfter && !v.Incident {
+			title, description := incidentText(svc, result)
+			_, err := s.accounts.OpenAutoIncident(ctx, svc.Key, title, description)
+			logFailure("incident open", err)
+			v.Incident = err == nil
 		}
-		next[svc.Key] = &result
+		return
 	}
-	s.metrics.mu.Lock()
-	s.metrics.status.services = next
-	s.metrics.status.checked = time.Now().UTC()
-	s.metrics.mu.Unlock()
+	v.GoodRuns = 1
+	if hasPrevious && previous.GoodRuns > 0 {
+		v.GoodRuns = previous.GoodRuns + 1
+	}
+	if v.GoodRuns >= incidentResolveAfter && open {
+		_, err := s.accounts.ResolveAutoIncident(ctx, svc.Key)
+		logFailure("incident resolve", err)
+	}
+}
+
+// leadStatus reports whether this replica leads the status probe. A held lock is checked first, since its session may have died with the connection; otherwise the lock is tried again, so a replica takes over within a probe of the leader's session ending. The caller holds statusMu.
+func (s *Server) leadStatus(ctx context.Context, logFailure func(string, error)) bool {
+	if s.statusLeader != nil {
+		err := s.statusLeader.Check(ctx)
+		if err == nil {
+			return true
+		}
+		logFailure("leadership check", err)
+		s.statusLeader.Release()
+		s.statusLeader = nil
+		slog.Warn("status probe: leadership lost")
+	}
+	leader, err := s.accounts.AcquireStatusLeader(ctx)
+	if err != nil {
+		logFailure("leadership", err)
+		return false
+	}
+	if leader == nil {
+		return false
+	}
+	s.statusLeader = leader
+	slog.Info("status probe: leading")
+	return true
+}
+
+// releaseStatusLeader gives up the status probe's leadership, if held.
+func (s *Server) releaseStatusLeader() {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	s.statusLeader.Release()
+	s.statusLeader = nil
 }
 
 // statusServices is the status page's own database probe followed by the monitored upstream services.
