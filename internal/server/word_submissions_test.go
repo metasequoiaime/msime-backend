@@ -1160,3 +1160,107 @@ func TestWordSubmissionRejectsShippedEnglish(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+// The sensitive word list screens every submission once Turnstile and the rate limit passed: a block hit in an entry is a blocked_word rejection and in the note a blocked_word error, both before GitHub is touched; a review hit goes through with a flag in the commit message that names the entry and category, never the pattern. Accepted submissions are recorded for the dictionary review page.
+func TestWordSubmissionSensitiveWordsAndRecording(t *testing.T) {
+	admin, schema := disposableSchema(t)
+	f := newFakeWordsUpstream(t)
+	t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
+	t.Setenv("TEST_CLIENT_TOKEN", testToken)
+	s, err := New(Config{
+		Auth:            account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
+		Clients:         []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 100}},
+		AllowedOrigins:  []string{wordsTestOrigin},
+		WordSubmissions: wordsConfig(t, f.server.URL),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	defer s.CloseAccounts()
+	s.words.client = f.server.Client()
+	ctx := context.Background()
+	words := pgx.Identifier{schema, "admin_sensitive_words"}.Sanitize()
+	if _, err = admin.Exec(ctx, `INSERT INTO `+words+`(pattern,is_regex,category,level,created_by) VALUES('刷单',false,'illegal','block','t'),('代购',false,'ad','review','t'),('(微信|vx)[\s:：]*[a-z0-9_-]{5,}',true,'ad','block','t')`); err != nil {
+		t.Fatal(err)
+	}
+	address := 0
+	post := func(body string) *httptest.ResponseRecorder {
+		address++
+		return postWords(s, body, func(r *http.Request) { r.RemoteAddr = "198.51.100." + strconv.Itoa(address) + ":1" })
+	}
+
+	w := post(`{"entries":[{"word":"堪堪","pinyin":"kan'kan"},{"word":"刷单","pinyin":"shua'dan"}],"token":"turnstile-token"}`)
+	if body := decodeBody(t, w); w.Code != 400 || body["code"] != "invalid_entries" {
+		t.Fatal(w.Code, w.Body.String())
+	} else if rejected, _ := body["rejected"].([]any); len(rejected) != 1 || rejected[0].(map[string]any)["index"] != float64(1) || rejected[0].(map[string]any)["code"] != "blocked_word" {
+		t.Fatal(body)
+	}
+	w = post(`{"kind":"english","entries":[{"word":"contact","display":"VX：abc12345"}],"token":"turnstile-token"}`)
+	if body := decodeBody(t, w); w.Code != 400 || body["code"] != "invalid_entries" {
+		t.Fatal("a regex block hit in the display form", w.Code, w.Body.String())
+	}
+	w = post(`{"entries":[{"word":"堪堪","pinyin":"kan'kan"}],"note":"加我 vx abcdef","token":"turnstile-token"}`)
+	if body := decodeBody(t, w); w.Code != 400 || body["code"] != "blocked_word" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if f.count("POST /app/installations/77/access_tokens") != 0 || f.count("GET "+wordsTestRepo+"/pulls") != 0 {
+		t.Fatal("blocked submissions must not reach GitHub", f.calls)
+	}
+
+	w = post(`{"entries":[{"word":"堪堪","pinyin":"kan'kan"},{"word":"海外代购","pinyin":"hai'wai'dai'gou"}],"note":"常用词","token":"turnstile-token"}`)
+	if w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	message := f.bodies["PUT "+wordsTestRepo+"/contents/custom/words.txt"]["message"].(string)
+	if !strings.Contains(message, "\nFlagged for review by the sensitive word list: entry 2 (ad)\n") || strings.Contains(message, "代购 (") {
+		t.Fatalf("%q", message)
+	}
+	w = post(`{"kind":"translations","entries":[{"source":"苹果","gloss":"fruit"}],"token":"turnstile-token"}`)
+	if w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if message = f.bodies["PUT "+wordsTestRepo+"/contents/custom/translations.txt"]["message"].(string); strings.Contains(message, "Flagged") {
+		t.Fatalf("%q", message)
+	}
+
+	recorded, err := s.accounts.WordSubmissions(ctx, []int{12})
+	if err != nil || len(recorded) != 2 {
+		t.Fatal(recorded, err)
+	}
+	if recorded[0].Kind != "words" || recorded[0].PRNumber != 12 || recorded[0].Note != "常用词" || recorded[1].Kind != "translations" {
+		t.Fatal(recorded)
+	}
+	var entries []map[string]string
+	if json.Unmarshal(recorded[0].Entries, &entries) != nil || len(entries) != 2 || entries[1]["word"] != "海外代购" || entries[1]["pinyin"] != "hai'wai'dai'gou" {
+		t.Fatal(string(recorded[0].Entries))
+	}
+}
+
+// screenSubmission fails closed: a matcher error stops the submission instead of letting unscreened text through.
+func TestWordSubmissionScreeningFailure(t *testing.T) {
+	_, _, err := screenSubmission(context.Background(), failingMatcher{}, []string{"堪堪"}, "")
+	if err == nil {
+		t.Fatal("matcher errors must be returned")
+	}
+	blocked, flagged, err := screenSubmission(context.Background(), staticMatcher{"代购": account.SensitiveReview, "刷单": account.SensitiveBlock}, []string{"代购", "刷单", "好"}, "代购")
+	if err != nil || len(blocked) != 1 || blocked[0].Index != 1 || strings.Join(flagged, "; ") != "entry 1 (custom); note (custom)" {
+		t.Fatal(blocked, flagged, err)
+	}
+}
+
+type failingMatcher struct{}
+
+func (failingMatcher) Match(context.Context, string) ([]account.SensitiveHit, error) {
+	return nil, errors.New("database unavailable")
+}
+
+// staticMatcher hits whole texts listed in it with the given level.
+type staticMatcher map[string]string
+
+func (m staticMatcher) Match(_ context.Context, text string) ([]account.SensitiveHit, error) {
+	if level, ok := m[text]; ok {
+		return []account.SensitiveHit{{WordID: 1, Pattern: text, Category: "custom", Level: level}}, nil
+	}
+	return nil, nil
+}
