@@ -149,7 +149,7 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_kind")
 		return
 	}
-	rows, e := a.store.pool.Query(r.Context(), pluginSelect+`WHERE strpos(lower(p.name),lower($2))>0 AND ($3='' OR p.kind=$3) ORDER BY p.created_at DESC,p.id LIMIT 21 OFFSET $4`, a.communityViewer(r), search, kind, offset)
+	rows, e := a.store.pool.Query(r.Context(), pluginSelect+`WHERE strpos(lower(p.name),lower($2))>0 AND ($3='' OR p.kind=$3) AND (p.moderation<>'removed' OR p.owner_id=$1) ORDER BY p.created_at DESC,p.id LIMIT 21 OFFSET $4`, a.communityViewer(r), search, kind, offset)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -176,7 +176,7 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Service) communityPluginDetail(w http.ResponseWriter, r *http.Request) {
-	v, e := scanCommunityPlugin(a.store.pool.QueryRow(r.Context(), pluginSelect+`WHERE p.id=$2`, a.communityViewer(r), r.PathValue("id")))
+	v, e := scanCommunityPlugin(a.store.pool.QueryRow(r.Context(), pluginSelect+`WHERE p.id=$2 AND (p.moderation<>'removed' OR p.owner_id=$1)`, a.communityViewer(r), r.PathValue("id")))
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "plugin_not_found")
 		return
@@ -264,6 +264,10 @@ func (a *Service) communityPluginPublish(w http.ResponseWriter, r *http.Request)
 		a.error(w, e)
 		return
 	}
+	flag, ok := a.screenUpload(w, r, input.Name, input.Description)
+	if !ok {
+		return
+	}
 	// Charged before the archive is inflated, as the candidate-skin publish charges before decoding, so rejected uploads cannot loop on server CPU.
 	if e := a.RateLimit(r.Context(), "plugin-publish", p.UserID, pluginPublishesPerHour, time.Hour); e != nil {
 		a.error(w, e)
@@ -321,8 +325,8 @@ func (a *Service) communityPluginPublish(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// The row lock covers only this account, so another account can commit the same id between the probe and this insert; ON CONFLICT waits for that commit and then reports it as a conflict instead of a unique violation.
-	inserted, e := tx.Exec(r.Context(), `INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,description,version,license,manifest,archive,request_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
-		input.ID, p.UserID, pack.Kind, pack.ID, input.Name, input.Description, pack.Version, pack.License, pack.Manifest, input.Archive, digest)
+	inserted, e := tx.Exec(r.Context(), `INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,description,version,license,manifest,archive,request_sha256,moderation,moderation_reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12) ON CONFLICT(id) DO NOTHING`,
+		input.ID, p.UserID, pack.Kind, pack.ID, input.Name, input.Description, pack.Version, pack.License, pack.Manifest, input.Archive, digest, flag)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -367,7 +371,7 @@ func (a *Service) communityPluginDownload(w http.ResponseWriter, r *http.Request
 	defer tx.Rollback(r.Context())
 	var kind, pluginID, version, sum string
 	var archive []byte
-	e = tx.QueryRow(r.Context(), `SELECT kind,plugin_id,version,sha256,archive FROM community_plugins WHERE id=$1 FOR SHARE`, r.PathValue("id")).Scan(&kind, &pluginID, &version, &sum, &archive)
+	e = tx.QueryRow(r.Context(), `SELECT kind,plugin_id,version,sha256,archive FROM community_plugins WHERE id=$1 AND (moderation<>'removed' OR owner_id=$2) FOR SHARE`, r.PathValue("id"), p.UserID).Scan(&kind, &pluginID, &version, &sum, &archive)
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "plugin_not_found")
 		return
@@ -437,7 +441,7 @@ func (a *Service) communityPluginRate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, e := a.store.pool.Exec(r.Context(), `INSERT INTO community_plugin_ratings(pack_id,user_id,stars)
- SELECT p.id,$2,$3 FROM community_plugins p WHERE p.id=$1 AND p.owner_id<>$2 AND EXISTS(SELECT 1 FROM community_plugin_downloads WHERE pack_id=p.id AND user_id=$2)
+ SELECT p.id,$2,$3 FROM community_plugins p WHERE p.id=$1 AND p.owner_id<>$2 AND p.moderation<>'removed' AND EXISTS(SELECT 1 FROM community_plugin_downloads WHERE pack_id=p.id AND user_id=$2)
  ON CONFLICT(pack_id,user_id) DO UPDATE SET stars=excluded.stars`, r.PathValue("id"), p.UserID, input.Stars)
 	if e != nil {
 		a.error(w, e)
@@ -446,7 +450,7 @@ func (a *Service) communityPluginRate(w http.ResponseWriter, r *http.Request) {
 	if result.RowsAffected() == 0 {
 		// A missing pack is 404; an existing one the caller owns or has not downloaded is 403.
 		var exists bool
-		if e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_plugins WHERE id=$1)`, r.PathValue("id")).Scan(&exists); e != nil {
+		if e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_plugins WHERE id=$1 AND moderation<>'removed')`, r.PathValue("id")).Scan(&exists); e != nil {
 			a.error(w, e)
 			return
 		}

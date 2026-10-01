@@ -30,7 +30,7 @@ func (a *Service) resourceApply(w http.ResponseWriter, r *http.Request) {
 	var kind string
 	var version int64
 	var raw []byte
-	err := a.store.pool.QueryRow(r.Context(), `SELECT kind,revision,content FROM community_resources WHERE id=$1`, id).Scan(&kind, &version, &raw)
+	err := a.store.pool.QueryRow(r.Context(), `SELECT kind,revision,content FROM community_resources WHERE id=$1 AND (moderation<>'removed' OR owner_id=$2)`, id, p.UserID).Scan(&kind, &version, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "not_found")
 		return
@@ -64,7 +64,7 @@ func (a *Service) resourceApply(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	// Keep this exact publication alive and unchanged until the import commits.
-	err = tx.QueryRow(r.Context(), `SELECT revision FROM community_resources WHERE id=$1 FOR SHARE`, id).Scan(&version)
+	err = tx.QueryRow(r.Context(), `SELECT revision FROM community_resources WHERE id=$1 AND (moderation<>'removed' OR owner_id=$2) FOR SHARE`, id, p.UserID).Scan(&version)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && version != *input.ResourceRevision) {
 		writeError(w, 409, "resource_revision_conflict")
 		return

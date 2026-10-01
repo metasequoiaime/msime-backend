@@ -1,0 +1,488 @@
+package account
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// moderationFixture seeds one item per section for owner and returns a console caller with every permission.
+func moderationFixture(t *testing.T) (*Store, *Service, Tokens, Tokens, func(method, path, body string) *httptest.ResponseRecorder) {
+	t.Helper()
+	db := testStore(t)
+	ctx := context.Background()
+	if _, err := db.pool.Exec(ctx, `TRUNCATE admin_audit,community_reports`); err != nil {
+		t.Fatal(err)
+	}
+	a := &Service{store: db}
+	owner := complete(t, db, Identity{"email", "moderated-author@example.test"})
+	reader := complete(t, db, Identity{"email", "moderation-reader@example.test"})
+	for _, query := range []string{
+		`INSERT INTO community_skins(id,owner_id,name,description,design,moderation) VALUES('skin-a',$1,'春日樱','粉色','` + communityFixture + `','pending'),('skin-b',$1,'墨竹','深色','` + communityFixture + `','approved')`,
+		`INSERT INTO community_resources(id,owner_id,kind,name,content,moderation) VALUES('dict-a',$1,'dictionary','前端术语','{"entries":[{"kind":"pinyin","code":"fangdou","word":"防抖","weight":10},{"kind":"pinyin","code":"shuihe","word":"水合","weight":9}]}','pending'),('reply-a',$1,'reply','委婉拒绝','{"prompt":"今天实在没法加班"}','pending')`,
+	} {
+		if _, err := db.pool.Exec(ctx, query, owner.User.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		r := adminJSONRequest(method, path, body)
+		w := httptest.NewRecorder()
+		a.AdminHTTP(w, r)
+		return w
+	}
+	return db, a, owner, reader, call
+}
+
+func moderationState(t *testing.T, db *Store, table, id string) (state string, previous, reason, by *string) {
+	t.Helper()
+	if err := db.pool.QueryRow(context.Background(), `SELECT moderation,previous_moderation,moderation_reason,moderated_by FROM `+table+` WHERE id=$1`, id).Scan(&state, &previous, &reason, &by); err != nil {
+		t.Fatal(err)
+	}
+	return state, previous, reason, by
+}
+
+func TestModerationActionsApproveRemoveRestore(t *testing.T) {
+	db, _, _, _, call := moderationFixture(t)
+	ctx := context.Background()
+	// A batch removal applies to every id in one transaction and records the state each one replaced.
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","ids":["skin-a","skin-b","skin-missing"],"reason":"侵犯版权或商标：素材来自官方宣传图"}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"affected":2`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	state, previous, reason, by := moderationState(t, db, "community_skins", "skin-a")
+	if state != "removed" || previous == nil || *previous != "pending" || reason == nil || *reason != "侵犯版权或商标：素材来自官方宣传图" || by == nil || *by != "legacy-token" {
+		t.Fatal(state, previous, reason, by)
+	}
+	if state, previous, _, _ = moderationState(t, db, "community_skins", "skin-b"); state != "removed" || *previous != "approved" {
+		t.Fatal(state, previous)
+	}
+	// Removing again keeps the original previous state and only replaces the reason.
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"skins","id":"skin-a","reason":"内容低俗"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, previous, reason, _ = moderationState(t, db, "community_skins", "skin-a"); *previous != "pending" || *reason != "内容低俗" {
+		t.Fatal(state, *previous, *reason)
+	}
+	var detail map[string]any
+	var target string
+	if err := db.pool.QueryRow(ctx, `SELECT target,detail FROM admin_audit WHERE action='remove_content' ORDER BY id LIMIT 1`).Scan(&target, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if target != "skins" || detail["section"] != "skins" || detail["count"] != float64(2) || detail["reason"] != "侵犯版权或商标：素材来自官方宣传图" {
+		t.Fatal(target, detail)
+	}
+	// Restore puts each row back where the removal found it.
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"skins","ids":["skin-a","skin-b"]}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"affected":2`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, previous, reason, _ = moderationState(t, db, "community_skins", "skin-a"); state != "pending" || previous != nil || reason != nil {
+		t.Fatal(state, previous, reason)
+	}
+	if state, _, _, _ = moderationState(t, db, "community_skins", "skin-b"); state != "approved" {
+		t.Fatal(state)
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"skins","id":"skin-a"}`); w.Code != 409 || !strings.Contains(w.Body.String(), "not_removed") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// Approve, then undo the approval through restore_content with an explicit target state.
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"dictionaries","ids":["dict-a"]}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, _, by = moderationState(t, db, "community_resources", "dict-a"); state != "approved" || *by != "legacy-token" {
+		t.Fatal(state)
+	}
+	if w := call("POST", "/api/actions", `{"action":"restore_content","section":"dictionaries","id":"dict-a","value":{"to":"pending"}}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if state, _, _, _ = moderationState(t, db, "community_resources", "dict-a"); state != "pending" {
+		t.Fatal(state)
+	}
+	// The section narrows the shared resources table: a reply id is not a dictionary.
+	var before int
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM admin_audit`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		body, code string
+		status     int
+	}{
+		{`{"action":"approve_content","section":"dictionaries","id":"reply-a"}`, "not_found", 404},
+		{`{"action":"approve_content","section":"users","id":"skin-a"}`, "invalid_section", 400},
+		{`{"action":"approve_content","section":"skins"}`, "invalid_id", 400},
+		{`{"action":"remove_content","section":"skins","id":"skin-a","reason":"  "}`, "invalid_reason", 400},
+		{`{"action":"restore_content","section":"skins","id":"skin-a","value":{"to":"removed"}}`, "invalid_value", 400},
+		{`{"action":"restore_content","section":"skins","id":"skin-a","value":{"to":"pending","x":1}}`, "invalid_value", 400},
+		{`{"action":"restore_content","section":"skins","id":"skin-missing"}`, "not_found", 404},
+	} {
+		if w := call("POST", "/api/actions", tc.body); w.Code != tc.status || !strings.Contains(w.Body.String(), tc.code) {
+			t.Fatal(tc.body, w.Code, w.Body.String())
+		}
+	}
+	var after int
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM admin_audit`).Scan(&after); err != nil || after != before {
+		t.Fatal("failed actions were audited", before, after, err)
+	}
+}
+
+func TestModerationActionsRequireReviewCommunity(t *testing.T) {
+	db, a, _, _, _ := moderationFixture(t)
+	for _, access := range []AdminAccess{
+		{Actor: "pat:ops@example.test", Email: "ops@example.test", Role: "operator", Permissions: []string{PermTriageIssues, PermBanUsers}},
+		{Actor: "pat:ro@example.test", Email: "ro@example.test", Role: "readonly", Permissions: []string{PermViewCloudUsage}},
+	} {
+		for _, body := range []string{
+			`{"action":"approve_content","section":"skins","id":"skin-a"}`,
+			`{"action":"remove_content","section":"skins","id":"skin-a","reason":"x"}`,
+			`{"action":"restore_content","section":"skins","id":"skin-a"}`,
+		} {
+			r := jsonRequest("POST", "/api/actions", body, "")
+			w := httptest.NewRecorder()
+			a.AdminHTTP(w, r.WithContext(WithAdminAccess(r.Context(), access)))
+			if w.Code != 403 {
+				t.Fatal(access.Role, body, w.Code)
+			}
+		}
+		// Every role may read the moderation lists and counts.
+		r := jsonRequest("GET", "/api/community/counts", "", "")
+		w := httptest.NewRecorder()
+		a.AdminHTTP(w, r.WithContext(WithAdminAccess(r.Context(), access)))
+		if w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+	}
+	reviewer := AdminAccess{Actor: "google:r:reviewer@example.test", Email: "reviewer@example.test", Role: "reviewer", Permissions: []string{PermReviewCommunity}}
+	r := jsonRequest("POST", "/api/actions", `{"action":"approve_content","section":"skins","id":"skin-a"}`, "")
+	w := httptest.NewRecorder()
+	a.AdminHTTP(w, r.WithContext(WithAdminAccess(r.Context(), reviewer)))
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if _, _, _, by := moderationState(t, db, "community_skins", "skin-a"); *by != reviewer.Actor {
+		t.Fatal(*by)
+	}
+}
+
+func TestModerationListsCountsAndDetail(t *testing.T) {
+	db, a, owner, reader, call := moderationFixture(t)
+	ctx := context.Background()
+	if _, err := db.pool.Exec(ctx, `UPDATE community_skins SET moderation_reason='命中敏感词：「加V」' WHERE id='skin-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx, `INSERT INTO community_reports(kind,item_id,reporter_id,reason,detail) VALUES('skins','skin-a',$1,'商标侵权','附截图 2 张')`, reader.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	public, private := "ad334455-1234-4234-8234-123456789abc", "ae334455-1234-4234-8234-123456789abc"
+	insertCandidateSkin(t, db, public, owner.User.ID, "Public")
+	insertCandidateSkin(t, db, private, owner.User.ID, "Private")
+	if _, err := db.pool.Exec(ctx, `UPDATE community_candidate_skins SET moderation='pending',visibility=CASE id WHEN $1 THEN 'public' ELSE 'private' END`, public); err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Items []struct {
+			ID, Moderation, Author string
+			Flag                   *string
+			Reports                int
+			Design                 json.RawMessage
+		}
+		Total int
+	}
+	w := call("GET", "/api/skins?status=pending", "")
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &list) != nil || list.Total != 1 || list.Items[0].ID != "skin-a" || list.Items[0].Reports != 1 || list.Items[0].Flag == nil || *list.Items[0].Flag != "命中敏感词：「加V」" || len(list.Items[0].Design) == 0 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for path, total := range map[string]int{"skins": 2, "skins?status=approved": 1, "skins?status=removed": 0, "dictionaries?status=pending": 1, "replies?status=pending": 1, "plugins?status=pending": 0, "candidate-skins?status=pending&visibility=public": 1, "candidate-skins?status=pending": 2} {
+		w = call("GET", "/api/"+path, "")
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &list) != nil || list.Total != total {
+			t.Fatal(path, w.Code, w.Body.String())
+		}
+	}
+	if w = call("GET", "/api/dictionaries?status=pending", ""); !strings.Contains(w.Body.String(), `"preview":[`) || !strings.Contains(w.Body.String(), "防抖") {
+		t.Fatal(w.Body.String())
+	}
+	for _, path := range []string{"skins?status=hidden", "users?status=pending"} {
+		if w = call("GET", "/api/"+path, ""); w.Code != 400 {
+			t.Fatal(path, w.Code)
+		}
+	}
+	// Counts leave out private candidate skins, and the shell badge is the sum of pending items.
+	w = call("GET", "/api/community/counts", "")
+	var counts map[string]map[string]int
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &counts) != nil || counts["skins"]["pending"] != 1 || counts["skins"]["approved"] != 1 || counts["candidate-skins"]["pending"] != 1 || counts["dictionaries"]["pending"] != 1 || counts["replies"]["pending"] != 1 || counts["plugins"]["removed"] != 0 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if pending, err := a.PendingCommunity(ctx); err != nil || pending != 4 {
+		t.Fatal(pending, err)
+	}
+	// The detail carries reports, live sensitive-word flags and the author's other works.
+	w = call("GET", "/api/skins/skin-a", "")
+	var detail struct {
+		Moderation  string `json:"moderation"`
+		ReportCount int    `json:"report_count"`
+		Reports     []struct{ Reason, Detail, Reporter string }
+		Flags       []SensitiveHit
+		OwnerItems  []struct{ Section, ID, Name, Moderation string } `json:"owner_items"`
+		OwnerBanned bool                                             `json:"owner_banned"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil || detail.Moderation != "pending" || detail.ReportCount != 1 || len(detail.Reports) != 1 || detail.Reports[0].Detail != "附截图 2 张" || detail.Flags == nil || len(detail.OwnerItems) != 5 || detail.OwnerBanned {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, item := range detail.OwnerItems {
+		if item.Section == "skins" && item.ID == "skin-a" {
+			t.Fatal("the item itself is listed as another work")
+		}
+	}
+	if strings.Contains(w.Body.String(), reader.User.ID) || strings.Contains(w.Body.String(), "moderation-reader@example.test") {
+		t.Fatal("reporter identity leaked", w.Body.String())
+	}
+	// The preview route serves the stored image bytes of public and private rows alike.
+	for _, id := range []string{public, private} {
+		w = call("GET", "/api/candidate-skins/"+id+"/preview", "")
+		if w.Code != 200 || w.Header().Get("Content-Type") != "image/png" || !bytes.HasPrefix(w.Body.Bytes(), []byte("\x89PNG")) || w.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatal(w.Code, w.Header())
+		}
+	}
+	for path, status := range map[string]int{"candidate-skins/missing/preview": 404, "candidate-skins/a/b/preview": 400} {
+		if w = call("GET", "/api/"+path, ""); w.Code != status {
+			t.Fatal(path, w.Code)
+		}
+	}
+}
+
+func TestRemovedContentIsHiddenFromThePublicExceptItsOwner(t *testing.T) {
+	db, _, owner, reader, call := moderationFixture(t)
+	a := &Service{store: db}
+	request := func(method, path, body, token string) *httptest.ResponseRecorder {
+		mux := http.NewServeMux()
+		Mount(mux, a)
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	for _, body := range []string{
+		`{"action":"remove_content","section":"skins","id":"skin-a","reason":"内容低俗"}`,
+		`{"action":"remove_content","section":"dictionaries","id":"dict-a","reason":"含导流或广告"}`,
+	} {
+		if w := call("POST", "/api/actions", body); w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	for _, tc := range []struct {
+		method, path, body, token string
+		status                    int
+	}{
+		{"GET", "/v1/community/skins/skin-a", "", "", 404},
+		{"GET", "/v1/community/skins/skin-a", "", reader.AccessToken, 404},
+		{"POST", "/v1/community/skins/skin-a/download", `{}`, reader.AccessToken, 404},
+		{"GET", "/v1/community/skins/skin-a", "", owner.AccessToken, 200},
+		{"POST", "/v1/community/skins/skin-a/download", `{}`, owner.AccessToken, 200},
+		{"GET", "/v1/community/skins/skin-b", "", "", 200},
+		{"GET", "/v1/community/resources/dict-a", "", reader.AccessToken, 404},
+		{"PUT", "/v1/community/resources/dict-a/save", `{"saved":true}`, reader.AccessToken, 404},
+		{"GET", "/v1/community/resources/dict-a", "", owner.AccessToken, 200},
+	} {
+		if w := request(tc.method, tc.path, tc.body, tc.token); w.Code != tc.status {
+			t.Fatal(tc.method, tc.path, w.Code, w.Body.String())
+		}
+	}
+	w := request("GET", "/v1/community/skins", "", "")
+	if w.Code != 200 || strings.Contains(w.Body.String(), "skin-a") || !strings.Contains(w.Body.String(), "skin-b") {
+		t.Fatal(w.Body.String())
+	}
+	if w = request("GET", "/v1/community/skins", "", owner.AccessToken); !strings.Contains(w.Body.String(), "skin-a") {
+		t.Fatal("owner lost their removed skin", w.Body.String())
+	}
+	if w = request("GET", "/v1/community/resources?kind=dictionary", "", ""); strings.Contains(w.Body.String(), "dict-a") {
+		t.Fatal(w.Body.String())
+	}
+	var stats CommunityStats
+	if w = request("GET", "/v1/community/stats", "", ""); json.Unmarshal(w.Body.Bytes(), &stats) != nil || stats.Skins != 1 || stats.Dictionaries != 0 || stats.Replies != 1 {
+		t.Fatal(w.Body.String())
+	}
+	// A restore makes it public again.
+	if w = call("POST", "/api/actions", `{"action":"restore_content","section":"skins","id":"skin-a"}`); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if w = request("GET", "/v1/community/skins/skin-a", "", ""); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+}
+
+func TestCommunityUploadsArePendingAndAuthorEditsGoBackToReview(t *testing.T) {
+	db, _, owner, _, call := moderationFixture(t)
+	a := &Service{store: db}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	id := "af334455-1234-4234-8234-123456789abc"
+	if w := apiRequest(t, mux, "POST", "/v1/community/skins", `{"id":"`+id+`","name":"秋色","description":"示例","design":`+communityFixture+`}`, owner.AccessToken, 201); w.Code != 201 {
+		t.Fatal(w.Code)
+	}
+	if state, _, reason, _ := moderationState(t, db, "community_skins", id); state != "pending" || reason != nil {
+		t.Fatal(state, reason)
+	}
+	// Public at once: post-moderation never hides a pending upload.
+	apiRequest(t, mux, "GET", "/v1/community/skins/"+id, "", "", 200)
+	resource := "b0334455-1234-4234-8234-123456789abc"
+	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"模板","description":"","content":{"prompt":"礼貌回复"}}`, owner.AccessToken, 201)
+	if w := call("POST", "/api/actions", `{"action":"approve_content","section":"replies","id":"`+resource+`"}`); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"模板","description":"","content":{"prompt":"更礼貌地回复"},"revision":1}`, owner.AccessToken, 200)
+	if state, _, _, _ := moderationState(t, db, "community_resources", resource); state != "pending" {
+		t.Fatal("an edited item skipped review", state)
+	}
+	// An edit does not undo a removal.
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"replies","id":"`+resource+`","reason":"质量不达标"}`); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	apiRequest(t, mux, "POST", "/v1/community/resources", `{"id":"`+resource+`","kind":"reply","name":"模板","description":"","content":{"prompt":"第三版"},"revision":2}`, owner.AccessToken, 200)
+	if state, previous, reason, _ := moderationState(t, db, "community_resources", resource); state != "removed" || *previous != "pending" || *reason != "质量不达标" {
+		t.Fatal(state, previous, reason)
+	}
+}
+
+type fakeMatcher struct {
+	hits []SensitiveHit
+	err  error
+	text string
+}
+
+func (m *fakeMatcher) Match(_ context.Context, text string) ([]SensitiveHit, error) {
+	m.text = text
+	return m.hits, m.err
+}
+
+func TestScreenCommunityText(t *testing.T) {
+	ctx := context.Background()
+	m := &fakeMatcher{}
+	if blocked, flag, err := screenCommunityText(ctx, m, "名字", "简介"); blocked || flag != nil || err != nil || m.text != "名字\n简介" {
+		t.Fatal(blocked, flag, err, m.text)
+	}
+	m.hits = []SensitiveHit{{Pattern: "加V", Level: SensitiveReview}, {Pattern: "加V", Level: SensitiveReview}, {Pattern: "代练", Level: SensitiveReview}}
+	if blocked, flag, err := screenCommunityText(ctx, m, "代练加V"); blocked || err != nil || flag == nil || *flag != "命中敏感词：「加V」「代练」" {
+		t.Fatal(blocked, flag, err)
+	}
+	m.hits = append(m.hits, SensitiveHit{Pattern: "赌博", Level: SensitiveBlock})
+	if blocked, flag, err := screenCommunityText(ctx, m, "x"); !blocked || flag != nil || err != nil {
+		t.Fatal(blocked, flag, err)
+	}
+	m.err = errors.New("down")
+	if _, _, err := screenCommunityText(ctx, m, "x"); err == nil {
+		t.Fatal("matcher failure ignored")
+	}
+	if got := resourceScreenText(ResourceContent{Entries: []SharedWord{{Word: "防抖"}, {Word: "水合"}}}); got != "防抖\n水合" {
+		t.Fatal(got)
+	}
+	if got := resourceScreenText(ResourceContent{Prompt: "提示"}); got != "提示" {
+		t.Fatal(got)
+	}
+}
+
+func TestCommunityReport(t *testing.T) {
+	db, _, owner, reader, call := moderationFixture(t)
+	a := &Service{store: db}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/community/reports", Route(a, "POST /v1/community/reports", (*Service).CommunityReport))
+	body := `{"kind":"skins","item_id":"skin-a","reason":"商标侵权","detail":"素材来自官方宣传图"}`
+	apiRequest(t, mux, "POST", "/v1/community/reports", body, "", 401)
+	apiRequest(t, mux, "POST", "/v1/community/reports", body, reader.AccessToken, 201)
+	// A repeat report from the same account is accepted without a second record.
+	apiRequest(t, mux, "POST", "/v1/community/reports", strings.Replace(body, "商标侵权", "其他", 1), reader.AccessToken, 200)
+	apiRequest(t, mux, "POST", "/v1/community/reports", body, owner.AccessToken, 201)
+	var count int
+	if err := db.pool.QueryRow(context.Background(), `SELECT count(*) FROM community_reports WHERE kind='skins' AND item_id='skin-a'`).Scan(&count); err != nil || count != 2 {
+		t.Fatal(count, err)
+	}
+	for _, tc := range []struct {
+		body, code string
+		status     int
+	}{
+		{`{"kind":"users","item_id":"skin-a","reason":"x"}`, "invalid_report_kind", 400},
+		{`{"kind":"skins","item_id":"","reason":"x"}`, "invalid_id", 400},
+		{`{"kind":"skins","item_id":"a/b","reason":"x"}`, "invalid_id", 400},
+		{`{"kind":"skins","item_id":"skin-a","reason":" "}`, "invalid_report_reason", 400},
+		{`{"kind":"skins","item_id":"skin-a","reason":"` + strings.Repeat("长", 65) + `"}`, "invalid_report_reason", 400},
+		{`{"kind":"skins","item_id":"skin-a","reason":"x","detail":"` + strings.Repeat("长", 1001) + `"}`, "invalid_report_detail", 400},
+		{`{"kind":"skins","item_id":"skin-a","reason":"x","extra":1}`, "invalid_json", 400},
+		{`{"kind":"skins","item_id":"skin-missing","reason":"x"}`, "item_not_found", 404},
+		{`{"kind":"dictionaries","item_id":"reply-a","reason":"x"}`, "item_not_found", 404},
+	} {
+		if w := apiRequest(t, mux, "POST", "/v1/community/reports", tc.body, reader.AccessToken, tc.status); !strings.Contains(w.Body.String(), tc.code) {
+			t.Fatal(tc.body, w.Body.String())
+		}
+	}
+	// Removed items and private candidate skins cannot be reported.
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"replies","id":"reply-a","reason":"内容低俗"}`); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	apiRequest(t, mux, "POST", "/v1/community/reports", `{"kind":"replies","item_id":"reply-a","reason":"x"}`, reader.AccessToken, 404)
+	private := "b1334455-1234-4234-8234-123456789abc"
+	insertCandidateSkin(t, db, private, owner.User.ID, "Private")
+	if _, err := db.pool.Exec(context.Background(), `UPDATE community_candidate_skins SET visibility='private' WHERE id=$1`, private); err != nil {
+		t.Fatal(err)
+	}
+	apiRequest(t, mux, "POST", "/v1/community/reports", `{"kind":"candidate-skins","item_id":"`+private+`","reason":"x"}`, reader.AccessToken, 404)
+	// The list and counts surface the reports.
+	if w := call("GET", "/api/skins?status=pending", ""); !strings.Contains(w.Body.String(), `"reports":2`) {
+		t.Fatal(w.Body.String())
+	}
+	// Reporting is rate limited per account.
+	for i := 0; i < communityReportsPerHour; i++ {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, jsonRequest("POST", "/v1/community/reports", body, reader.AccessToken))
+		if w.Code == 429 {
+			return
+		}
+	}
+	t.Fatal("reports are not rate limited")
+}
+
+func TestRemovedCandidateSkinsAndPluginsAreHidden(t *testing.T) {
+	db, _, owner, reader, call := moderationFixture(t)
+	a := &Service{store: db}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	id := "b2334455-1234-4234-8234-123456789abc"
+	insertCandidateSkin(t, db, id, owner.User.ID, "Gallery")
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+id, "", reader.AccessToken, 200)
+	if w := call("POST", "/api/actions", `{"action":"remove_content","section":"candidate-skins","id":"`+id+`","reason":"侵犯版权或商标"}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+id, "", reader.AccessToken, 404)
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+id+"/preview", "", reader.AccessToken, 404)
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins/"+id+"/download", `{}`, reader.AccessToken, 404)
+	apiRequest(t, mux, "PUT", "/v1/community/candidate-skins/"+id+"/rating", `{"stars":5}`, reader.AccessToken, 404)
+	apiRequest(t, mux, "GET", "/v1/community/candidate-skins/"+id+"/preview", "", owner.AccessToken, 200)
+	apiRequest(t, mux, "POST", "/v1/community/candidate-skins/"+id+"/download", `{}`, owner.AccessToken, 200)
+	if w := apiRequest(t, mux, "GET", "/v1/community/candidate-skins", "", reader.AccessToken, 200); strings.Contains(w.Body.String(), id) {
+		t.Fatal(w.Body.String())
+	}
+	// A private library row that goes public enters the review queue.
+	private := "b3334455-1234-4234-8234-123456789abc"
+	insertCandidateSkin(t, db, private, owner.User.ID, "Library")
+	if _, err := db.pool.Exec(context.Background(), `UPDATE community_candidate_skins SET visibility='private' WHERE id=$1`, private); err != nil {
+		t.Fatal(err)
+	}
+	apiRequest(t, mux, "PATCH", "/v1/community/candidate-skins/"+private, `{"visibility":"public"}`, owner.AccessToken, 200)
+	if state, _, _, _ := moderationState(t, db, "community_candidate_skins", private); state != "pending" {
+		t.Fatal(state)
+	}
+	// Plugins follow the same rule.
+	if _, err := db.pool.Exec(context.Background(), `INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,version,license,manifest,archive,request_sha256,moderation) VALUES('b4334455-1234-4234-8234-123456789abc',$1,'sound','com.example.pack','Pack','1.0','MIT','{}','zip',repeat('a',64),'removed')`, owner.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	apiRequest(t, mux, "GET", "/v1/community/plugins/b4334455-1234-4234-8234-123456789abc", "", reader.AccessToken, 404)
+	apiRequest(t, mux, "GET", "/v1/community/plugins/b4334455-1234-4234-8234-123456789abc", "", owner.AccessToken, 200)
+	if w := apiRequest(t, mux, "GET", "/v1/community/plugins", "", "", 200); strings.Contains(w.Body.String(), "b4334455") {
+		t.Fatal(w.Body.String())
+	}
+}

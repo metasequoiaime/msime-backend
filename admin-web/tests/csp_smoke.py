@@ -41,6 +41,16 @@ FIXTURES = {
 }
 
 
+# U2 community moderation: counts, the skin list and one skin detail, so the smoke renders real cards, the mini keyboard and the drawer's keyboard preview.
+SMOKE_DESIGN = {"background": 15266027, "keyBackground": 16777215, "keyForeground": 1516829, "accent": 1596487, "actionBackground": 1596487, "cornerRadius": 8, "borderWidth": 0, "shadow": 0, "pattern": 0, "monospaced": False, "gradientEnd": 16304344}
+SMOKE_STATES = {"pending": 1, "approved": 0, "removed": 0}
+FIXTURES.update({
+    "/api/community/counts": {"skins": SMOKE_STATES, "candidate-skins": SMOKE_STATES, "plugins": {**SMOKE_STATES, "pending": 0}, "dictionaries": SMOKE_STATES, "replies": SMOKE_STATES},
+    "/api/skins": {"items": [{"id": "smoke-skin", "name": "春日樱", "description": "粉色", "owner_id": "u1", "author": "smoke-author", "created_at": "2026-10-01T00:00:00Z", "design": SMOKE_DESIGN, "downloads": 12, "moderation": "pending", "moderation_reason": "命中敏感词：「加V」", "moderated_by": None, "moderated_at": None, "flag": "命中敏感词：「加V」", "reports": 1}], "page": 1, "total": 1, "has_more": False},
+    "/api/skins/smoke-skin": {"id": "smoke-skin", "name": "春日樱", "description": "粉色", "owner_id": "u1", "author": "smoke-author", "created_at": "2026-10-01T00:00:00Z", "content": SMOKE_DESIGN, "moderation": "pending", "previous_moderation": None, "moderation_reason": None, "moderated_by": None, "moderated_at": None, "owner_banned": False, "downloads": 12, "rating_count": 0, "rating_average": 0, "reports": [{"id": 1, "reason": "商标侵权", "detail": "附截图", "reporter": "smoke-reader", "created_at": "2026-10-01T00:00:00Z"}], "report_count": 1, "flags": [], "owner_items": [{"section": "replies", "id": "r1", "name": "委婉拒绝", "moderation": "approved", "created_at": "2026-09-01T00:00:00Z"}]},
+})
+
+
 def production_csp() -> str:
     match = re.search(r'Header\(\)\.Set\("Content-Security-Policy", "([^"]+)"\)', ADMIN_GO.read_text())
     if not match:
@@ -143,6 +153,16 @@ def main() -> int:
                     page.goto(base + old)
                     page.wait_for_url(base + new)
                     violations(old)
+
+                page.goto(base + "/community")
+                expect(page.get_by_text("命中敏感词：「加V」")).to_be_visible()
+                page.get_by_role("button", name="春日樱", exact=True).click()
+                drawer = page.get_by_role("dialog", name="春日樱")
+                expect(drawer.get_by_role("img", name=re.compile("26 键"))).to_be_visible()
+                expect(drawer.get_by_text("商标侵权：附截图")).to_be_visible()
+                page.keyboard.press("Escape")
+                expect(drawer).to_be_hidden()
+                violations("community drawer")
 
                 page.goto(base + "/")
                 expect(page.locator("header")).to_contain_text("测试环境")

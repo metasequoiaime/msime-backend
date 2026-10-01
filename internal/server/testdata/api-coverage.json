@@ -235,6 +235,9 @@
     "GET /v1/community/stats": [
       "internal/account/community_stats_test.go::TestCommunityStatsCountsPublicContentAnonymously"
     ],
+    "POST /v1/community/reports": [
+      "internal/account/admin_moderation_test.go::TestCommunityReport"
+    ],
     "GET /v1/community/skins": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
     ],

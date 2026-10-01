@@ -378,7 +378,7 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// Private rows appear only in the author's own opted-in list: released clients reject an item whose license assets are empty, which a private row may have, and one such item would fail the whole page.
-	rows, e := a.store.pool.Query(r.Context(), candidateSelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($3='' OR s.owner_id=$1) AND (s.visibility='public' OR ($3<>'' AND $5)) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $4`, viewer, search, scope, offset, sync)
+	rows, e := a.store.pool.Query(r.Context(), candidateSelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($3='' OR s.owner_id=$1) AND (s.visibility='public' OR ($3<>'' AND $5)) AND (s.moderation<>'removed' OR s.owner_id=$1) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $4`, viewer, search, scope, offset, sync)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -413,7 +413,7 @@ func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// A private row is the owner's alone, and only an opted-in client can decode it; everyone else gets the same 404 as for a missing id.
-	v, e := scanCandidateSkin(a.store.pool.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2 AND (s.visibility='public' OR ($3 AND s.owner_id=$1))`, a.communityViewer(r), r.PathValue("id"), sync))
+	v, e := scanCandidateSkin(a.store.pool.QueryRow(r.Context(), candidateSelect+`WHERE s.id=$2 AND (s.visibility='public' OR ($3 AND s.owner_id=$1)) AND (s.moderation<>'removed' OR s.owner_id=$1)`, a.communityViewer(r), r.PathValue("id"), sync))
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -430,7 +430,7 @@ func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Reques
 func (a *Service) communityCandidatePreview(w http.ResponseWriter, r *http.Request) {
 	var path string
 	var data []byte
-	e := a.store.pool.QueryRow(r.Context(), `SELECT f.path,f.bytes FROM community_candidate_skins s JOIN community_candidate_skin_files f ON f.skin_id=s.id AND f.path=s.preview_path WHERE s.id=$1 AND (s.visibility='public' OR s.owner_id=$2)`, r.PathValue("id"), a.communityViewer(r)).Scan(&path, &data)
+	e := a.store.pool.QueryRow(r.Context(), `SELECT f.path,f.bytes FROM community_candidate_skins s JOIN community_candidate_skin_files f ON f.skin_id=s.id AND f.path=s.preview_path WHERE s.id=$1 AND ((s.visibility='public' AND s.moderation<>'removed') OR s.owner_id=$2)`, r.PathValue("id"), a.communityViewer(r)).Scan(&path, &data)
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -518,6 +518,10 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		a.error(w, e)
 		return
 	}
+	flag, ok := a.screenUpload(w, r, input.Name, input.Description, input.Manifest)
+	if !ok {
+		return
+	}
 	if e := a.candidateWriteRate(r.Context(), p.UserID, visibility); e != nil {
 		a.error(w, e)
 		return
@@ -571,8 +575,8 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 	}
 	license := candidatePackageLicense(pkg)
 	// The row lock covers only this account, so another account can commit the same id between the probe and this insert; ON CONFLICT waits for that commit and then reports it as a conflict instead of a unique violation.
-	inserted, e := tx.Exec(r.Context(), `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,description,version,license_code,license_assets,license_source,manifest,preview_path,request_sha256,visibility) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(id) DO NOTHING`,
-		input.ID, p.UserID, pkg.ID, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest, visibility)
+	inserted, e := tx.Exec(r.Context(), `INSERT INTO community_candidate_skins(id,owner_id,package_id,name,description,version,license_code,license_assets,license_source,manifest,preview_path,request_sha256,visibility,moderation,moderation_reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14) ON CONFLICT(id) DO NOTHING`,
+		input.ID, p.UserID, pkg.ID, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest, visibility, flag)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -631,7 +635,7 @@ func (a *Service) communityCandidateDownload(w http.ResponseWriter, r *http.Requ
 	defer tx.Rollback(r.Context())
 	var packageID string
 	var manifest []byte
-	e = tx.QueryRow(r.Context(), `SELECT package_id,manifest FROM community_candidate_skins WHERE id=$1 AND (visibility='public' OR owner_id=$2) FOR SHARE`, r.PathValue("id"), p.UserID).Scan(&packageID, &manifest)
+	e = tx.QueryRow(r.Context(), `SELECT package_id,manifest FROM community_candidate_skins WHERE id=$1 AND ((visibility='public' AND moderation<>'removed') OR owner_id=$2) FOR SHARE`, r.PathValue("id"), p.UserID).Scan(&packageID, &manifest)
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -687,7 +691,7 @@ func (a *Service) communityCandidateRate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	result, e := a.store.pool.Exec(r.Context(), `INSERT INTO community_candidate_skin_ratings(skin_id,user_id,stars)
- SELECT s.id,$2,$3 FROM community_candidate_skins s WHERE s.id=$1 AND s.visibility='public' AND s.owner_id<>$2 AND EXISTS(SELECT 1 FROM community_candidate_skin_downloads WHERE skin_id=s.id AND user_id=$2)
+ SELECT s.id,$2,$3 FROM community_candidate_skins s WHERE s.id=$1 AND s.visibility='public' AND s.moderation<>'removed' AND s.owner_id<>$2 AND EXISTS(SELECT 1 FROM community_candidate_skin_downloads WHERE skin_id=s.id AND user_id=$2)
  ON CONFLICT(skin_id,user_id) DO UPDATE SET stars=excluded.stars`, r.PathValue("id"), p.UserID, input.Stars)
 	if e != nil {
 		a.error(w, e)
@@ -696,7 +700,7 @@ func (a *Service) communityCandidateRate(w http.ResponseWriter, r *http.Request)
 	if result.RowsAffected() == 0 {
 		// A missing or private skin is 404; an existing public one the caller owns or has not downloaded is 403.
 		var exists bool
-		if e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_candidate_skins WHERE id=$1 AND visibility='public')`, r.PathValue("id")).Scan(&exists); e != nil {
+		if e = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_candidate_skins WHERE id=$1 AND visibility='public' AND moderation<>'removed')`, r.PathValue("id")).Scan(&exists); e != nil {
 			a.error(w, e)
 			return
 		}
@@ -826,6 +830,10 @@ func (a *Service) communityCandidateReplace(w http.ResponseWriter, r *http.Reque
 	if check(a.store.pool, "") {
 		return
 	}
+	flag, ok := a.screenUpload(w, r, input.Name, input.Description, input.Manifest)
+	if !ok {
+		return
+	}
 	if e := a.candidateWriteRate(r.Context(), p.UserID, "private"); e != nil {
 		a.error(w, e)
 		return
@@ -850,8 +858,8 @@ func (a *Service) communityCandidateReplace(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	license := candidatePackageLicense(pkg)
-	if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET name=$2,description=$3,version=$4,license_code=$5,license_assets=$6,license_source=$7,manifest=$8,preview_path=$9,request_sha256=$10,updated_at=now() WHERE id=$1`,
-		id, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest); e != nil {
+	if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET name=$2,description=$3,version=$4,license_code=$5,license_assets=$6,license_source=$7,manifest=$8,preview_path=$9,request_sha256=$10,updated_at=now(),`+reviewAgain("$11")+` WHERE id=$1`,
+		id, input.Name, input.Description, pkg.Version, license.Code, license.Assets, license.Source, []byte(input.Manifest), pkg.Preview, digest, flag); e != nil {
 		a.error(w, e)
 		return
 	}
@@ -927,7 +935,7 @@ func (a *Service) communityCandidateVisibility(w http.ResponseWriter, r *http.Re
 				return
 			}
 		}
-		if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET visibility=$2,updated_at=now() WHERE id=$1`, id, input.Visibility); e != nil {
+		if _, e = tx.Exec(r.Context(), `UPDATE community_candidate_skins SET visibility=$2,updated_at=now(),moderation=CASE WHEN $2='public' AND moderation='approved' THEN 'pending' ELSE moderation END WHERE id=$1`, id, input.Visibility); e != nil {
 			a.error(w, e)
 			return
 		}
