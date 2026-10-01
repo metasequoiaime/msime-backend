@@ -63,7 +63,7 @@ curl -G -H "Authorization: Bearer $MSIME_CLIENT_TOKEN" \
 
 ## 多副本部署
 
-服务可以在同一个 PostgreSQL 后面运行多个副本（例如 k8s 多副本经 Cloudflare Tunnel 轮询转发、无粘性会话）。多副本部署必须启用用户体系和数据库（`auth.enabled`）：没有数据库时，本该经数据库共享的限流等状态只能退回各进程内存，副本之间互不可见。顶层 `replicas` 填实际副本数。
+服务可以在同一个 PostgreSQL 后面运行多个副本（例如 k8s 多副本经 Cloudflare Tunnel 轮询转发、无粘性会话）。多副本部署必须启用用户体系和数据库（`auth.enabled`）：没有数据库时，本该经数据库共享的限流、AI 插画任务等状态只能退回各进程内存，副本之间互不可见，所以 `replicas` 大于 1 而未启用 `auth.enabled` 时服务拒绝启动。顶层 `replicas` 填实际副本数。
 
 - 经 PostgreSQL 共享：账号、会话和社区数据；`auth_rates` 上的数据库限流（登录、社区接口、官网词条投稿、管理后台的 `admin`/`admin-auth`/`admin-login` 三项限额等，固定一分钟窗口）；共享译文缓存；遥测和管理后台数据；AI 插画任务存在 `skin_jobs` 表，任何副本都能轮询和取消，每主体与全局上限按整个部署计算（见[皮肤社区](docs/skin-community.md)）；官网词条投稿写 GitHub 前取跨副本的 advisory lock，同一时刻只有一个副本改滚动分支；系统状态由持有 advisory lock 的一个主副本汇总所有副本的分钟计数后统一判定（见[管理后台](docs/admin.md)「系统状态的多副本行为」）；数据库迁移在 advisory lock 下串行执行，多个副本同时启动也只会建一次表。
 - 滚动升级时新旧版本短暂并存：旧版本副本仍在本进程内保存 AI 插画任务（新旧副本互相看不到对方的任务，客户端可能收到 404 后重新生成）、不取词条投稿锁、按旧逻辑各自判定系统状态（当天可用分钟数可能多计）。所有副本升级完成后恢复。按最小权限部署时，先用有 DDL 权限的账号执行 `-migrate-users`，再给运行角色授予新表 `skin_jobs`、`admin_service_minutes`、`admin_service_verdicts` 的 `SELECT, INSERT, UPDATE, DELETE`。

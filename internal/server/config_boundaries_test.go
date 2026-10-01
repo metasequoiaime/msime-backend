@@ -26,6 +26,7 @@ func TestConfigurationBoundaries(t *testing.T) {
 		"concurrency high":     func(c *Config) { c.MaxConcurrent = 1025 },
 		"replicas low":         func(c *Config) { c.Replicas = -1 },
 		"replicas high":        func(c *Config) { c.Replicas = 65 },
+		"replicas without db":  func(c *Config) { c.Replicas = 2 },
 		"timeout low":          func(c *Config) { c.TimeoutSeconds = -1 },
 		"timeout high":         func(c *Config) { c.TimeoutSeconds = 121 },
 		"no clients":           func(c *Config) { c.Clients = nil },
@@ -93,6 +94,9 @@ func TestConfigurationBoundaries(t *testing.T) {
 	}
 	c = base()
 	c.Replicas = 64
+	// Only a deployment with the shared database may run several replicas; Validate only checks that its settings are present.
+	t.Setenv("CONFIG_TEST_DATABASE", "postgres://synthetic.invalid/db")
+	c.Auth = account.Config{Enabled: true, DatabaseEnv: "CONFIG_TEST_DATABASE", PepperEnv: "CONFIG_TEST_TOKEN"}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}

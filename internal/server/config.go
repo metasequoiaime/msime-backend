@@ -151,6 +151,10 @@ func (c *Config) Validate() error {
 	if c.Replicas < 1 || c.Replicas > maxReplicas {
 		return errors.New("replicas must be 1..64")
 	}
+	// Without the database every mechanism that keeps replicas consistent (shared rate limits, skin artwork jobs) falls back to per-process memory, so a job polled on another replica is not found and every cap multiplies by the replica count.
+	if c.Replicas > 1 && !c.Auth.Enabled {
+		return errors.New("replicas > 1 requires auth.enabled: shared state lives in PostgreSQL")
+	}
 	if c.TimeoutSeconds == 0 {
 		c.TimeoutSeconds = 30
 	}
