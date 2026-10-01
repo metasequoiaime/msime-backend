@@ -35,6 +35,7 @@ func adminProfileText(s string, max int) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
 type AdminLoginFlow struct{ Nonce, Verifier string }
 type adminActorKey struct{}
 

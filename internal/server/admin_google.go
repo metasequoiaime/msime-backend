@@ -96,6 +96,7 @@ type adminAuthStore interface {
 	// AdminTokenIdentity resolves a personal access token (account.AdminTokenPrefix) to its identity.
 	AdminTokenIdentity(context.Context, string) (account.AdminIdentity, error)
 }
+
 // adminGoogleScopes asks for the profile scope only to show the admin's Google name on the console; the avatar is never loaded because the console's CSP allows images from itself only.
 var adminGoogleScopes = []string{oidc.ScopeOpenID, "email", "profile"}
 
