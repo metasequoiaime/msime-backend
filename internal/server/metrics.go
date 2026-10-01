@@ -1,12 +1,14 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -23,10 +25,10 @@ var latencyBoundsMS = [...]int{25, 50, 100, 200, 300, 500, 750, 1000, 1500, 2000
 const (
 	// overflowBucket is the histogram key of calls slower than the last bound.
 	overflowBucket = "inf"
-	// recentMinutes is how many one-minute slots each service keeps for the status probe's window.
-	recentMinutes = 10
 	// pendingRetention bounds how long unflushed hourly buckets are kept while the database is unreachable.
 	pendingRetention = 7 * 24 * time.Hour
+	// pendingMinuteRetention bounds how long unflushed minute buckets are kept while the database is unreachable: older minutes are outside every window the status probe will still judge.
+	pendingMinuteRetention = time.Hour
 )
 
 type latencyHistogram [len(latencyBoundsMS) + 1]int64
@@ -132,30 +134,29 @@ type hourKey struct {
 	hour    int64
 }
 
-type minuteSlot struct {
-	minute int64
-	counts metricCounts
+// minuteKey is a service and the Unix time of the start of a UTC minute.
+type minuteKey struct {
+	service string
+	minute  int64
 }
 
-// serviceMetrics aggregates upstream calls per service and hour in memory; Server.metrics holds the process's instance. The zero value is ready to use. Hourly buckets hold only what has not been flushed to admin_service_metrics yet; the per-minute ring feeds the status probe's five-minute window; status is the latest probe result.
+// serviceMetrics aggregates this process's upstream calls per service, by hour and by minute; Server.metrics holds the process's instance. The zero value is ready to use. Both hold only what has not been flushed yet: hours to admin_service_metrics for the cloud page and the daily P95, minutes to admin_service_minutes, where the status probe's leader judges the calls of every replica together.
 type serviceMetrics struct {
 	mu      sync.Mutex
 	hours   map[hourKey]*metricCounts
-	minutes map[string]*[recentMinutes]minuteSlot
-	status  statusSnapshot
+	minutes map[minuteKey]*metricCounts
 }
 
 // record adds one call that finished at at.
 func (m *serviceMetrics) record(service string, at time.Time, latency time.Duration, failed bool, usage float64) {
 	at = at.UTC()
-	minute := at.Unix() / 60
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.hours == nil {
 		m.hours = map[hourKey]*metricCounts{}
 	}
 	if m.minutes == nil {
-		m.minutes = map[string]*[recentMinutes]minuteSlot{}
+		m.minutes = map[minuteKey]*metricCounts{}
 	}
 	key := hourKey{service, at.Truncate(time.Hour).Unix()}
 	bucket := m.hours[key]
@@ -164,34 +165,13 @@ func (m *serviceMetrics) record(service string, at time.Time, latency time.Durat
 		m.hours[key] = bucket
 	}
 	bucket.observe(latency, failed, usage)
-	ring := m.minutes[service]
-	if ring == nil {
-		ring = &[recentMinutes]minuteSlot{}
-		m.minutes[service] = ring
+	mkey := minuteKey{service, at.Truncate(time.Minute).Unix()}
+	slot := m.minutes[mkey]
+	if slot == nil {
+		slot = &metricCounts{}
+		m.minutes[mkey] = slot
 	}
-	slot := &ring[minute%recentMinutes]
-	if slot.minute != minute {
-		*slot = minuteSlot{minute: minute}
-	}
-	slot.counts.observe(latency, failed, usage)
-}
-
-// recent sums service's calls in the minutes (now-window, now].
-func (m *serviceMetrics) recent(service string, now time.Time, window int) metricCounts {
-	current := now.UTC().Unix() / 60
-	var total metricCounts
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	ring := m.minutes[service]
-	if ring == nil {
-		return total
-	}
-	for _, slot := range ring {
-		if slot.minute > current-int64(window) && slot.minute <= current {
-			total.add(slot.counts)
-		}
-	}
-	return total
+	slot.observe(latency, failed, usage)
 }
 
 // take removes and returns the unflushed hourly buckets as database rows.
@@ -201,6 +181,43 @@ func (m *serviceMetrics) take() []account.ServiceMetric {
 	m.hours = nil
 	m.mu.Unlock()
 	return metricRows(hours)
+}
+
+// takeMinutes removes and returns the unflushed minute buckets as database rows, in (minute, service) order.
+func (m *serviceMetrics) takeMinutes() []account.ServiceMinute {
+	m.mu.Lock()
+	minutes := m.minutes
+	m.minutes = nil
+	m.mu.Unlock()
+	rows := make([]account.ServiceMinute, 0, len(minutes))
+	for key, c := range minutes {
+		rows = append(rows, account.ServiceMinute{Service: key.service, Minute: time.Unix(key.minute, 0).UTC(), Calls: c.calls, Errors: c.errors, Latency: c.latency.histogramJSON()})
+	}
+	slices.SortFunc(rows, func(a, b account.ServiceMinute) int {
+		return cmp.Or(a.Minute.Compare(b.Minute), cmp.Compare(a.Service, b.Service))
+	})
+	return rows
+}
+
+// restoreMinutes puts back minute rows whose flush failed, dropping those older than pendingMinuteRetention.
+func (m *serviceMetrics) restoreMinutes(rows []account.ServiceMinute, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.minutes == nil {
+		m.minutes = map[minuteKey]*metricCounts{}
+	}
+	for _, row := range rows {
+		if now.Sub(row.Minute) > pendingMinuteRetention {
+			continue
+		}
+		key := minuteKey{row.Service, row.Minute.Unix()}
+		slot := m.minutes[key]
+		if slot == nil {
+			slot = &metricCounts{}
+			m.minutes[key] = slot
+		}
+		slot.add(metricCounts{calls: row.Calls, errors: row.Errors, latency: histogramFromJSON(row.Latency)})
+	}
 }
 
 // pending returns a copy of the unflushed hourly buckets without removing them.
@@ -231,11 +248,15 @@ func (m *serviceMetrics) restore(rows []account.ServiceMetric, now time.Time) {
 	}
 }
 
+// metricRows lists hourly buckets in (hour, service) order: every replica upserts the same rows each minute, and a common order keeps their transactions from deadlocking.
 func metricRows(hours map[hourKey]*metricCounts) []account.ServiceMetric {
 	rows := make([]account.ServiceMetric, 0, len(hours))
 	for key, c := range hours {
 		rows = append(rows, account.ServiceMetric{Service: key.service, Hour: time.Unix(key.hour, 0).UTC(), Calls: c.calls, Errors: c.errors, Latency: c.latency.histogramJSON(), Usage: c.usage})
 	}
+	slices.SortFunc(rows, func(a, b account.ServiceMetric) int {
+		return cmp.Or(a.Hour.Compare(b.Hour), cmp.Compare(a.Service, b.Service))
+	})
 	return rows
 }
 
@@ -243,17 +264,20 @@ func rowCounts(row account.ServiceMetric) metricCounts {
 	return metricCounts{calls: row.Calls, errors: row.Errors, latency: histogramFromJSON(row.Latency), usage: row.Usage}
 }
 
-// flushMetrics writes the unflushed hourly buckets to the database, keeping them in memory when the write fails.
+// flushMetrics writes this process's unflushed hourly and minute buckets to the database, keeping in memory whatever fails to write. Every replica runs it each minute and on Close.
 func (s *Server) flushMetrics(ctx context.Context) error {
-	rows := s.metrics.take()
-	if len(rows) == 0 {
-		return nil
+	var hourErr, minuteErr error
+	if rows := s.metrics.take(); len(rows) > 0 {
+		if hourErr = s.accounts.RecordServiceMetrics(ctx, rows); hourErr != nil {
+			s.metrics.restore(rows, time.Now())
+		}
 	}
-	if err := s.accounts.RecordServiceMetrics(ctx, rows); err != nil {
-		s.metrics.restore(rows, time.Now())
-		return err
+	if rows := s.metrics.takeMinutes(); len(rows) > 0 {
+		if minuteErr = s.accounts.RecordServiceMinutes(ctx, rows); minuteErr != nil {
+			s.metrics.restoreMinutes(rows, time.Now())
+		}
 	}
-	return nil
+	return errors.Join(hourErr, minuteErr)
 }
 
 // meterKey tags a request context with the metered call its upstream request is recorded as.

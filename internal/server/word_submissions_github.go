@@ -20,6 +20,8 @@ var (
 	errWordsUncertain     = errors.New("GitHub write outcome unknown")
 	errWordsUnavailable   = errors.New("GitHub unavailable")
 	errWordsMisconfigured = errors.New("GitHub App credentials rejected")
+	// Another replica's submission still held the cross-replica lock after wordSubmissionLockWait, or the database could not take it; nothing was read or written.
+	errWordsBusy = errors.New("another submission is being written")
 )
 
 const wordsPullRequestBody = `This is the rolling pull request for dictionary entries submitted anonymously through the forms on the MSIME website (msime.app). Each commit on this branch is one submission of one kind; its commit message lists the entries together with the submitter's note, if any.
@@ -109,6 +111,14 @@ func (f githubFile) text() (string, bool) {
 func (ws *wordSubmitter) submit(ctx context.Context, sub submission) (int, error) {
 	ws.writes.Lock()
 	defer ws.writes.Unlock()
+	// Without this lock two replicas that both find no open pull request each create a community-words/<UTC second> branch and open a pull request of their own; the blob SHA check cannot catch that because the branches differ. The in-process mutex above stays in front so a replica queues its own requests locally and holds at most one database connection for the lock.
+	if ws.locks != nil {
+		release, err := ws.locks.WaitLock(ctx, "word-submissions:"+strings.ToLower(ws.config.GitHub.Repository), wordSubmissionLockWait)
+		if err != nil {
+			return 0, errors.Join(errWordsBusy, err)
+		}
+		defer release()
+	}
 	token, err := ws.installationToken(ctx)
 	if err != nil {
 		return 0, err

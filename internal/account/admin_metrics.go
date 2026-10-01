@@ -22,6 +22,8 @@ var serviceKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 const (
 	serviceDailyRetentionDays   = 60
 	serviceMetricsRetentionDays = 90
+	// serviceDetailRetention is how long the per-minute metrics and verdicts are kept: the probe reads only its window and the previous verdict, the rest is for diagnosis.
+	serviceDetailRetention = 3 * time.Hour
 )
 
 // ServiceMetric is one service's upstream calls in one UTC hour. It never carries request or response content.
@@ -46,19 +48,24 @@ func (a *Service) RecordServiceMetrics(ctx context.Context, rows []ServiceMetric
 		if !serviceKeyPattern.MatchString(row.Service) || row.Calls < 0 || row.Errors < 0 || row.Usage < 0 {
 			return errors.New("invalid service metric")
 		}
-		latency := []byte("{}")
-		if row.Latency != nil {
-			var err error
-			if latency, err = json.Marshal(row.Latency); err != nil {
-				return err
-			}
+		latency, err := latencyJSON(row.Latency)
+		if err != nil {
+			return err
 		}
 		batch.Queue(`INSERT INTO admin_service_metrics AS m(service,hour,calls,errors,latency_buckets,usage) VALUES($1,date_trunc('hour',$2::timestamptz,'UTC'),$3,$4,$5::jsonb,$6)
 ON CONFLICT(service,hour) DO UPDATE SET calls=m.calls+EXCLUDED.calls, errors=m.errors+EXCLUDED.errors, usage=m.usage+EXCLUDED.usage,
- latency_buckets=(SELECT COALESCE(jsonb_object_agg(k,COALESCE((m.latency_buckets->>k)::bigint,0)+COALESCE((EXCLUDED.latency_buckets->>k)::bigint,0)),'{}'::jsonb)
-  FROM (SELECT jsonb_object_keys(m.latency_buckets) UNION SELECT jsonb_object_keys(EXCLUDED.latency_buckets)) AS keys(k))`,
-			row.Service, row.Hour.UTC(), row.Calls, row.Errors, string(latency), row.Usage)
+ latency_buckets=`+mergeLatencyBuckets,
+			row.Service, row.Hour.UTC(), row.Calls, row.Errors, latency, row.Usage)
 	}
+	return a.sendBatchTx(ctx, batch)
+}
+
+// mergeLatencyBuckets sums the latency histogram of an upsert's existing row m and its EXCLUDED row, bucket by bucket.
+const mergeLatencyBuckets = `(SELECT COALESCE(jsonb_object_agg(k,COALESCE((m.latency_buckets->>k)::bigint,0)+COALESCE((EXCLUDED.latency_buckets->>k)::bigint,0)),'{}'::jsonb)
+  FROM (SELECT jsonb_object_keys(m.latency_buckets) UNION SELECT jsonb_object_keys(EXCLUDED.latency_buckets)) AS keys(k))`
+
+// sendBatchTx runs batch in one transaction.
+func (a *Service) sendBatchTx(ctx context.Context, batch *pgx.Batch) error {
 	tx, err := a.store.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -68,6 +75,15 @@ ON CONFLICT(service,hour) DO UPDATE SET calls=m.calls+EXCLUDED.calls, errors=m.e
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// latencyJSON is the jsonb form of a latency histogram; nil is the empty object.
+func latencyJSON(buckets map[string]int64) (string, error) {
+	if buckets == nil {
+		return "{}", nil
+	}
+	b, err := json.Marshal(buckets)
+	return string(b), err
 }
 
 // ServiceMetrics returns the hourly rows from since onwards, oldest first.
@@ -140,11 +156,225 @@ func (a *Service) RecordServiceProbes(ctx context.Context, at time.Time, probes 
 			ok = 1
 		}
 		batch.Queue(`INSERT INTO admin_service_daily AS d(service,day,ok_minutes,total_minutes,degraded,p95_ms) VALUES($1,$2::date,$3,1,$4,$5)
-ON CONFLICT(service,day) DO UPDATE SET total_minutes=LEAST(d.total_minutes+1,1440),
- ok_minutes=CASE WHEN d.total_minutes>=1440 THEN GREATEST(LEAST(d.ok_minutes,1440)+EXCLUDED.ok_minutes-1,0) ELSE LEAST(d.ok_minutes+EXCLUDED.ok_minutes,d.total_minutes+1) END,
- degraded=d.degraded OR EXCLUDED.degraded, p95_ms=COALESCE(EXCLUDED.p95_ms,d.p95_ms)`, p.Service, day, ok, p.Degraded, p.P95MS)
+`+dailyRollupConflict, p.Service, day, ok, p.Degraded, p.P95MS)
 	}
 	return a.store.pool.SendBatch(ctx, batch).Close()
+}
+
+// dailyRollupConflict adds one probe minute, the EXCLUDED row, to an existing admin_service_daily row d.
+const dailyRollupConflict = `ON CONFLICT(service,day) DO UPDATE SET total_minutes=LEAST(d.total_minutes+1,1440),
+ ok_minutes=CASE WHEN d.total_minutes>=1440 THEN GREATEST(LEAST(d.ok_minutes,1440)+EXCLUDED.ok_minutes-1,0) ELSE LEAST(d.ok_minutes+EXCLUDED.ok_minutes,d.total_minutes+1) END,
+ degraded=d.degraded OR EXCLUDED.degraded, p95_ms=COALESCE(EXCLUDED.p95_ms,d.p95_ms)`
+
+// ServiceMinute is one service's upstream calls in one UTC minute: one replica's unflushed delta, or the sum of every replica once stored. It never carries request or response content.
+type ServiceMinute struct {
+	Service string
+	Minute  time.Time
+	Calls   int64
+	Errors  int64
+	// Latency counts calls per latency bucket, in the form of ServiceMetric.Latency.
+	Latency map[string]int64
+}
+
+// RecordServiceMinutes adds the given per-minute deltas to admin_service_minutes in one transaction. Every replica flushes its own calls here, so the rows are sums over all replicas; callers pass the rows in (minute, service) order so that two replicas flushing the same minutes lock the rows in the same order and cannot deadlock.
+func (a *Service) RecordServiceMinutes(ctx context.Context, rows []ServiceMinute) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	batch := &pgx.Batch{}
+	for _, row := range rows {
+		if !serviceKeyPattern.MatchString(row.Service) || row.Calls < 0 || row.Errors < 0 {
+			return errors.New("invalid service minute")
+		}
+		latency, err := latencyJSON(row.Latency)
+		if err != nil {
+			return err
+		}
+		batch.Queue(`INSERT INTO admin_service_minutes AS m(minute,service,calls,errors,latency_buckets) VALUES(date_trunc('minute',$1::timestamptz),$2,$3,$4,$5::jsonb)
+ON CONFLICT(minute,service) DO UPDATE SET calls=m.calls+EXCLUDED.calls, errors=m.errors+EXCLUDED.errors, latency_buckets=`+mergeLatencyBuckets,
+			row.Minute.UTC(), row.Service, row.Calls, row.Errors, latency)
+	}
+	return a.sendBatchTx(ctx, batch)
+}
+
+// ServiceMinutes returns the per-minute rows of the minutes in [from, to), oldest first.
+func (a *Service) ServiceMinutes(ctx context.Context, from, to time.Time) ([]ServiceMinute, error) {
+	rows, err := a.store.pool.Query(ctx, `SELECT minute,service,calls,errors,latency_buckets FROM admin_service_minutes WHERE minute>=$1 AND minute<$2 ORDER BY minute,service`, from.UTC(), to.UTC())
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (ServiceMinute, error) {
+		var m ServiceMinute
+		var latency []byte
+		if err := row.Scan(&m.Minute, &m.Service, &m.Calls, &m.Errors, &latency); err != nil {
+			return m, err
+		}
+		m.Minute = m.Minute.UTC()
+		return m, json.Unmarshal(latency, &m.Latency)
+	})
+}
+
+// ServiceVerdict is the status probe's judgement of one service in one minute.
+type ServiceVerdict struct {
+	Service string
+	// State is ok, idle, degraded or down.
+	State string
+	// Calls, Errors and P95MS describe the window the verdict was made on.
+	Calls  int64
+	Errors int64
+	P95MS  *int
+	// BadRuns and GoodRuns count consecutive degraded-or-down and ok-or-idle verdicts up to this one; Incident records that an automatic incident was opened, or found open, during the current bad streak, so it is not opened again after an admin resolves it while the service is still failing.
+	BadRuns, GoodRuns int
+	Incident          bool
+	CheckedAt         time.Time
+	// Daily is what this minute adds to admin_service_daily; its Service is ignored.
+	Daily ServiceProbe
+}
+
+var verdictStates = map[string]bool{"ok": true, "idle": true, "degraded": true, "down": true}
+
+// RecordServiceVerdicts stores the verdicts of minute and rolls each into admin_service_daily, in one transaction. A verdict already stored for the same minute and service is kept and the minute is not rolled up again, so two replicas that both believe they lead the probe still count each minute once. It reports how many verdicts were new.
+func (a *Service) RecordServiceVerdicts(ctx context.Context, minute time.Time, verdicts []ServiceVerdict) (int, error) {
+	if len(verdicts) == 0 {
+		return 0, nil
+	}
+	minute = minute.UTC().Truncate(time.Minute)
+	day := minute.Format(time.DateOnly)
+	batch := &pgx.Batch{}
+	for _, v := range verdicts {
+		if !serviceKeyPattern.MatchString(v.Service) || !verdictStates[v.State] {
+			return 0, errors.New("invalid service verdict")
+		}
+		ok := 0
+		if v.Daily.Available {
+			ok = 1
+		}
+		batch.Queue(`WITH v AS (INSERT INTO admin_service_verdicts(minute,service,state,calls,errors,p95_ms,bad_runs,good_runs,incident,checked_at) VALUES($1,$2::text,$3,$4,$5,$6,$7,$8,$9,$10)
+ ON CONFLICT(minute,service) DO NOTHING RETURNING service)
+INSERT INTO admin_service_daily AS d(service,day,ok_minutes,total_minutes,degraded,p95_ms) SELECT service,$11::date,$12::int,1,$13::boolean,$14::int FROM v
+`+dailyRollupConflict, minute, v.Service, v.State, v.Calls, v.Errors, v.P95MS, v.BadRuns, v.GoodRuns, v.Incident, v.CheckedAt.UTC(), day, ok, v.Daily.Degraded, v.Daily.P95MS)
+	}
+	tx, err := a.store.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	results := tx.SendBatch(ctx, batch)
+	recorded := 0
+	for range verdicts {
+		tag, err := results.Exec()
+		if err != nil {
+			results.Close()
+			return 0, err
+		}
+		recorded += int(tag.RowsAffected())
+	}
+	if err = results.Close(); err != nil {
+		return 0, err
+	}
+	return recorded, tx.Commit(ctx)
+}
+
+const verdictColumns = `service,state,calls,errors,p95_ms,bad_runs,good_runs,incident,checked_at`
+
+func scanVerdict(row pgx.CollectableRow) (ServiceVerdict, error) {
+	var v ServiceVerdict
+	err := row.Scan(&v.Service, &v.State, &v.Calls, &v.Errors, &v.P95MS, &v.BadRuns, &v.GoodRuns, &v.Incident, &v.CheckedAt)
+	v.CheckedAt = v.CheckedAt.UTC()
+	return v, err
+}
+
+// LatestServiceVerdicts returns the verdicts of the newest judged minute, the status every replica reports, ordered by service; none before the first probe.
+func (a *Service) LatestServiceVerdicts(ctx context.Context) ([]ServiceVerdict, error) {
+	rows, err := a.store.pool.Query(ctx, `SELECT `+verdictColumns+` FROM admin_service_verdicts WHERE minute=(SELECT max(minute) FROM admin_service_verdicts) ORDER BY service`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, scanVerdict)
+}
+
+// PreviousServiceVerdicts returns each service's newest verdict of a minute in [from, to), from which the probe continues its streaks.
+func (a *Service) PreviousServiceVerdicts(ctx context.Context, from, to time.Time) (map[string]ServiceVerdict, error) {
+	rows, err := a.store.pool.Query(ctx, `SELECT DISTINCT ON (service) `+verdictColumns+` FROM admin_service_verdicts WHERE minute>=$1 AND minute<$2 ORDER BY service,minute DESC`, from.UTC(), to.UTC())
+	if err != nil {
+		return nil, err
+	}
+	list, err := pgx.CollectRows(rows, scanVerdict)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]ServiceVerdict, len(list))
+	for _, v := range list {
+		out[v.Service] = v
+	}
+	return out, nil
+}
+
+// OpenAutoIncidents returns the services that have an automatically opened incident still open.
+func (a *Service) OpenAutoIncidents(ctx context.Context) (map[string]bool, error) {
+	rows, err := a.store.pool.Query(ctx, `SELECT service FROM admin_incidents WHERE state='open' AND auto`)
+	if err != nil {
+		return nil, err
+	}
+	services, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(services))
+	for _, service := range services {
+		out[service] = true
+	}
+	return out, nil
+}
+
+// statusLeaderLockSpace is the first key of the session advisory lock held by the replica that leads the status probe; the second is hashtext(current_schema()), so deployments in separate schemas of one database each elect their own leader.
+const statusLeaderLockSpace int32 = 0x6d737374
+
+// StatusLeader is the status probe's leadership: a session advisory lock held on a connection taken out of the pool, so it lasts until Release or until the connection dies, which ends the PostgreSQL session and frees the lock for another replica. Only one goroutine may use it.
+type StatusLeader struct{ conn *pgx.Conn }
+
+// AcquireStatusLeader tries once to become the status probe's leader. It returns nil and no error while another replica leads.
+func (a *Service) AcquireStatusLeader(ctx context.Context) (*StatusLeader, error) {
+	pooled, err := a.store.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var locked bool
+	if err = pooled.QueryRow(ctx, `SELECT pg_try_advisory_lock($1,hashtext(current_schema()))`, statusLeaderLockSpace).Scan(&locked); err != nil || !locked {
+		if err != nil {
+			// The statement may have taken the lock before the error reached us; returned to the pool, that connection would hold the leadership with nobody judging until the pool recycled it, so end its session instead.
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = pooled.Conn().Close(closeCtx)
+			cancel()
+		}
+		pooled.Release()
+		return nil, err
+	}
+	// Taken out of the pool, the connection cannot be handed to a request or recycled by the pool's lifetime limits while it holds the lock.
+	leader := &StatusLeader{conn: pooled.Hijack()}
+	if _, err = leader.conn.Exec(ctx, serverKeepalives); err != nil {
+		leader.Release()
+		return nil, err
+	}
+	return leader, nil
+}
+
+// Check confirms that the leader's session, and with it the lock, is still alive.
+func (l *StatusLeader) Check(ctx context.Context) error {
+	var one int
+	return l.conn.QueryRow(ctx, `SELECT 1`).Scan(&one)
+}
+
+// Release gives up leadership: it unlocks first, so the lock is free when Release returns rather than once the server has processed the disconnect, then ends the session. It is a no-op on nil.
+func (l *StatusLeader) Release() {
+	if l == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// A failed unlock leaves the lock to the end of the session below.
+	_, _ = l.conn.Exec(ctx, `SELECT pg_advisory_unlock($1,hashtext(current_schema()))`, statusLeaderLockSpace)
+	_ = l.conn.Close(ctx)
 }
 
 // ServiceDay is one service's availability on one UTC day.
@@ -225,12 +455,19 @@ func (a *Service) ResolveAutoIncident(ctx context.Context, service string) (bool
 	return tag.RowsAffected() > 0, err
 }
 
-// PruneServiceMonitoring drops daily rollups older than the status page's 60 days and hourly metrics older than 90 days.
+// PruneServiceMonitoring drops daily rollups older than the status page's 60 days, hourly metrics older than 90 days, and per-minute metrics and verdicts older than serviceDetailRetention.
 func (a *Service) PruneServiceMonitoring(ctx context.Context) error {
 	if _, err := a.store.pool.Exec(ctx, `DELETE FROM admin_service_daily WHERE day<(now() AT TIME ZONE 'UTC')::date-$1::int`, serviceDailyRetentionDays-1); err != nil {
 		return err
 	}
-	_, err := a.store.pool.Exec(ctx, `DELETE FROM admin_service_metrics WHERE hour<now()-make_interval(days=>$1::int)`, serviceMetricsRetentionDays)
+	if _, err := a.store.pool.Exec(ctx, `DELETE FROM admin_service_metrics WHERE hour<now()-make_interval(days=>$1::int)`, serviceMetricsRetentionDays); err != nil {
+		return err
+	}
+	detail := int(serviceDetailRetention / time.Second)
+	if _, err := a.store.pool.Exec(ctx, `DELETE FROM admin_service_minutes WHERE minute<now()-make_interval(secs=>$1::int)`, detail); err != nil {
+		return err
+	}
+	_, err := a.store.pool.Exec(ctx, `DELETE FROM admin_service_verdicts WHERE minute<now()-make_interval(secs=>$1::int)`, detail)
 	return err
 }
 

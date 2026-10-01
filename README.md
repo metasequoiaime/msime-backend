@@ -57,9 +57,18 @@ curl -G -H "Authorization: Bearer $MSIME_CLIENT_TOKEN" \
 
 客户端请求不需要传 `provider` 字段。翻译 provider 由服务端配置决定；可选的 `translation_fallbacks` 按配置顺序尝试。主 provider 返回上游错误、超时或无效响应时，服务端继续下一个 provider；请求参数错误和不支持的批量请求不会切换。只有腾讯 provider 支持当前 `texts` 批量格式。
 
-错误采用 `{"error":{"code":"...","message":"..."}}`：400 参数不合法、401 未认证、403 来源不允许、413 上传过大、415 格式不支持、429 限流、502 上游失败、503 功能关闭或并发已满、504 超时。错误不透传服务商正文。429/并发已满提供 Retry-After。额度按客户端的 token bucket 控制，重启会重置；当前限流适用于单进程部署，多副本需共享配额实现后再启用。
+错误采用 `{"error":{"code":"...","message":"..."}}`：400 参数不合法、401 未认证、403 来源不允许、413 上传过大、415 格式不支持、429 限流、502 上游失败、503 功能关闭或并发已满、504 超时。错误不透传服务商正文。429/并发已满提供 Retry-After。额度按认证主体的 token bucket 控制：设备令牌按 `clients[].requests_per_minute`，登录用户每分钟 120 次。桶保存在每个副本的进程内存里，候选这类几乎逐键请求的热路径不写数据库，重启会重置。顶层 `replicas`（默认 1，可设 1–64）填部署的副本数，每个副本对每个主体执行 ⌈额度 / `replicas`⌉ 次/分钟（至少 1 次），突发容量同样按这个份额计；在无粘性会话的轮询转发下，所有副本合计约等于配置的额度。向上取整会让合计略高（例如 5 次/分钟、2 个副本时合计最多 6 次），而单个客户端的请求没有被均匀分到各副本时，可能在合计用满前就收到 429。`replicas` 必须随扩缩容同步修改并滚动重启，否则合计会按比例偏离配置。详见下文「多副本部署」。
 
 浏览器访问须明确配置 HTTPS `allowed_origins`，不使用通配来源。原生客户端不需要 Origin。官网目前负责展示与下载，没有在线输入功能，不应添加不需要的云调用。
+
+## 多副本部署
+
+服务可以在同一个 PostgreSQL 后面运行多个副本（例如 k8s 多副本经 Cloudflare Tunnel 轮询转发、无粘性会话）。多副本部署必须启用用户体系和数据库（`auth.enabled`）：没有数据库时，本该经数据库共享的限流、AI 插画任务等状态只能退回各进程内存，副本之间互不可见，所以 `replicas` 大于 1 而未启用 `auth.enabled` 时服务拒绝启动。顶层 `replicas` 填实际副本数。
+
+- 经 PostgreSQL 共享：账号、会话和社区数据；`auth_rates` 上的数据库限流（登录、社区接口、官网词条投稿、管理后台的 `admin`/`admin-auth`/`admin-login` 三项限额等，固定一分钟窗口）；共享译文缓存；遥测和管理后台数据；AI 插画任务存在 `skin_jobs` 表，任何副本都能轮询和取消，每主体与全局上限按整个部署计算（见[皮肤社区](docs/skin-community.md)）；官网词条投稿写 GitHub 前取跨副本的 advisory lock，同一时刻只有一个副本改滚动分支；系统状态由持有 advisory lock 的一个主副本汇总所有副本的分钟计数后统一判定（见[管理后台](docs/admin.md)「系统状态的多副本行为」）；数据库迁移在 advisory lock 下串行执行，多个副本同时启动也只会建一次表。
+- 滚动升级时新旧版本短暂并存：旧版本副本仍在本进程内保存 AI 插画任务（新旧副本互相看不到对方的任务，客户端可能收到 404 后重新生成）、不取词条投稿锁、按旧逻辑各自判定系统状态（当天可用分钟数可能多计）。所有副本升级完成后恢复。旧版本不认识顶层 `replicas`，而配置中的未知字段会让服务拒绝启动：先让所有副本都运行新版本，再在配置里加入 `replicas` 并滚动重启；回退到旧版本（如 `kubectl rollout undo`，它不会回退单独管理的 ConfigMap）之前，先从配置中删除 `replicas`，否则重启的旧版本副本会反复启动失败。按最小权限部署时，先用有 DDL 权限的账号执行 `-migrate-users`，再给运行角色授予新表 `skin_jobs`、`admin_service_minutes`、`admin_service_verdicts` 的 `SELECT, INSERT, UPDATE, DELETE`。
+- 按副本计算：主接口 token bucket（设备令牌和登录用户），每个副本执行 ⌈额度 / `replicas`⌉；`max_concurrent` 并发槽（实时语音会话也各占所在副本的一个）；插件发布 4 个、下载 8 个名额，原生 Engine 查询 4 路，候选皮肤图片解码 2 路，词库快照恢复 1 路。这些上限的总量随副本数增加，设置时按单个副本的资源计算。
+- 可容忍的短暂不一致：敏感词改动最多 30 秒后在所有副本生效；管理后台的全局搜索索引在各副本内存里分别建立，可能短时不同；一个副本写 GitHub 后，其他副本的 GitHub 读缓存最多 60 秒后才看到变化；上游调用指标先在内存中累积、每分钟写回数据库，副本被强制终止时最多丢失最近约 1 分钟的计数。
 
 ## 验证
 
@@ -151,7 +160,7 @@ WAV 上传现在校验 RIFF 文件长度、分块边界、fmt/data 必需块和�
 
 管理员配置 `streaming.url` 为豆包 WSS 接口地址，例如 `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`，`token_env` 指向供应商 API Key 环境变量，`resource_id` 填写账户对应资源 ID。旧 App Key/Access Key 模式还须设置 `app_key_env`；设备请求无法覆盖这些上游头。空 URL 禁用功能，能力查询返回 `streaming_transcription: false`。
 
-单条消息最大 1 MiB，每个方向每次会话累计最大 32 MiB。`max_seconds` 默认 120，可设为 1–600；会话占用一个全局并发槽。任一端断开、时限到达或服务关闭时，两个连接均释放。反向代理须允许 WebSocket Upgrade，并设置至少与会话时长一致的空闲超时。不会将供应商 HTTP 错误正文或 WebSocket 关闭原因返回设备。
+单条消息最大 1 MiB，每个方向每次会话累计最大 32 MiB。`max_seconds` 默认 120，可设为 1–600；会话占用所在副本的一个并发槽（`max_concurrent` 按副本计算）。任一端断开、时限到达或服务关闭时，两个连接均释放。反向代理须允许 WebSocket Upgrade，并设置至少与会话时长一致的空闲超时。不会将供应商 HTTP 错误正文或 WebSocket 关闭原因返回设备。
 
 Windows 设置中选择“MSIME 共通后端（实时语音）”，地址填写 `wss://你的服务/v1/audio/stream`，令牌填写设备令牌；无需填写豆包 App Key。保留原有录音、实时预编辑与会话代次校验。服务端 WSS 已通过真实合作服务的合成录音验收，Windows 目标语法检查也已通过；Windows 原生录音宿主仍需独立设备验收。
 
@@ -245,7 +254,7 @@ EveryAPI 合作服务实时语音配置：
 
 ## 官网词条提交
 
-官网表单（msime-web#213）匿名调用 `GET /v1/community/word-submissions`（返回 `{enabled, site_key}`）和 `POST /v1/community/word-submissions`（`{kind, entries, note, token}`）。`kind` 省略时为 `words`，另有 `english` 和 `translations`，其他值返回 `invalid_kind`。服务端校验 1–20 个条目和不超过 500 字的备注：`words` 的条目为 `{word,pinyin}`（词语为 1–16 个汉字或〇，拼音为小写全拼、`'` 分隔、音节数等于字数、音节取自与官网相同的 402 音节表，ü 写作 v、lüe/nüe 写作 lve/nve）；`english` 的条目为 `{word,display}`（word 为最多 64 个小写字母 a–z，display 为最多 64 字符的显示词形）；`translations` 的条目为 `{source,gloss}`（原词最多 64 字符且不以 `#` 开头，译文最多 200 字符）。display、source、gloss 去掉首尾空白，不得含制表符、换行或零宽等控制与格式字符。再做 Cloudflare Turnstile 服务端校验（action `words`，hostname 必须属于 `allowed_origins`）和按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，复用 `auth_rates` 表，只存地址摘要）。通过后用专用 GitHub App 追加到 msime-dictionary：`words` 写 `词语<TAB>拼音<TAB>权重` 到 `custom/words.txt`，权重取基础词库（Engine 的 `pinyin_weight_medians`）同音节数词条的权重中位数（8 及以上音节合并），再限制在 words.txt 现有权重范围内以满足 check-words 门禁；Engine 不可用时用 5000，失败不缓存。`english` 写 `单词<TAB>显示词形<TAB>1` 到 `custom/english.txt`，先经 `listed_english_batch` 排除 english.db 已有的同一对。`translations` 写 `原词<TAB>译文` 到 `custom/translations.txt`，同一原词的后一行覆盖前一行，只拒绝完全相同的一对。各类型还会拒绝分支文件中已有的相同条目（`already_listed`）。三类共用一个滚动 Pull Request：有开启的 `community-words/*` Pull Request 就追加提交，否则新建 `community-words/<UTC 时间>` 分支并开 PR；标题按分支相对主分支在三个文件中新增的行数汇总，例如 `feat(custom): add 3 words, 1 English word and 2 translations`。文件 blob SHA 冲突返回 409，写入结果未知返回 502 `uncertain:true`，服务端从不自动重试写入，也不删除或强推。词条、备注和令牌不写日志。
+官网表单（msime-web#213）匿名调用 `GET /v1/community/word-submissions`（返回 `{enabled, site_key}`）和 `POST /v1/community/word-submissions`（`{kind, entries, note, token}`）。`kind` 省略时为 `words`，另有 `english` 和 `translations`，其他值返回 `invalid_kind`。服务端校验 1–20 个条目和不超过 500 字的备注：`words` 的条目为 `{word,pinyin}`（词语为 1–16 个汉字或〇，拼音为小写全拼、`'` 分隔、音节数等于字数、音节取自与官网相同的 402 音节表，ü 写作 v、lüe/nüe 写作 lve/nve）；`english` 的条目为 `{word,display}`（word 为最多 64 个小写字母 a–z，display 为最多 64 字符的显示词形）；`translations` 的条目为 `{source,gloss}`（原词最多 64 字符且不以 `#` 开头，译文最多 200 字符）。display、source、gloss 去掉首尾空白，不得含制表符、换行或零宽等控制与格式字符。Turnstile 校验之前先过一道按客户端地址每分钟 10 次的闸门（超限 429 `rate_limit_exceeded`、`Retry-After: 60`），免得脚本让服务端无限次调用 siteverify；它和下面的提交限流一样记在 PostgreSQL 的 `auth_rates` 表（作用域 `word-submissions`），所有副本共享。再做 Cloudflare Turnstile 服务端校验（action `words`，hostname 必须属于 `allowed_origins`）和按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，复用 `auth_rates` 表，只存地址摘要）。限流计数失败返回 503 `rate_limit_unavailable`。通过后用专用 GitHub App 追加到 msime-dictionary：`words` 写 `词语<TAB>拼音<TAB>权重` 到 `custom/words.txt`，权重取基础词库（Engine 的 `pinyin_weight_medians`）同音节数词条的权重中位数（8 及以上音节合并），再限制在 words.txt 现有权重范围内以满足 check-words 门禁；Engine 不可用时用 5000，失败不缓存。`english` 写 `单词<TAB>显示词形<TAB>1` 到 `custom/english.txt`，先经 `listed_english_batch` 排除 english.db 已有的同一对。`translations` 写 `原词<TAB>译文` 到 `custom/translations.txt`，同一原词的后一行覆盖前一行，只拒绝完全相同的一对。各类型还会拒绝分支文件中已有的相同条目（`already_listed`）。三类共用一个滚动 Pull Request：有开启的 `community-words/*` Pull Request 就追加提交，否则新建 `community-words/<UTC 时间>` 分支并开 PR；标题按分支相对主分支在三个文件中新增的行数汇总，例如 `feat(custom): add 3 words, 1 English word and 2 translations`。写入 GitHub 的整段读改写（查找开启的 PR、读文件、建分支、提交、开 PR 或改标题）在同一进程内由互斥锁串行，在副本之间由按目标仓库加的 PostgreSQL 会话级 advisory 锁串行，所以多副本同时收到提交时只会开一个滚动 PR；锁只在写 GitHub 期间占用一个数据库连接，等待时不占连接；持锁连接设置了服务端 TCP keepalive，持锁副本所在节点失联时 PostgreSQL 约 1 分钟后结束该会话并释放锁；最多等 15 秒，等不到或数据库无法加锁时返回 503 `server_busy` 并带 `Retry-After: 30`，此时 GitHub 上没有任何写入。文件 blob SHA 冲突返回 409，写入结果未知返回 502 `uncertain:true`，服务端从不自动重试写入，也不删除或强推。词条、备注和令牌不写日志。
 
 需要用户体系（PostgreSQL）和包含官网的 `allowed_origins`（例如 `https://msime.app`）。`turnstile.site_key` 为空时功能关闭；填写后其余字段缺一不可，否则服务拒绝启动：
 

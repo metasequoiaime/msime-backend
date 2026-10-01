@@ -92,7 +92,12 @@ func (s *Server) adminCloud(w http.ResponseWriter, r *http.Request) {
 			t.hours[i].add(counts)
 		}
 	}
-	_, states := s.statusStates()
+	_, states, err := s.statusStates(ctx)
+	if err != nil {
+		slog.Error("admin cloud failed", "reason", err.Error())
+		fail(w, 503, "auth_unavailable")
+		return
+	}
 	services := s.monitoredServices()
 	out := make([]serviceJSON, 0, len(services))
 	for _, svc := range services {

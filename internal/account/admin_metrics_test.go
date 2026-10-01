@@ -12,7 +12,7 @@ import (
 func monitoringService(t *testing.T) (*Service, *Store) {
 	t.Helper()
 	db := testStore(t)
-	if _, err := db.pool.Exec(context.Background(), `TRUNCATE admin_service_metrics, admin_service_daily, admin_incidents, admin_audit`); err != nil {
+	if _, err := db.pool.Exec(context.Background(), `TRUNCATE admin_service_metrics, admin_service_daily, admin_service_minutes, admin_service_verdicts, admin_incidents, admin_audit`); err != nil {
 		t.Fatal(err)
 	}
 	return &Service{store: db}, db
@@ -136,6 +136,20 @@ INSERT INTO admin_service_metrics(service,hour,calls) VALUES('chat',date_trunc('
 	}
 	if days != 1 || hours != 1 {
 		t.Fatalf("after pruning: %d daily rows, %d hourly rows", days, hours)
+	}
+	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_service_minutes(minute,service,calls) VALUES(date_trunc('minute',now())-interval '170 minutes','chat',1),(date_trunc('minute',now())-interval '190 minutes','chat',1);
+INSERT INTO admin_service_verdicts(minute,service,state,checked_at) VALUES(date_trunc('minute',now())-interval '170 minutes','chat','ok',now()),(date_trunc('minute',now())-interval '190 minutes','chat','ok',now())`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PruneServiceMonitoring(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var minutes, verdicts int
+	if err := db.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM admin_service_minutes),(SELECT count(*) FROM admin_service_verdicts)`).Scan(&minutes, &verdicts); err != nil {
+		t.Fatal(err)
+	}
+	if minutes != 1 || verdicts != 1 {
+		t.Fatalf("after pruning: %d minute rows, %d verdicts", minutes, verdicts)
 	}
 	if err := a.PingDatabase(ctx); err != nil {
 		t.Fatal(err)
@@ -291,4 +305,134 @@ func TestIncidentActions(t *testing.T) {
 func jsonString(id int64) string {
 	b, _ := json.Marshal(id)
 	return string(b)
+}
+
+// Every replica adds its own minute deltas; the stored rows are their sums, and a window read returns exactly the minutes asked for.
+func TestServiceMinutesAccumulate(t *testing.T) {
+	a, _ := monitoringService(t)
+	ctx := context.Background()
+	minute := time.Now().UTC().Truncate(time.Minute)
+	replicaA := []ServiceMinute{{Service: "chat", Minute: minute.Add(-2 * time.Minute), Calls: 2, Errors: 1, Latency: map[string]int64{"100": 1, "5000": 1}}, {Service: "chat", Minute: minute.Add(-time.Minute), Calls: 1, Latency: map[string]int64{"50": 1}}}
+	replicaB := []ServiceMinute{{Service: "chat", Minute: minute.Add(-2*time.Minute + 30*time.Second), Calls: 3, Latency: map[string]int64{"100": 2, "inf": 1}}, {Service: "chat", Minute: minute, Calls: 9}}
+	for _, rows := range [][]ServiceMinute{replicaA, replicaB} {
+		if err := a.RecordServiceMinutes(ctx, rows); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := a.ServiceMinutes(ctx, minute.Add(-5*time.Minute), minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || !rows[0].Minute.Equal(minute.Add(-2*time.Minute)) || rows[0].Calls != 5 || rows[0].Errors != 1 || rows[1].Calls != 1 {
+		t.Fatalf("window rows = %+v", rows)
+	}
+	if l := rows[0].Latency; l["100"] != 3 || l["5000"] != 1 || l["inf"] != 1 || len(l) != 3 {
+		t.Fatalf("summed latency = %v", l)
+	}
+	if err := a.RecordServiceMinutes(ctx, []ServiceMinute{{Service: "Bad Key", Minute: minute, Calls: 1}}); err == nil {
+		t.Fatal("an invalid service key was stored")
+	}
+}
+
+// A minute's verdict is stored once: a second write of the same minute neither replaces it nor rolls the minute into the daily table again. The newest minute is the shared status, and the previous verdicts carry the streaks.
+func TestServiceVerdictsCountEachMinuteOnce(t *testing.T) {
+	a, db := monitoringService(t)
+	ctx := context.Background()
+	minute := time.Now().UTC().Truncate(time.Minute)
+	if latest, err := a.LatestServiceVerdicts(ctx); err != nil || len(latest) != 0 {
+		t.Fatalf("latest before any probe = %+v, %v", latest, err)
+	}
+	p95 := 420
+	verdict := func(state string, bad int) ServiceVerdict {
+		return ServiceVerdict{Service: "chat", State: state, Calls: 7, Errors: 1, P95MS: &p95, BadRuns: bad, Incident: bad >= 3, CheckedAt: time.Now(), Daily: ServiceProbe{Available: state != "down", Degraded: state != "ok", P95MS: &p95}}
+	}
+	for i, state := range []string{"degraded", "down", "degraded"} {
+		n, err := a.RecordServiceVerdicts(ctx, minute.Add(time.Duration(i-2)*time.Minute+10*time.Second), []ServiceVerdict{verdict(state, i+1), {Service: "database", State: "ok", CheckedAt: time.Now(), Daily: ServiceProbe{Available: true}}})
+		if err != nil || n != 2 {
+			t.Fatalf("minute %d recorded %d, %v", i, n, err)
+		}
+	}
+	// Another leader judging the newest minute again changes nothing.
+	if n, err := a.RecordServiceVerdicts(ctx, minute, []ServiceVerdict{verdict("ok", 0), {Service: "database", State: "down", CheckedAt: time.Now()}}); err != nil || n != 0 {
+		t.Fatalf("repeated minute recorded %d, %v", n, err)
+	}
+	var ok, total int
+	if err := db.pool.QueryRow(ctx, `SELECT ok_minutes,total_minutes FROM admin_service_daily WHERE service='chat'`).Scan(&ok, &total); err != nil || ok != 2 || total != 3 {
+		t.Fatalf("chat day = %d/%d, %v", ok, total, err)
+	}
+	latest, err := a.LatestServiceVerdicts(ctx)
+	if err != nil || len(latest) != 2 || latest[0].Service != "chat" || latest[0].State != "degraded" || latest[0].BadRuns != 3 || !latest[0].Incident || *latest[0].P95MS != 420 || latest[1].State != "ok" {
+		t.Fatalf("latest = %+v, %v", latest, err)
+	}
+	previous, err := a.PreviousServiceVerdicts(ctx, minute.Add(-10*time.Minute), minute)
+	if err != nil || len(previous) != 2 || previous["chat"].State != "down" || previous["chat"].BadRuns != 2 {
+		t.Fatalf("previous = %+v, %v", previous, err)
+	}
+	if previous, err = a.PreviousServiceVerdicts(ctx, minute.Add(-time.Minute), minute); err != nil || len(previous) != 2 || previous["chat"].BadRuns != 2 {
+		t.Fatalf("previous within a minute = %+v, %v", previous, err)
+	}
+	if _, err = a.RecordServiceVerdicts(ctx, minute, []ServiceVerdict{{Service: "chat", State: "broken"}}); err == nil {
+		t.Fatal("an unknown state was stored")
+	}
+	if _, err = a.OpenAutoIncident(ctx, "chat", "AI 联想响应变慢", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.pool.Exec(ctx, `INSERT INTO admin_incidents(service,title) VALUES('translation','人工记录')`); err != nil {
+		t.Fatal(err)
+	}
+	if open, err := a.OpenAutoIncidents(ctx); err != nil || len(open) != 1 || !open["chat"] {
+		t.Fatalf("open automatic incidents = %v, %v", open, err)
+	}
+}
+
+// One session at a time holds the status leader lock; giving it up, or the session dying, lets the next replica take it.
+func TestStatusLeaderLock(t *testing.T) {
+	a, db := monitoringService(t)
+	b := &Service{store: db}
+	ctx := context.Background()
+	first, err := a.AcquireStatusLeader(ctx)
+	if err != nil || first == nil {
+		t.Fatalf("first = %v, %v", first, err)
+	}
+	if second, err := b.AcquireStatusLeader(ctx); err != nil || second != nil {
+		t.Fatalf("a second leader = %v, %v", second, err)
+	}
+	if err = first.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+	second, err := b.AcquireStatusLeader(ctx)
+	if err != nil || second == nil {
+		t.Fatalf("after release = %v, %v", second, err)
+	}
+	// A session that dies, as when the leader's host vanishes, frees the lock, and the old leader's check fails.
+	// pg_locks is cluster-wide and replicas of other tests or runs against the same server hold the same lock in their own schemas, so only this database and schema's lock is touched.
+	const leaderLock = `FROM pg_locks WHERE locktype='advisory' AND classid=$1 AND objsubid=2 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND objid=(hashtext(current_schema())::bigint & 4294967295)::oid`
+	if _, err = db.pool.Exec(ctx, `SELECT pg_terminate_backend(pid) `+leaderLock, int64(statusLeaderLockSpace)); err != nil {
+		t.Fatal(err)
+	}
+	if err = second.Check(ctx); err == nil {
+		t.Fatal("a terminated leader still passes its check")
+	}
+	// pg_terminate_backend only signals the backend; its lock goes when it has exited.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var held bool
+		if err = db.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 `+leaderLock+`)`, int64(statusLeaderLockSpace)).Scan(&held); err != nil {
+			t.Fatal(err)
+		}
+		if !held {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the terminated session kept its lock")
+		}
+	}
+	second.Release()
+	third, err := a.AcquireStatusLeader(ctx)
+	if err != nil || third == nil {
+		t.Fatalf("after the session died = %v, %v", third, err)
+	}
+	third.Release()
+	var nilLeader *StatusLeader
+	nilLeader.Release()
 }

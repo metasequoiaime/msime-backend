@@ -137,9 +137,7 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) bool {
 		if !s.adminMutationOrigin(w, r) {
 			return true
 		}
-		if !s.allow(Client{ID: "admin:" + actor, RequestsPerMinute: adminRateLimit}, time.Now()) {
-			w.Header().Set("Retry-After", "60")
-			fail(w, 429, "rate_limit_exceeded")
+		if !s.adminLimit(ctx, w, "admin", actor, adminRateLimit) {
 			return true
 		}
 		access, err := s.adminAccess(ctx, actor, email)

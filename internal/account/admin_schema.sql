@@ -209,6 +209,29 @@ CREATE TABLE IF NOT EXISTS admin_incidents (
 CREATE INDEX IF NOT EXISTS admin_incidents_time ON admin_incidents(started_at DESC);
 -- At most one automatically opened incident per service is open at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS admin_incidents_auto_open ON admin_incidents(service) WHERE state='open' AND auto;
+-- Per-minute call counts and latency histograms that every replica adds its own calls to, so the status probe judges a service by the traffic of all replicas. Kept for a few hours.
+CREATE TABLE IF NOT EXISTS admin_service_minutes (
+ minute timestamptz NOT NULL,
+ service text NOT NULL,
+ calls bigint NOT NULL DEFAULT 0,
+ errors bigint NOT NULL DEFAULT 0,
+ latency_buckets jsonb NOT NULL DEFAULT '{}',
+ PRIMARY KEY(minute,service)
+);
+-- One status verdict per service and minute, written only by the replica that leads the status probe. The primary key makes each minute count once in admin_service_daily; the newest minute is the status every replica reports; bad_runs, good_runs and incident carry the incident streaks across a change of leader. Kept for a few hours.
+CREATE TABLE IF NOT EXISTS admin_service_verdicts (
+ minute timestamptz NOT NULL,
+ service text NOT NULL,
+ state text NOT NULL CHECK(state IN ('ok','idle','degraded','down')),
+ calls bigint NOT NULL DEFAULT 0,
+ errors bigint NOT NULL DEFAULT 0,
+ p95_ms integer,
+ bad_runs integer NOT NULL DEFAULT 0,
+ good_runs integer NOT NULL DEFAULT 0,
+ incident boolean NOT NULL DEFAULT false,
+ checked_at timestamptz NOT NULL,
+ PRIMARY KEY(minute,service)
+);
 
 -- Daily download_count snapshots of GitHub Release assets; a day's downloads are the difference between adjacent snapshots.
 CREATE TABLE IF NOT EXISTS release_asset_snapshots (

@@ -15099,7 +15099,7 @@
             }
           },
           "503": {
-            "description": "功能未开启或配置无效、Turnstile/数据库/GitHub 暂不可用，或屏蔽词检查暂不可用（screening_unavailable）；此时尚未写入任何词条",
+            "description": "功能未开启或配置无效、Turnstile/数据库/GitHub 暂不可用、屏蔽词检查暂不可用（screening_unavailable），或其他副本对同一仓库的写入 15 秒内未完成（server_busy）；此时尚未写入任何词条",
             "content": {
               "application/json": {
                 "schema": {
@@ -15576,7 +15576,7 @@
         "tags": [
           "皮肤"
         ],
-        "description": "立即返回任务 ID，不等待生图。任务仅当前认证主体可访问；每主体最多 3 个任务，全局最多 min(8,max_concurrent) 个。草稿保留 10 分钟，服务重启会失效；不是持久化皮肤。领取结果后应 DELETE 释放。不要自动重试提交，避免重复生图。",
+        "description": "立即返回任务 ID，不等待生图。任务仅当前认证主体可访问；每主体最多 3 个任务，全局最多 min(8,max_concurrent) 个。草稿保留 10 分钟，不是持久化皮肤。启用数据库时任务存于共享表，任何副本都能查询和删除，上限按整个部署计算；未启用数据库时任务只在接受它的进程内，服务重启会失效。领取结果后应 DELETE 释放。不要自动重试提交，避免重复生图。",
         "requestBody": {
           "required": true,
           "content": {
@@ -15637,7 +15637,7 @@
             "description": "需要认证"
           },
           "503": {
-            "description": "未配置、容量已满或正在关闭"
+            "description": "未配置、容量已满或正在关闭（skin_jobs_busy），或任务存储暂不可用（job_unavailable）；均带 Retry-After"
           }
         }
       }
@@ -15659,7 +15659,7 @@
         "tags": [
           "皮肤"
         ],
-        "description": "running 时每 5 秒查询一次；succeeded 返回有界 PNG/JPEG 的 base64 数据；failed 不返回上游细节。不同主体、已删除、重启或过期的任务均返回 404。",
+        "description": "running 时每 5 秒查询一次；succeeded 返回有界 PNG/JPEG 的 base64 数据；failed 不返回上游细节。执行任务的副本关闭或失联时任务以 failed 结束。不同主体、已删除、过期，或未启用数据库时服务重启后的任务均返回 404。",
         "responses": {
           "200": {
             "description": "任务状态",
@@ -15717,6 +15717,9 @@
           },
           "404": {
             "description": "任务不存在或已失效"
+          },
+          "503": {
+            "description": "任务存储暂不可用"
           }
         }
       },
@@ -15727,13 +15730,16 @@
         ],
         "responses": {
           "204": {
-            "description": "已释放，运行中的上游请求已取消"
+            "description": "已释放；运行中的上游请求随即取消，任务在其他副本执行时最迟约 5 秒"
           },
           "401": {
             "description": "需要认证"
           },
           "404": {
             "description": "任务不存在或不属于当前主体"
+          },
+          "503": {
+            "description": "任务存储暂不可用"
           }
         }
       }

@@ -34,8 +34,11 @@ type Server struct {
 	skinActive int
 	skinOwners map[string]int
 
-	skinJobs    map[string]*skinArtworkJob
-	skinWorkers sync.WaitGroup
+	// skinJobs, skinActive and skinOwners hold the artwork jobs only when there is no database; with one the jobs live in skin_jobs and skinRunning maps the ids this replica executes to their cancel functions, so a DELETE that lands here stops the upstream call at once.
+	skinJobs      map[string]*skinArtworkJob
+	skinRunning   map[string]context.CancelFunc
+	skinHeartbeat time.Duration
+	skinWorkers   sync.WaitGroup
 
 	words *wordSubmitter
 
@@ -53,6 +56,8 @@ type Server struct {
 	mu          sync.Mutex
 	buckets     map[string]bucket
 	handler     http.Handler
+	// limits is the PostgreSQL rate limiter every replica shares (account.Service.RateLimit), used by limitShared; nil without a database.
+	limits rateLimiter
 
 	// adminGitHub is the console's GitHub App client; nil when admin.github is not configured.
 	adminGitHub *githubapp.Client
@@ -60,6 +65,10 @@ type Server struct {
 	adminJobs sync.WaitGroup
 	// metrics aggregates upstream calls for the console's cloud and status pages.
 	metrics serviceMetrics
+	// statusMu serializes the status probe's judgements and guards statusLeader, the status leader lock while this replica holds it, and statusPruned, when this replica last pruned the monitoring tables.
+	statusMu     sync.Mutex
+	statusLeader *account.StatusLeader
+	statusPruned time.Time
 	// dictPRs, issues and releaseIndex are the console's per-server memory of GitHub listings: notification de-duplication and the global search indexes.
 	dictPRs      dictPRState
 	issues       issueMemory
@@ -70,7 +79,7 @@ func New(c Config) (*Server, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	s := &Server{config: c, slots: make(chan struct{}, c.MaxConcurrent), buckets: map[string]bucket{}, client: &http.Client{Timeout: time.Duration(c.TimeoutSeconds) * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	s := &Server{config: c, slots: make(chan struct{}, c.MaxConcurrent), buckets: map[string]bucket{}, client: &http.Client{Timeout: time.Duration(c.TimeoutSeconds) * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, skinHeartbeat: skinJobHeartbeat}
 	s.lifetime, s.stop = context.WithCancel(context.Background())
 	// 30 秒:启动时可能要顺带补迁移,空库要建二十多张表。独立的 -migrate-users 入口本来就按这个额度
 	// 算,两边保持一致。
@@ -97,8 +106,12 @@ func New(c Config) (*Server, error) {
 		s.adminGitHub = s.config.Admin.adminGitHubClient()
 		s.startAdminJobs()
 	}
+	if s.accounts != nil {
+		s.limits = s.accounts
+	}
 	if c.WordSubmissions.enabled() && s.accounts != nil {
 		s.words = newWordSubmitter(c.WordSubmissions, c.AllowedOrigins, s.accounts)
+		s.words.locks = s.accounts
 	}
 	mux := http.NewServeMux()
 	// Anonymous website endpoints: the /v1/community/ prefix skips Bearer authentication in the middleware, and the handlers apply their own origin, Turnstile and rate checks.
@@ -224,7 +237,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			fail(w, 401, "unauthorized")
 			return
 		}
-		if !s.allow(*principal, time.Now()) {
+		if !s.allowPrincipal(*principal, time.Now()) {
 			w.Header().Set("Retry-After", "60")
 			fail(w, 429, "rate_limit_exceeded")
 			return
@@ -246,6 +259,20 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, skinJobOwnerKey{}, principal.ID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// allowPrincipal charges a main API principal (a configured client or a signed-in "user:" principal) against this replica's share of its limit. Requests are spread round-robin without sticky sessions, so each of the configured replicas enforcing ceil(limit/replicas) keeps the fleet-wide rate close to the configured one without a database write per request. Only the main API goes through here; the admin and word-submission limits go through limitShared, which counts in auth_rates across replicas and falls back to allow with the full limit only without a database.
+func (s *Server) allowPrincipal(c Client, now time.Time) bool {
+	c.RequestsPerMinute = replicaShare(c.RequestsPerMinute, s.config.Replicas)
+	return s.allow(c, now)
+}
+
+// replicaShare is ceil(limit/replicas), never below one request per minute, so a small limit still lets a client through on every replica.
+func replicaShare(limit, replicas int) int {
+	if replicas <= 1 {
+		return limit
+	}
+	return max(1, (limit+replicas-1)/replicas)
 }
 func (s *Server) allow(c Client, now time.Time) bool {
 	s.mu.Lock()

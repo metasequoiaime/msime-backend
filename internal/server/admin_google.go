@@ -246,9 +246,7 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 	if peerErr != nil {
 		peer = r.RemoteAddr
 	}
-	if !s.allow(Client{ID: "admin-auth:" + peer, RequestsPerMinute: 120}, time.Now()) {
-		w.Header().Set("Retry-After", "60")
-		fail(w, 429, "rate_limit_exceeded")
+	if !s.adminLimit(r.Context(), w, "admin-auth", peer, 120) {
 		return true
 	}
 	switch r.URL.Path {
@@ -295,8 +293,7 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 		if err != nil {
 			peer = r.RemoteAddr
 		}
-		if !s.allow(Client{ID: "admin-login:" + peer, RequestsPerMinute: 10}, time.Now()) {
-			fail(w, 429, "rate_limit_exceeded")
+		if !s.adminLimit(r.Context(), w, "admin-login", peer, 10) {
 			return true
 		}
 		state, nonce, verifier := adminRandom(), adminRandom(), oauth2.GenerateVerifier()

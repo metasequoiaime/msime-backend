@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jackc/pgx/v5"
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 )
 
@@ -55,7 +56,20 @@ func TestLatencyHistogram(t *testing.T) {
 	}
 }
 
-// Hourly buckets are taken for flushing, restored when the flush fails (dropping stale ones), and the minute ring answers the probe's window.
+// pendingCalls sums service's unflushed minute buckets.
+func pendingCalls(m *serviceMetrics, service string) metricCounts {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var total metricCounts
+	for key, c := range m.minutes {
+		if key.service == service {
+			total.add(*c)
+		}
+	}
+	return total
+}
+
+// Hourly and minute buckets are taken for flushing in a fixed order and restored when the flush fails, dropping stale ones.
 func TestServiceMetricsBuckets(t *testing.T) {
 	var m serviceMetrics
 	now := time.Date(2026, 10, 1, 12, 30, 0, 0, time.UTC)
@@ -63,11 +77,28 @@ func TestServiceMetricsBuckets(t *testing.T) {
 	m.record("chat", now.Add(-2*time.Minute), time.Second, true, 0)
 	m.record("chat", now, 2*time.Second, false, 0)
 	m.record("translation", now, time.Millisecond, false, 12)
-	if w := m.recent("chat", now, 5); w.calls != 2 || w.errors != 1 {
-		t.Fatalf("five-minute window = %+v", w)
+	if w := pendingCalls(&m, "chat"); w.calls != 3 || w.errors != 1 {
+		t.Fatalf("pending chat minutes = %+v", w)
 	}
-	if w := m.recent("missing", now, 5); w.calls != 0 {
-		t.Fatalf("unknown service window = %+v", w)
+	minutes := m.takeMinutes()
+	if len(minutes) != 4 || len(m.takeMinutes()) != 0 {
+		t.Fatalf("minutes = %+v", minutes)
+	}
+	for i, want := range []string{"chat 12:23", "chat 12:28", "chat 12:30", "translation 12:30"} {
+		if got := minutes[i].Service + " " + minutes[i].Minute.Format("15:04"); got != want || minutes[i].Latency == nil {
+			t.Fatalf("minute %d = %s %+v, want %s", i, got, minutes[i], want)
+		}
+	}
+	if minutes[1].Errors != 1 || minutes[3].Calls != 1 {
+		t.Fatalf("minute counts = %+v", minutes)
+	}
+	// A failed flush puts the minutes back, except those too old for any window the probe will still judge.
+	m.restoreMinutes(append(minutes, account.ServiceMinute{Service: "cloud", Minute: now.Add(-2 * time.Hour), Calls: 5}), now)
+	if w := pendingCalls(&m, "chat"); w.calls != 3 || w.errors != 1 {
+		t.Fatalf("restored chat minutes = %+v", w)
+	}
+	if w := pendingCalls(&m, "cloud"); w.calls != 0 {
+		t.Fatalf("a stale minute was restored: %+v", w)
 	}
 	if pending := m.pending(); len(pending) != 2 {
 		t.Fatalf("pending = %+v", pending)
@@ -90,10 +121,6 @@ func TestServiceMetricsBuckets(t *testing.T) {
 	}
 	if restored["chat"] != 4 || restored["translation"] != 1 || restored["cloud"] != 0 {
 		t.Fatalf("restored = %v", restored)
-	}
-	// The ring forgets minutes that have rotated out.
-	if w := m.recent("chat", now.Add(20*time.Minute), 5); w.calls != 0 {
-		t.Fatalf("window after 20 minutes = %+v", w)
 	}
 }
 
@@ -236,7 +263,7 @@ func TestUpstreamCallsAreMetered(t *testing.T) {
 	// A call the client abandoned says nothing about the upstream.
 	s.observe("chat", time.Now(), context.Canceled, 0)
 	s.observe("chat", time.Now(), errors.Join(errors.New("dial"), context.Canceled), 0)
-	if w := s.metrics.recent("chat", time.Now(), 5); w.calls != 3 {
+	if w := pendingCalls(&s.metrics, "chat"); w.calls != 3 {
 		t.Fatalf("cancelled calls were recorded: %+v", w)
 	}
 }
@@ -310,6 +337,12 @@ func TestStatusAndCloudAccess(t *testing.T) {
 func monitoringServer(t *testing.T, upstream http.HandlerFunc) *Server {
 	t.Helper()
 	disposableSchema(t)
+	return monitoringReplica(t, upstream)
+}
+
+// monitoringReplica starts a server on the database schema of the running test, so a second call is another replica of the first.
+func monitoringReplica(t *testing.T, upstream http.HandlerFunc) *Server {
+	t.Helper()
 	t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
 	t.Setenv("TEST_CLIENT_TOKEN", testToken)
 	t.Setenv("TEST_ADMIN_TOKEN", strings.Repeat("q", 48))
@@ -333,7 +366,7 @@ func monitoringServer(t *testing.T, upstream http.HandlerFunc) *Server {
 	// statusProbeJob runs its first probe at startup; wait for it so the test's probes do not interleave with it.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if checked, _ := s.statusStates(); !checked.IsZero() {
+		if checked, _, err := s.statusStates(context.Background()); err == nil && !checked.IsZero() {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -384,6 +417,15 @@ type statusResponse struct {
 	} `json:"incidents"`
 }
 
+// sameUTCDay returns now, unless probes at the next ticks minutes after it would cross UTC midnight, in which case it returns a time just early enough that they all land on now's UTC day. Verdicts roll into the daily table by their minute's UTC date while the status page's today is the real clock's, so a test run in the last minutes of a day would otherwise find its verdicts on tomorrow's row. The last probe still lies within statusStale of the real clock, so the page reports it as current.
+func sameUTCDay(now time.Time, ticks int) time.Time {
+	end := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+	if now.Add(time.Duration(ticks) * time.Minute).Before(end) {
+		return now
+	}
+	return end.Add(-time.Duration(ticks)*time.Minute - time.Second)
+}
+
 // End to end against PostgreSQL: slow upstream calls degrade the service, three bad probes open one automatic incident, the pages report the minute rollup and the month's quota, and five good probes resolve the incident.
 func TestStatusProbeAndPages(t *testing.T) {
 	s := monitoringServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -395,12 +437,13 @@ func TestStatusProbeAndPages(t *testing.T) {
 	if w := call(s, "POST", "/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`); w.Code != 200 {
 		t.Fatal(w.Code, w.Body)
 	}
-	now := time.Now()
+	now := sameUTCDay(time.Now(), incidentOpenAfter)
 	for range 4 {
 		s.metrics.record("chat", now, 4*time.Second, false, 0)
 	}
-	for range 3 {
-		s.statusTick(ctx, now)
+	// Each probe judges the five complete minutes before its own, so the next three minutes all see the slow calls.
+	for i := 1; i <= incidentOpenAfter; i++ {
+		s.statusTick(ctx, now.Add(time.Duration(i)*time.Minute))
 	}
 	if got := s.adminHealth(ctx); got != stateDegraded {
 		t.Fatalf("health = %s", got)
@@ -472,7 +515,7 @@ func TestStatusProbeAndPages(t *testing.T) {
 	// Recovery: the window is empty from ten minutes on, and the fifth good probe resolves the incident.
 	later := now.Add(10 * time.Minute)
 	for i := range incidentResolveAfter {
-		s.statusTick(ctx, later)
+		s.statusTick(ctx, later.Add(time.Duration(i)*time.Minute))
 		incidents, err := s.accounts.Incidents(ctx, 5)
 		if err != nil {
 			t.Fatal(err)
@@ -483,6 +526,219 @@ func TestStatusProbeAndPages(t *testing.T) {
 	}
 	if got := s.adminHealth(ctx); got != stateOK {
 		t.Fatalf("health after recovery = %s", got)
+	}
+}
+
+// statusReplicas starts two replicas sharing one database, the first of which leads the status probe, and returns an administrative connection to their schema.
+func statusReplicas(t *testing.T) (a, b *Server, admin *pgx.Conn) {
+	t.Helper()
+	admin, schema := disposableSchema(t)
+	if _, err := admin.Exec(context.Background(), "SET search_path TO "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	ok := func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"测试"}}]}`)
+	}
+	a = monitoringReplica(t, ok)
+	b = monitoringReplica(t, ok)
+	if !leads(a) || leads(b) {
+		t.Fatalf("leaders: a %v, b %v", leads(a), leads(b))
+	}
+	return a, b, admin
+}
+
+func leads(s *Server) bool {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	return s.statusLeader != nil
+}
+
+// latestVerdict is the stored verdict of service in the newest judged minute.
+func latestVerdict(t *testing.T, s *Server, service string) account.ServiceVerdict {
+	t.Helper()
+	latest, err := s.accounts.LatestServiceVerdicts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range latest {
+		if v.Service == service {
+			return v
+		}
+	}
+	t.Fatalf("no verdict for %s in %+v", service, latest)
+	return account.ServiceVerdict{}
+}
+
+// autoIncidents lists the states of the automatic incidents of service, oldest first.
+func autoIncidents(t *testing.T, s *Server, service string) []string {
+	t.Helper()
+	incidents, err := s.accounts.Incidents(context.Background(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var states []string
+	for i := len(incidents) - 1; i >= 0; i-- {
+		if incidents[i].Auto && incidents[i].Service == service {
+			states = append(states, incidents[i].State)
+		}
+	}
+	return states
+}
+
+// With two replicas only the leader judges, it judges the calls of both, each minute reaches the daily table once, and both replicas report the same status.
+func TestStatusProbeJudgesAllReplicasOnce(t *testing.T) {
+	a, b, admin := statusReplicas(t)
+	ctx := context.Background()
+	now := time.Now()
+	// Two slow calls on each replica: neither alone has the three calls a P95 verdict needs, together they are degraded.
+	for _, s := range []*Server{a, b} {
+		for range 2 {
+			s.metrics.record("chat", now, 4*time.Second, false, 0)
+		}
+	}
+	for i := 1; i <= incidentOpenAfter; i++ {
+		at := now.Add(time.Duration(i) * time.Minute)
+		b.statusTick(ctx, at)
+		a.statusTick(ctx, at)
+		b.statusTick(ctx, at)
+		// A repeated judgement of the same minute, as from a leader that lost its session mid-minute and its successor, changes nothing.
+		a.statusTick(ctx, at)
+	}
+	if leads(b) {
+		t.Fatal("the second replica took the lead while the first held it")
+	}
+	chat := latestVerdict(t, b, "chat")
+	if chat.State != stateDegraded || chat.Calls != 4 || chat.BadRuns != incidentOpenAfter || !chat.Incident {
+		t.Fatalf("chat verdict = %+v", chat)
+	}
+	if got := autoIncidents(t, a, "chat"); len(got) != 1 || got[0] != "open" {
+		t.Fatalf("automatic incidents = %v", got)
+	}
+	for _, s := range []*Server{a, b} {
+		if got := s.adminHealth(ctx); got != stateDegraded {
+			t.Fatalf("health = %s", got)
+		}
+		var status statusResponse
+		adminGet(t, s, "/api/status", &status)
+		if status.State != stateDegraded || status.Services[1].Key != "chat" || status.Services[1].State != stateDegraded {
+			t.Fatalf("status = %+v", status)
+		}
+	}
+	// Every judged minute counts once in the daily table, however many replicas probed it. The schema is this test's own, so every row is compared; summing over all days keeps the check true when the probes cross UTC midnight.
+	var minutes, total int
+	if err := admin.QueryRow(ctx, `SELECT (SELECT count(*) FROM admin_service_verdicts WHERE service='chat'),(SELECT coalesce(sum(total_minutes),0) FROM admin_service_daily WHERE service='chat')`).Scan(&minutes, &total); err != nil {
+		t.Fatal(err)
+	}
+	if minutes < incidentOpenAfter || total != minutes {
+		t.Fatalf("daily total_minutes = %d for %d judged minutes", total, minutes)
+	}
+}
+
+// When the leader stops, the other replica takes over at its next probe and carries on the stored streaks: it neither opens a second incident nor resolves the open one before five good minutes, and while it does not lead, its own quiet traffic resolves nothing.
+func TestStatusProbeFailover(t *testing.T) {
+	a, b, admin := statusReplicas(t)
+	ctx := context.Background()
+	now := time.Now()
+	for range 4 {
+		a.metrics.record("chat", now, 4*time.Second, false, 0)
+	}
+	for i := 1; i <= incidentOpenAfter; i++ {
+		a.statusTick(ctx, now.Add(time.Duration(i)*time.Minute))
+	}
+	if got := autoIncidents(t, a, "chat"); len(got) != 1 || got[0] != "open" {
+		t.Fatalf("automatic incidents = %v", got)
+	}
+	// The follower sees no failing calls of its own, but it does not judge, so the incident stays open.
+	for i := range incidentResolveAfter + 1 {
+		b.statusTick(ctx, now.Add(time.Duration(10+i)*time.Minute))
+	}
+	if got := autoIncidents(t, b, "chat"); len(got) != 1 || got[0] != "open" || leads(b) {
+		t.Fatalf("after the follower's probes: incidents %v, b leads %v", got, leads(b))
+	}
+	// The leader stops; the follower takes over within one probe and continues the bad streak without a second incident.
+	a.Close()
+	b.statusTick(ctx, now.Add(4*time.Minute))
+	if !leads(b) {
+		t.Fatal("the follower did not take over")
+	}
+	if chat := latestVerdict(t, b, "chat"); chat.State != stateDegraded || chat.BadRuns != incidentOpenAfter+1 || !chat.Incident {
+		t.Fatalf("chat verdict after failover = %+v", chat)
+	}
+	if got := autoIncidents(t, b, "chat"); len(got) != 1 || got[0] != "open" {
+		t.Fatalf("automatic incidents after failover = %v", got)
+	}
+	// Recovery under the new leader resolves the incident on exactly the fifth good minute.
+	for i := range incidentResolveAfter {
+		b.statusTick(ctx, now.Add(time.Duration(20+i)*time.Minute))
+		if got := autoIncidents(t, b, "chat"); got[0] != "open" && i < incidentResolveAfter-1 {
+			t.Fatalf("resolved after %d good probes", i+1)
+		}
+	}
+	if got := autoIncidents(t, b, "chat"); len(got) != 1 || got[0] != "resolved" {
+		t.Fatalf("automatic incidents after recovery = %v", got)
+	}
+	// A leader whose session dies loses the lock; the next replica to probe takes it, and the old leader does not get it back while the new one holds it.
+	c := monitoringReplica(t, func(w http.ResponseWriter, r *http.Request) {})
+	// pg_locks is cluster-wide and other tests' replicas, or other runs against the same server, hold the same lock in their own schemas, so only this database and schema's lock is touched.
+	const leaderLock = `FROM pg_locks WHERE locktype='advisory' AND granted AND classid=1836282740 AND objsubid=2 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND objid=(hashtext(current_schema())::bigint & 4294967295)::oid`
+	var pid int
+	if err := admin.QueryRow(ctx, `SELECT pid `+leaderLock).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `SELECT pg_terminate_backend($1)`, pid); err != nil {
+		t.Fatal(err)
+	}
+	// pg_terminate_backend only signals the backend; its lock goes when it has exited. Wait for that backend rather than for the lock to be free: c's startup probe may still be running and can take the lock the moment it is released.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var alive bool
+		if err := admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)`, pid).Scan(&alive); err != nil {
+			t.Fatal(err)
+		}
+		if !alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the terminated leader session did not exit")
+		}
+	}
+	c.statusTick(ctx, now.Add(30*time.Minute))
+	b.statusTick(ctx, now.Add(31*time.Minute))
+	if !leads(c) || leads(b) {
+		t.Fatalf("after the leader's session died: c leads %v, b leads %v", leads(c), leads(b))
+	}
+}
+
+// An automatic incident an admin resolves while the service is still failing is not reopened by the same streak, including by a new leader; a new streak opens a new one.
+func TestStatusProbeRespectsManualResolve(t *testing.T) {
+	a, b, _ := statusReplicas(t)
+	ctx := context.Background()
+	now := time.Now()
+	for range 4 {
+		a.metrics.record("chat", now, 4*time.Second, false, 0)
+	}
+	for i := 1; i <= incidentOpenAfter; i++ {
+		a.statusTick(ctx, now.Add(time.Duration(i)*time.Minute))
+	}
+	if _, err := a.accounts.ResolveAutoIncident(ctx, "chat"); err != nil {
+		t.Fatal(err)
+	}
+	a.statusTick(ctx, now.Add(4*time.Minute))
+	a.Close()
+	b.statusTick(ctx, now.Add(5*time.Minute))
+	if got := autoIncidents(t, b, "chat"); len(got) != 1 || got[0] != "resolved" || !leads(b) {
+		t.Fatalf("automatic incidents during the same streak = %v", got)
+	}
+	// After a good minute the next bad streak is new.
+	b.statusTick(ctx, now.Add(15*time.Minute))
+	later := now.Add(16 * time.Minute)
+	for range 4 {
+		b.metrics.record("chat", later, 4*time.Second, false, 0)
+	}
+	for i := 1; i <= incidentOpenAfter; i++ {
+		b.statusTick(ctx, later.Add(time.Duration(i)*time.Minute))
+	}
+	if got := autoIncidents(t, b, "chat"); len(got) != 2 || got[1] != "open" {
+		t.Fatalf("automatic incidents after a new streak = %v", got)
 	}
 }
 
@@ -554,7 +810,7 @@ func TestStreamingSessionsAreMetered(t *testing.T) {
 			deadline := time.Now().Add(3 * time.Second)
 			var window metricCounts
 			for time.Now().Before(deadline) {
-				if window = s.metrics.recent("streaming", time.Now(), 5); window.calls > 0 {
+				if window = pendingCalls(&s.metrics, "streaming"); window.calls > 0 {
 					break
 				}
 				time.Sleep(10 * time.Millisecond)
@@ -604,7 +860,7 @@ func TestStreamingSessionsEndingAtMaxSecondsAreNotFailures(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	var window metricCounts
 	for time.Now().Before(deadline) {
-		if window = s.metrics.recent("streaming", time.Now(), 5); window.calls == sessions {
+		if window = pendingCalls(&s.metrics, "streaming"); window.calls == sessions {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
