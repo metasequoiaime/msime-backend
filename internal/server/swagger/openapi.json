@@ -15637,7 +15637,7 @@
             "description": "需要认证"
           },
           "503": {
-            "description": "未配置、容量已满或正在关闭"
+            "description": "未配置、容量已满或正在关闭（skin_jobs_busy），或任务存储暂不可用（job_unavailable）；均带 Retry-After"
           }
         }
       }
