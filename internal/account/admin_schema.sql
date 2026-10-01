@@ -77,10 +77,10 @@ END $$;
 
 -- Session metadata for the personal page. id is a short random handle the console can show and revoke by, because the token hash must never leave the server. It is built from md5 rather than gen_random_uuid(), which is core only from PostgreSQL 13 while the documented minimum is 12.
 ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT left(md5(random()::text||clock_timestamp()::text),16);
-ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT '' CHECK(length(name)<=200);
+ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT '';
 ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
 ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS last_seen_at timestamptz NOT NULL DEFAULT now();
-ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS user_agent text NOT NULL DEFAULT '' CHECK(length(user_agent)<=256);
+ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS user_agent text NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS admin_sessions_id ON admin_sessions(id);
 CREATE INDEX IF NOT EXISTS admin_sessions_email ON admin_sessions(email);
 
@@ -96,10 +96,30 @@ CREATE INDEX IF NOT EXISTS admin_tokens_email ON admin_tokens(email);
 CREATE INDEX IF NOT EXISTS admin_tokens_expiry ON admin_tokens(expires_at);
 
 -- Telemetry extensions. All optional, so older clients keep working: artifact and channel describe a download, install_id is an anonymous per-install identifier, signature groups crashes.
-ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS artifact text CHECK(length(artifact) BETWEEN 1 AND 64);
-ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS channel text CHECK(length(channel) BETWEEN 1 AND 32);
-ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS install_id text CHECK(length(install_id) BETWEEN 16 AND 64);
-ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS signature text CHECK(signature ~ '^[0-9a-f]{16}$');
+ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS artifact text;
+ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS channel text;
+ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS install_id text;
+ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS signature text;
+-- The CHECK constraints of the columns added above, by the names PostgreSQL gives a column constraint. They are added separately because PostgreSQL 12 adds an inline CHECK again on every rerun of ADD COLUMN IF NOT EXISTS even when the column exists; copies an earlier rerun left (name1, name2, ...) are dropped.
+DO $$
+DECLARE c record; d record;
+BEGIN
+ FOR c IN SELECT * FROM (VALUES
+  ('admin_sessions','admin_sessions_name_check','length(name)<=200'),
+  ('admin_sessions','admin_sessions_user_agent_check','length(user_agent)<=256'),
+  ('admin_events','admin_events_artifact_check','length(artifact) BETWEEN 1 AND 64'),
+  ('admin_events','admin_events_channel_check','length(channel) BETWEEN 1 AND 32'),
+  ('admin_events','admin_events_install_id_check','length(install_id) BETWEEN 16 AND 64'),
+  ('admin_events','admin_events_signature_check','signature ~ ''^[0-9a-f]{16}$''')
+ ) v(tbl,name,expr) LOOP
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=c.tbl::regclass AND conname=c.name) THEN
+   EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I CHECK(%s)',c.tbl,c.name,c.expr);
+  END IF;
+  FOR d IN SELECT conname FROM pg_constraint WHERE conrelid=c.tbl::regclass AND contype='c' AND conname ~ ('^'||c.name||'[0-9]+$') LOOP
+   EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I',c.tbl,d.conname);
+  END LOOP;
+ END LOOP;
+END $$;
 DO $$ BEGIN
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='admin_events'::regclass AND conname='admin_events_kind_check' AND pg_get_constraintdef(oid) LIKE '%session_crash%') THEN
   ALTER TABLE admin_events DROP CONSTRAINT IF EXISTS admin_events_kind_check;

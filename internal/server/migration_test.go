@@ -282,3 +282,45 @@ func notificationRows(t *testing.T, conn *pgx.Conn, schema string) []string {
 	}
 	return out
 }
+
+// Rerunning the migration must not add constraints. PostgreSQL 12 re-adds the inline CHECK of ADD COLUMN IF NOT EXISTS on every run, so those checks are added by name; the copies an earlier rerun left on PostgreSQL 12 (name1, name2, ...) are dropped.
+func TestMigrationRerunKeepsConstraints(t *testing.T) {
+	admin, schema := disposableSchema(t)
+	ctx := context.Background()
+	db, err := account.Open(ctx, os.Getenv("MSIME_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		t.Helper()
+		var n int
+		if err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=$1`, schema).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	first := count()
+	quoted := pgx.Identifier{schema}.Sanitize()
+	if _, err = admin.Exec(ctx, `ALTER TABLE `+quoted+`.admin_events ADD CONSTRAINT admin_events_artifact_check1 CHECK(length(artifact) BETWEEN 1 AND 64);
+ALTER TABLE `+quoted+`.community_skins ADD CONSTRAINT community_skins_moderation_check1 CHECK(moderation IN ('pending','approved','removed'))`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err = db.Migrate(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n := count(); n != first {
+			t.Fatalf("migration rerun changed the constraint count from %d to %d", first, n)
+		}
+	}
+	for _, name := range []string{"admin_events_artifact_check", "community_skins_moderation_check", "admin_sessions_user_agent_check", "auth_users_ban_reason_check", "community_candidate_skins_visibility_check"} {
+		var exists bool
+		if err = admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=$1 AND c.conname=$2)`, schema, name).Scan(&exists); err != nil || !exists {
+			t.Fatal(name, exists, err)
+		}
+	}
+}
