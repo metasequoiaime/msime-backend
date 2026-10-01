@@ -47,9 +47,8 @@ func (s *Server) adminCLIStart(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		peer = r.RemoteAddr
 	}
-	if !s.allow(Client{ID: "admin-login:" + peer, RequestsPerMinute: 10}, time.Now()) {
-		w.Header().Set("Retry-After", "60")
-		fail(w, 429, "rate_limit_exceeded")
+	// Shares the "admin-login" budget with the web login start, so a source address gets 10 login starts per minute in total across both entry points and all replicas.
+	if !s.adminLimit(r.Context(), w, "admin-login", peer, 10) {
 		return
 	}
 	var v struct {

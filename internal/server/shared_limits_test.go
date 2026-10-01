@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
+	"golang.org/x/oauth2"
 )
 
 // replicaPair starts two servers on one disposable schema, standing in for two replicas behind a round-robin balancer.
@@ -40,12 +41,13 @@ func replicaPair(t *testing.T, words func() WordSubmissionsConfig) [2]*Server {
 	return pair
 }
 
-// The login start budget (ten a minute per address) is one budget across replicas: requests alternating between two servers stop at the eleventh, on either server, while another address keeps its own.
+// The login start budget (ten a minute per address) is one budget across replicas and across the web and command-line entry points: requests alternating between two servers and both entry points stop at the eleventh, on either server and either entry point, while another address keeps its own.
 func TestAdminLoginLimitSharedAcrossReplicas(t *testing.T) {
 	pair := replicaPair(t, nil)
 	for _, s := range pair {
 		s.config.Admin = AdminConfig{Enabled: true, Host: "admin.msime.app", Google: AdminGoogleConfig{ClientID: "test", RedirectURI: "https://admin.msime.app" + adminCallbackPath}}
 		s.initAdminGoogle()
+		s.adminCLI = &adminGoogleAuth{oauth: oauth2.Config{ClientID: "desktop-client", Scopes: adminGoogleScopes, Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.google.com/o/oauth2/v2/auth"}}}
 		s.adminStore = &adminMemoryStore{flows: map[string]account.AdminLoginFlow{}, sessions: map[string]account.AdminIdentity{}}
 	}
 	start := func(s *Server, peer string) *httptest.ResponseRecorder {
@@ -55,14 +57,27 @@ func TestAdminLoginLimitSharedAcrossReplicas(t *testing.T) {
 		s.ServeHTTP(w, r)
 		return w
 	}
+	cliStart := func(s *Server, peer string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "https://admin.msime.app/api/auth/cli/start", strings.NewReader(`{"redirect_uri":"http://127.0.0.1:50123/callback"}`))
+		r.RemoteAddr = peer + ":4567"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
 	for i := range 10 {
-		if w := start(pair[i%2], "198.51.100.20"); w.Code != 302 {
+		if i%4 < 2 {
+			if w := start(pair[i%2], "198.51.100.20"); w.Code != 302 {
+				t.Fatal(i, w.Code, w.Body.String())
+			}
+		} else if w := cliStart(pair[i%2], "198.51.100.20"); w.Code != 200 {
 			t.Fatal(i, w.Code, w.Body.String())
 		}
 	}
 	for _, s := range pair {
-		if w := start(s, "198.51.100.20"); w.Code != 429 || w.Header().Get("Retry-After") != "60" || !strings.Contains(w.Body.String(), "rate_limit_exceeded") {
-			t.Fatal("the other replica did not see the spent budget", w.Code, w.Body.String())
+		for _, w := range []*httptest.ResponseRecorder{start(s, "198.51.100.20"), cliStart(s, "198.51.100.20")} {
+			if w.Code != 429 || w.Header().Get("Retry-After") != "60" || !strings.Contains(w.Body.String(), "rate_limit_exceeded") {
+				t.Fatal("the other replica or entry point did not see the spent budget", w.Code, w.Body.String())
+			}
 		}
 	}
 	if w := start(pair[1], "198.51.100.21"); w.Code != 302 {
