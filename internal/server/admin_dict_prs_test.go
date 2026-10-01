@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
+	"github.com/metasequoiaime/MSIME-Backend/internal/engine"
 	"github.com/metasequoiaime/MSIME-Backend/internal/githubapp"
 )
 
@@ -268,8 +269,8 @@ func dictGitHubClient(t *testing.T, f *fakeDictRepo) *githubapp.Client {
 
 const dictTestAdminToken = "dict-admin-token-dict-admin-token-dict-admin"
 
-// dictPRServer is a database-backed admin server (host admin.example.com, legacy token dictTestAdminToken) whose console GitHub client talks to a fake dictionary repository. It returns a connection to the test database and the schema holding this test's tables.
-func dictPRServer(t *testing.T) (*Server, *fakeDictRepo, *pgx.Conn, string) {
+// dictPRServer is a database-backed admin server (host admin.example.com, legacy token dictTestAdminToken) whose console GitHub client talks to a fake dictionary repository; engineBinary, when not empty, is its Engine. It returns a connection to the test database and the schema holding this test's tables. Everything is configured before New, whose background admin jobs read the configuration.
+func dictPRServer(t *testing.T, engineBinary string) (*Server, *fakeDictRepo, *pgx.Conn, string) {
 	t.Helper()
 	conn, schema := disposableSchema(t)
 	t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
@@ -277,8 +278,9 @@ func dictPRServer(t *testing.T) (*Server, *fakeDictRepo, *pgx.Conn, string) {
 	t.Setenv("TEST_ADMIN_TOKEN", dictTestAdminToken)
 	s, err := New(Config{
 		Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
-		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN"},
+		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN", GitHub: AdminGitHubConfig{DictionaryRepo: dictTestRepo}},
 		Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
+		Engine:  engine.Config{Binary: engineBinary},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -288,7 +290,6 @@ func dictPRServer(t *testing.T) (*Server, *fakeDictRepo, *pgx.Conn, string) {
 		s.Close()
 	})
 	f := newFakeDictRepo(t)
-	s.config.Admin.GitHub.DictionaryRepo = dictTestRepo
 	s.adminGitHub = dictGitHubClient(t, f)
 	return s, f, conn, schema
 }
@@ -384,7 +385,7 @@ func TestDictPRWritesRequirePermission(t *testing.T) {
 }
 
 func TestDictPRRouting(t *testing.T) {
-	s, f, _, _ := dictPRServer(t)
+	s, f, _, _ := dictPRServer(t, "")
 	for _, tc := range []struct {
 		method, path string
 		status       int
@@ -414,7 +415,7 @@ func TestDictPRRouting(t *testing.T) {
 }
 
 func TestDictPRList(t *testing.T) {
-	s, _, conn, schema := dictPRServer(t)
+	s, _, conn, schema := dictPRServer(t, "")
 	w := dictCall(s, "GET", "/api/dict-prs", "")
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -467,9 +468,8 @@ func TestDictPRList(t *testing.T) {
 }
 
 func TestDictPRDetailFlags(t *testing.T) {
-	s, _, _, _ := dictPRServer(t)
 	// The shipped English dictionary already has msime; the words batch answers not listed.
-	s.config.Engine.Binary = fakeEngine(t, `request=$(cat); case "$request" in *listed_english_batch*) echo '{"listed":[true]}';; *) echo '{"listed":[false,false,false]}';; esac`)
+	s, _, _, _ := dictPRServer(t, fakeEngine(t, `request=$(cat); case "$request" in *listed_english_batch*) echo '{"listed":[true]}';; *) echo '{"listed":[false,false,false]}';; esac`))
 	w := dictCall(s, "GET", "/api/dict-prs/12", "")
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -498,7 +498,7 @@ func TestDictPRDetailFlags(t *testing.T) {
 }
 
 func TestDictPRTrim(t *testing.T) {
-	s, f, conn, schema := dictPRServer(t)
+	s, f, conn, schema := dictPRServer(t, "")
 	for _, body := range []string{`{}`, `{"keep":[0]}`, `{"keep":[],"head_sha":"head12"}`, `{"keep":[99],"head_sha":"head12"}`, `{"keep":[0,0],"head_sha":"head12"}`, `{"keep":[-1],"head_sha":"head12"}`, `{"keep":[0],"head_sha":"head12","extra":1}`} {
 		if w := dictCall(s, "POST", "/api/dict-prs/12/trim", body); w.Code != 400 {
 			t.Fatal(body, w.Code, w.Body.String())
@@ -547,7 +547,7 @@ func TestDictPRTrim(t *testing.T) {
 }
 
 func TestDictPRApprove(t *testing.T) {
-	s, f, conn, schema := dictPRServer(t)
+	s, f, conn, schema := dictPRServer(t, "")
 	if w := dictCall(s, "POST", "/api/dict-prs/11/approve", `{}`); w.Code != 409 || !strings.Contains(w.Body.String(), "not_open") {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -609,7 +609,7 @@ func TestDictPRApprove(t *testing.T) {
 }
 
 func TestDictPRReject(t *testing.T) {
-	s, f, conn, schema := dictPRServer(t)
+	s, f, conn, schema := dictPRServer(t, "")
 	for _, body := range []string{`{}`, `{"reason":"  "}`, `{"reason":"` + strings.Repeat("长", 501) + `"}`, `{"reason":"a\u0000b"}`} {
 		if w := dictCall(s, "POST", "/api/dict-prs/12/reject", body); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_") {
 			t.Fatal(body, w.Code, w.Body.String())
@@ -644,7 +644,7 @@ func TestDictPRReject(t *testing.T) {
 
 // Website titles only count entries, so the global search also matches the submitter's note and names the pull request by it.
 func TestDictPRSearchNotes(t *testing.T) {
-	s, _, _, _ := dictPRServer(t)
+	s, _, _, _ := dictPRServer(t, "")
 	st := s.dictPRState()
 	st.mu.Lock()
 	st.notes[12] = "湖北潜江本地地名"
@@ -663,8 +663,7 @@ func TestDictPRSearchNotes(t *testing.T) {
 
 // A sensitive word in a pull request marks the entry as ad, and reviewing the pull request again and again leaves the word's hit statistics untouched.
 func TestDictPRSensitiveFlagDoesNotCountHits(t *testing.T) {
-	s, _, conn, schema := dictPRServer(t)
-	s.config.Engine.Binary = fakeEngine(t, `request=$(cat); case "$request" in *listed_english_batch*) echo '{"listed":[false]}';; *) echo '{"listed":[false,false,false]}';; esac`)
+	s, _, conn, schema := dictPRServer(t, fakeEngine(t, `request=$(cat); case "$request" in *listed_english_batch*) echo '{"listed":[false]}';; *) echo '{"listed":[false,false,false]}';; esac`))
 	if _, err := conn.Exec(context.Background(), `INSERT INTO `+pgx.Identifier{schema, "admin_sensitive_words"}.Sanitize()+`(pattern,category,level,created_by) VALUES('metasequoia','ad','review','test')`); err != nil {
 		t.Fatal(err)
 	}
@@ -693,8 +692,7 @@ func TestDictPRSensitiveFlagDoesNotCountHits(t *testing.T) {
 
 // Every GitHub call a review page request makes can fail; whichever one does, the request answers with an error the console understands (or, for the counts that only decorate the list, with the list itself), and never with a success that hides the failure.
 func TestDictPRGitHubFailuresAtEveryCall(t *testing.T) {
-	s, _, _, _ := dictPRServer(t)
-	s.config.Engine.Binary = fakeEngine(t, `request=$(cat); case "$request" in *listed_english_batch*) echo '{"listed":[false]}';; *) echo '{"listed":[false,false,false]}';; esac`)
+	s, _, _, _ := dictPRServer(t, fakeEngine(t, `request=$(cat); case "$request" in *listed_english_batch*) echo '{"listed":[false]}';; *) echo '{"listed":[false,false,false]}';; esac`))
 	cases := []struct{ method, path, body string }{
 		{"GET", "/api/dict-prs", ""},
 		{"GET", "/api/dict-prs/12", ""},

@@ -270,7 +270,7 @@ func issuesFixture(t *testing.T) (*Server, *fakeIssuesGitHub, *pgx.Conn, string)
 	t.Setenv("TEST_ADMIN_TOKEN", issuesTestAdminToken)
 	s, err := New(Config{
 		Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
-		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN"},
+		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN", GitHub: AdminGitHubConfig{IssueRepos: []string{issuesWinRepo, issuesCoreRepo}, Platforms: issuesTestPlatforms}},
 		Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
 	})
 	if err != nil {
@@ -304,8 +304,6 @@ func issuesFixture(t *testing.T) (*Server, *fakeIssuesGitHub, *pgx.Conn, string)
 		{20, "stranger", "User", "NONE", now.Add(-10*24*time.Hour + time.Hour)},
 		{22, "fanlusky", "User", "MEMBER", now.Add(-39 * 24 * time.Hour)},
 	}
-	s.config.Admin.GitHub.IssueRepos = []string{issuesWinRepo, issuesCoreRepo}
-	s.config.Admin.GitHub.Platforms = issuesTestPlatforms
 	s.adminGitHub = f.client()
 	return s, f, conn, schema
 }

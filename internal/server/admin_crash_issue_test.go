@@ -104,7 +104,7 @@ func TestAdminCrashIssue(t *testing.T) {
 	t.Setenv("TEST_ADMIN_TOKEN", strings.Repeat("q", 48))
 	s, err := New(Config{
 		Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
-		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN"},
+		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN", GitHub: AdminGitHubConfig{Platforms: []AdminPlatformConfig{{ID: "ios", Name: "iOS", Repo: "metasequoiaime/msime-ios", TagPrefix: "ios-v", Label: "ios", Assignee: "houko"}}}},
 		Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
 	})
 	if err != nil {
@@ -130,7 +130,6 @@ func TestAdminCrashIssue(t *testing.T) {
 	upstream := httptest.NewServer(fake)
 	defer upstream.Close()
 	s.adminGitHub = &githubapp.Client{AppID: 42, InstallationID: 77, Key: wordsKey(t), APIURL: upstream.URL, HTTP: upstream.Client(), Cache: &githubapp.Cache{}}
-	s.config.Admin.GitHub.Platforms = []AdminPlatformConfig{{ID: "ios", Name: "iOS", Repo: "metasequoiaime/msime-ios", TagPrefix: "ios-v", Label: "ios", Assignee: "houko"}}
 	call := func(method, signature string) (*httptest.ResponseRecorder, map[string]any) {
 		var r *http.Request
 		if method == "POST" {

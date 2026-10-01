@@ -376,7 +376,7 @@ func releaseDBServer(t *testing.T) (*Server, *fakeReleaseGitHub, *pgx.Conn, stri
 	t.Setenv("TEST_ADMIN_TOKEN", strings.Repeat("q", 48))
 	s, err := New(Config{
 		Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
-		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN"},
+		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN", GitHub: AdminGitHubConfig{Platforms: releaseTestPlatforms}},
 		Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
 	})
 	if err != nil {
@@ -385,7 +385,6 @@ func releaseDBServer(t *testing.T) (*Server, *fakeReleaseGitHub, *pgx.Conn, stri
 	t.Cleanup(func() { s.CloseAccounts(); s.Close() })
 	f := newFakeReleaseGitHub(t)
 	s.adminGitHub = f.client(t)
-	s.config.Admin.GitHub.Platforms = releaseTestPlatforms
 	return s, f, admin, schema
 }
 
@@ -572,12 +571,13 @@ func TestReleaseAssetSnapshotJob(t *testing.T) {
 	if strings.Join(got, ",") != "windows-v0.5.2/msime-windows-x64-setup.exe@2026-10-01=7,windows-v0.5.3/msime-windows-x64-setup.exe@2026-10-01=50,windows-v0.5.4/msime-windows-arm64-setup.exe@2026-10-01=20,windows-v0.5.4/msime-windows-x64-setup.exe@2026-10-01=130" {
 		t.Fatal(got)
 	}
-	// Without a configured GitHub App the job returns at once; with one it runs until its context ends, so Close never waits on it.
+	// Without a configured GitHub App the job returns at once; with one it runs until its context ends, so Close never waits on it. Each run gets its own Server copy, because the job New already started still reads s.config.
 	for _, appID := range []int64{0, 42} {
 		ctx, cancel := context.WithCancel(context.Background())
-		s.config.Admin.GitHub.AppID = appID
+		job := &Server{config: s.config, accounts: s.accounts, adminGitHub: s.adminGitHub}
+		job.config.Admin.GitHub.AppID = appID
 		done := make(chan struct{})
-		go func() { s.releaseSnapshotJob(ctx); close(done) }()
+		go func() { job.releaseSnapshotJob(ctx); close(done) }()
 		if appID != 0 {
 			cancel()
 		}

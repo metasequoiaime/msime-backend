@@ -414,7 +414,8 @@ func (s *Server) monitoredServices() []monitoredService {
 		}
 		return services
 	}
-	c := s.config
+	// Read through a pointer instead of copying Config: this runs on the status probe goroutine, which must touch only the upstream fields it reports.
+	c := &s.config
 	var services []monitoredService
 	add := func(key, provider string) {
 		slow := derivedSlowMS[key]
