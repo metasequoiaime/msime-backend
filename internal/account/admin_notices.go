@@ -51,6 +51,10 @@ const (
 	noticeAdminLimit = 200
 	// noticePublicLimit bounds the public feed; clients only show the newest few.
 	noticePublicLimit = 20
+	// noticesPublicPath is the public feed the server mounts through Route.
+	noticesPublicPath = "/v1/notices"
+	// publicFeedRateLimit is the per-address, per-minute limit of the public cacheable feeds (notices and download mirrors). Apps poll them about once a minute, so behind one proxy this bounds roughly how many clients can poll at once; it is kept apart from the 120/min bucket of the other account routes.
+	publicFeedRateLimit = 1200
 )
 
 // noticePlatforms are the client platforms a notice can target besides "all", in the console's display order.
@@ -257,6 +261,8 @@ ORDER BY published_at DESC,id DESC LIMIT $3`, platform, channel, noticePublicLim
 	// The feed is the same for every caller, so clients and shared caches may keep it for 60s; publishing or archiving shows up within that window.
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=60")
+	// The CORS middleware adds Access-Control-Allow-Origin only to requests that carry an Origin, so a cached copy must be keyed by it even when this request had none; otherwise an app's copy could be served to the website's cross-origin fetch.
+	w.Header().Set("Vary", "Origin")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(200)
 	w.Write(append(raw, '\n'))

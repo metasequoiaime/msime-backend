@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -165,7 +166,7 @@ func publicNotices(t *testing.T, a *Service, path string) []map[string]any {
 	t.Helper()
 	w := httptest.NewRecorder()
 	a.PublicNotices(w, httptest.NewRequest("GET", path, nil))
-	if w.Code != 200 || w.Header().Get("Cache-Control") != "public, max-age=60" {
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "public, max-age=60" || w.Header().Get("Vary") != "Origin" {
 		t.Fatal(w.Code, w.Header(), w.Body.String())
 	}
 	var body struct {
@@ -410,5 +411,38 @@ func TestNoticeBodyUsesTheFullColumn(t *testing.T) {
 	}
 	if status, out := noticeAction(t, a, owner, `{"action":"add_sensitive_word","value":{"pattern":"`+strings.Repeat("a", actionValueMax)+`"}}`); status != 400 || errorCode(out) != "invalid_value" {
 		t.Fatal("generic value limit", status, out)
+	}
+}
+
+// Polling the public feed from behind one proxy must not use up the per-address bucket that login, refresh and the community routes share.
+func TestPublicNoticesPollingDoesNotStarveAccountRoutes(t *testing.T) {
+	a, db := noticeTestService(t)
+	if _, err := db.pool.Exec(context.Background(), `TRUNCATE auth_rates`); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	mux.HandleFunc("GET /v1/notices", Route(a, "GET /v1/notices", (*Service).PublicNotices))
+	call := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", path, nil)
+		r.RemoteAddr = "198.51.100.7:443"
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	for i := range 130 {
+		if w := call("/v1/notices?channel=app"); w.Code != 200 {
+			t.Fatal(i, w.Code, w.Body.String())
+		}
+	}
+	if w := call("/v1/site/download-mirrors"); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := call("/v1/community/resources"); w.Code == 429 {
+		t.Fatal("account routes share the feed's bucket", w.Body.String())
+	}
+	var shared int
+	if err := db.pool.QueryRow(context.Background(), `SELECT COALESCE(sum(count),0) FROM auth_rates WHERE key=$1`, "ip:"+hash("198.51.100.7")).Scan(&shared); err != nil || shared != 1 {
+		t.Fatal(shared, err)
 	}
 }

@@ -14373,7 +14373,7 @@
           "官网"
         ],
         "security": [],
-        "description": "公开只读，供官网下载页展示 Windows 安装包的蓝奏云盘链接，由管理员在后台「站点设置」中修改。按 IP 每分钟 120 次限流；成功响应带 Cache-Control: public, max-age=60，允许官网和边缘缓存短时缓存。用户体系未启用时返回 503。",
+        "description": "公开只读，供官网下载页展示 Windows 安装包的蓝奏云盘链接，由管理员在后台「站点设置」中修改。与 /v1/notices 共用按 IP 每分钟 1200 次的限流（不占用登录等用户接口的 120 次）；成功响应带 Cache-Control: public, max-age=60 和 Vary: Origin，允许官网和边缘缓存短时缓存。用户体系未启用时返回 503。",
         "responses": {
           "200": {
             "description": "成功",
@@ -15108,7 +15108,7 @@
           "公告"
         ],
         "security": [],
-        "description": "公开只读，无需鉴权，供 App 与官网展示管理后台已发布的公告，按发布时间倒序最多 20 条；草稿和已归档的公告不会出现。响应允许缓存 60 秒（Cache-Control: public, max-age=60），发布或归档最多 60 秒后可见。",
+        "description": "公开只读，无需鉴权，供 App 与官网展示管理后台已发布的公告，按发布时间倒序最多 20 条；草稿和已归档的公告不会出现。响应允许缓存 60 秒（Cache-Control: public, max-age=60，并带 Vary: Origin），发布或归档最多 60 秒后可见。与 /v1/site/download-mirrors 共用按 IP 每分钟 1200 次的限流，不占用登录等用户接口的 120 次。",
         "parameters": [
           {
             "name": "platform",

@@ -569,3 +569,75 @@ func TestStreamingSessionsAreMetered(t *testing.T) {
 		})
 	}
 }
+
+// Sessions that end because they reached max_seconds are not upstream failures, whichever relay direction notices the deadline first.
+func TestStreamingSessionsEndingAtMaxSecondsAreNotFailures(t *testing.T) {
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _, _ = c.Read(ctx)
+	})
+	s.config.Admin.Enabled = true
+	s.config.Streaming = StreamingEndpoint{URL: strings.Replace(s.config.Cloud.URL, "https:", "wss:", 1), token: "provider-secret", ResourceID: "synthetic-resource", MaxSeconds: 1}
+	live := httptest.NewTLSServer(s)
+	t.Cleanup(func() { s.Close(); live.Close() })
+	// Each session picks its first reporter at random, so several sessions make a misclassification all but certain to show.
+	const sessions = 8
+	done := make(chan struct{}, sessions)
+	for range sessions {
+		c := dialStream(t, live)
+		go func() {
+			defer func() { done <- struct{}{} }()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _, _ = c.Read(ctx)
+		}()
+	}
+	for range sessions {
+		<-done
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	var window metricCounts
+	for time.Now().Before(deadline) {
+		if window = s.metrics.recent("streaming", time.Now(), 5); window.calls == sessions {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if window.calls != sessions || window.errors != 0 {
+		t.Fatalf("streaming = %+v", window)
+	}
+}
+
+// The final metrics flush waits for the streaming sessions that shutdown cancels, so a call they record while closing still reaches the database.
+func TestCloseFlushesCallsRecordedByCancelledStreams(t *testing.T) {
+	s := monitoringServer(t, func(w http.ResponseWriter, r *http.Request) {})
+	started := time.Now()
+	s.streams.Add(1)
+	go func() {
+		defer s.streams.Done()
+		<-s.lifetime.Done()
+		// A cancelled session records its call only after its close handshake.
+		time.Sleep(200 * time.Millisecond)
+		s.observeCall("streaming", time.Now(), time.Second, false, 3)
+	}()
+	s.Close()
+	rows, err := s.accounts.ServiceMetrics(context.Background(), started.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int64
+	for _, row := range rows {
+		if row.Service == "streaming" {
+			calls += row.Calls
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("streaming calls flushed = %d, rows %+v", calls, rows)
+	}
+}

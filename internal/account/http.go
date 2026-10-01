@@ -11,6 +11,7 @@ import (
 	"errors"
 	"github.com/metasequoiaime/MSIME-Backend/internal/engine"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -90,20 +91,37 @@ func New(ctx context.Context, c Config) (*Service, error) {
 	a.sender = delivery{config: c}
 	go func() {
 		defer close(a.done)
-		timer := time.NewTicker(time.Hour)
-		defer timer.Stop()
-		for {
-			select {
-			case <-lifetime.Done():
-				return
-			case <-timer.C:
-				cleanup, cancel := context.WithTimeout(lifetime, 30*time.Second)
-				a.store.Prune(cleanup)
-				cancel()
-			}
-		}
+		a.maintain(lifetime)
 	}()
 	return a, nil
+}
+
+// maintain runs until lifetime ends: it prunes expired rows every hour and writes pending sensitive-word hit counts every sensitiveRefresh, so a count waits at most that long even when no further hit arrives, and writes them once more on the way out.
+func (a *Service) maintain(lifetime context.Context) {
+	prune := time.NewTicker(time.Hour)
+	defer prune.Stop()
+	hits := time.NewTicker(sensitiveRefresh)
+	defer hits.Stop()
+	flushHits := func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+		defer cancel()
+		if err := a.sensitive.flush(ctx, a.store, time.Now()); err != nil {
+			slog.Warn("sensitive words: hit counts not written yet", "reason", err.Error())
+		}
+	}
+	for {
+		select {
+		case <-lifetime.Done():
+			flushHits(context.Background())
+			return
+		case <-hits.C:
+			flushHits(lifetime)
+		case <-prune.C:
+			cleanup, cancel := context.WithTimeout(lifetime, 30*time.Second)
+			a.store.Prune(cleanup)
+			cancel()
+		}
+	}
 }
 
 // ConfigureEngine is called once during server construction, before serving requests.
@@ -144,6 +162,16 @@ func accountRouteTimeout(pattern string) time.Duration {
 		return pluginTransferTimeout
 	default:
 		return 15 * time.Second
+	}
+}
+
+// accountRouteRate returns the per-address bucket and its per-minute limit for pattern. The public cacheable feeds that every app and website visitor polls get their own, larger bucket so that polling behind a shared proxy cannot use up the quota that login, refresh and the community endpoints draw from.
+func accountRouteRate(pattern string) (string, int) {
+	switch pattern {
+	case "GET " + noticesPublicPath, "GET " + siteDownloadMirrorsPath:
+		return "feed-ip:", publicFeedRateLimit
+	default:
+		return "ip:", 120
 	}
 }
 func Mount(mux *http.ServeMux, a *Service) {
@@ -234,7 +262,8 @@ func Route(a *Service, pattern string, method func(*Service, http.ResponseWriter
 			host = r.RemoteAddr
 		}
 		// 默认只信任 TCP 对端，不使用可伪造的转发头。代理配置见部署文档。
-		if e = a.store.Rate(ctx, "ip:"+hash(host), 120, time.Minute); e != nil {
+		scope, limit := accountRouteRate(pattern)
+		if e = a.store.Rate(ctx, scope+hash(host), limit, time.Minute); e != nil {
 			a.error(w, e)
 			return
 		}
