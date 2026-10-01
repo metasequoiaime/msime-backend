@@ -1,0 +1,1 @@
+import{t as e,v as t,y as n}from"./keys-DAudkGWZ.js";import{o as r}from"./shell-D_oZxA1E.js";function i(){let i=t();return n({queryKey:e.shell,queryFn:({signal:e})=>i.get(`shell`,r,{signal:e}),refetchInterval:6e4,staleTime:3e4})}export{i as t};

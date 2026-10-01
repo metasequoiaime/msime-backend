@@ -10,7 +10,8 @@ export default defineConfig({
     rolldownOptions: {
       output: {
         // React itself changes rarely, so it gets a long-lived chunk of its own; libraries used only by lazy pages (recharts, react-table) stay in those pages' chunks.
-        codeSplitting: { groups: [{ name: "react", test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/ }] },
+        // Zod shares a chunk with src/zod-config.ts so jitless mode is set when that chunk evaluates, before any other chunk can build an object schema; otherwise a shared chunk that defines schemas at module level runs ahead of main.tsx's import and Zod's eval probe trips the CSP.
+        codeSplitting: { groups: [{ name: "react", test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/ }, { name: "zod", test: /node_modules[\\/]zod[\\/]|[\\/]src[\\/]zod-config\.ts$/ }] },
       },
     },
   },

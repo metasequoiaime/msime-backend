@@ -233,6 +233,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
+    # The page preloads dozens of chunks at once; the default listen backlog of 5 makes macOS reset the overflow connections, which leaves the app blank.
+    request_queue_size = 128
+
     # The browser aborts superseded requests (prefetches, cancelled queries); a closed socket is not a test failure.
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
