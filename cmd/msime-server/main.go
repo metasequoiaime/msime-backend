@@ -52,6 +52,8 @@ func main() {
 	}
 	defer handler.CloseAccounts()
 	srv := &http.Server{Addr: config.Listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: time.Duration(config.TimeoutSeconds+5) * time.Second, WriteTimeout: time.Duration(config.TimeoutSeconds+5) * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	// 管理后台的日志流是长连接，Shutdown 开始时先结束它们，否则会拖满整个优雅关闭时限。
+	srv.RegisterOnShutdown(handler.EndLogStreams)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	done := make(chan error, 1)

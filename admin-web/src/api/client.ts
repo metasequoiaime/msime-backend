@@ -95,6 +95,16 @@ const codeMessages: Record<string, string> = {
   issue_in_progress: "另一个请求正在为这个分组建 Issue，请稍后刷新。",
   platform_not_configured: "该平台未在 admin.github.platforms 中配置仓库，无法建 Issue。",
   issue_not_recorded: "Issue 已在 GitHub 创建，但未能写回分组，请勿重复创建，稍后将分组标记为已知。",
+  // 服务日志。
+  logs_disabled: "服务端未配置日志来源（admin.logs.loki_url）。",
+  logs_unavailable: "暂时无法读取日志：服务端连不上 Loki 或 Loki 返回了错误。",
+  too_many_streams: "同时打开的日志流过多（每人最多 2 个），请关闭其他日志页面后重试。",
+  invalid_pod: "副本名无效，请刷新后重试。",
+  invalid_since: "时间范围无效，应在 1 分钟到 24 小时之间。",
+  invalid_limit: "行数无效，应在 1 到 2000 之间。",
+  invalid_query: "搜索内容无效：最多 200 字节，不能包含换行等控制字符。",
+  invalid_cursor: "续传位置无效，请刷新页面。",
+  invalid_backfill: "回填行数无效，应在 0 到 1000 之间。",
 };
 
 // codeMessage returns the console copy for a server error code that arrives as data rather than as a failed request, such as a per-platform error inside a listing.

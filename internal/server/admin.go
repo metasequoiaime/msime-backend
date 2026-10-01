@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -26,6 +25,7 @@ type AdminConfig struct {
 	GitHub      AdminGitHubConfig    `json:"github"`
 	Services    []AdminServiceConfig `json:"services"`
 	Telegram    AdminTelegramConfig  `json:"telegram"`
+	Logs        AdminLogsConfig      `json:"logs"`
 	token       string
 }
 
@@ -90,6 +90,8 @@ var adminServerRoutes = []struct {
 	// U10 status and cloud usage: admin_status.go, admin_cloud.go
 	{"/api/status", (*Server).adminStatus},
 	{"/api/cloud", (*Server).adminCloud},
+	// 服务日志：admin_logs.go。日志流 /api/logs/stream 是长连接，在 serveAdmin 里单独分发。
+	{adminLogsPath, (*Server).adminLogs},
 }
 
 func adminRouteMatches(pattern, path string) bool {
@@ -106,11 +108,7 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if !s.config.Admin.Enabled {
 		return false
 	}
-	host := r.Host
-	if name, _, err := net.SplitHostPort(host); err == nil {
-		host = name
-	}
-	if !strings.EqualFold(host, s.config.Admin.Host) {
+	if !s.isAdminHost(r) {
 		return false
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -123,7 +121,8 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		base := r.Context()
+		ctx, cancel := context.WithTimeout(base, 15*time.Second)
 		defer cancel()
 		r = r.WithContext(ctx)
 		if s.adminAuthRoute(w, r) {
@@ -143,6 +142,11 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) bool {
 		access, err := s.adminAccess(ctx, actor, email)
 		if err != nil {
 			s.adminAuthError(w, err)
+			return true
+		}
+		if r.URL.Path == adminLogsStreamPath {
+			// 日志流是长连接，不受 15 秒请求超时限制；鉴权、来源检查和限流已在超时内完成。
+			s.adminLogsStream(w, r.WithContext(account.WithAdminAccess(base, access)))
 			return true
 		}
 		r = r.WithContext(account.WithAdminAccess(ctx, access))

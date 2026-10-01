@@ -56,6 +56,16 @@ type Server struct {
 	mu          sync.Mutex
 	buckets     map[string]bucket
 	handler     http.Handler
+	// loki 是服务日志页读取 Loki 用的客户端；logStreams 限制同时打开的日志流，logStreamsDone 在优雅关闭开始时关闭以结束它们；logPoll、logHeartbeat 和 logMaxDuration 是日志流的轮询间隔、心跳间隔和单个连接的最长时间，测试会调小。
+	loki           *http.Client
+	logStreams     logStreamLimiter
+	logStreamsDone chan struct{}
+	logStreamsOnce sync.Once
+	logPoll        time.Duration
+	logHeartbeat   time.Duration
+	logMaxDuration time.Duration
+	// mux 是 /v1 等主接口的路由表，请求日志在请求没有到达它时用来查路由模式。
+	mux *http.ServeMux
 	// limits is the PostgreSQL rate limiter every replica shares (account.Service.RateLimit), used by limitShared; nil without a database.
 	limits rateLimiter
 
@@ -79,7 +89,8 @@ func New(c Config) (*Server, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	s := &Server{config: c, slots: make(chan struct{}, c.MaxConcurrent), buckets: map[string]bucket{}, client: &http.Client{Timeout: time.Duration(c.TimeoutSeconds) * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, skinHeartbeat: skinJobHeartbeat}
+	s := &Server{config: c, slots: make(chan struct{}, c.MaxConcurrent), buckets: map[string]bucket{}, client: &http.Client{Timeout: time.Duration(c.TimeoutSeconds) * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, skinHeartbeat: skinJobHeartbeat,
+		loki: &http.Client{Timeout: lokiTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, logStreamsDone: make(chan struct{}), logPoll: logStreamPoll, logHeartbeat: logStreamHeartbeat, logMaxDuration: logStreamMaxDuration}
 	s.lifetime, s.stop = context.WithCancel(context.Background())
 	// 30 秒:启动时可能要顺带补迁移,空库要建二十多张表。独立的 -migrate-users 入口本来就按这个额度
 	// 算,两边保持一致。
@@ -161,17 +172,36 @@ func New(c Config) (*Server, error) {
 	mux.HandleFunc("GET /v1/niutrans/voice/{file_no}/download", s.niuTransVoiceDownload)
 	mux.HandleFunc("GET /v1/niutrans/resources", s.niuTransResources)
 	mux.HandleFunc("GET "+contract.CloudPath, s.cloud)
-	s.handler = s.middleware(mux)
+	s.mux = mux
+	s.handler = s.middleware(recordRoute(mux))
 	return s, nil
 }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.serveAdmin(w, r) {
+	if s.requestLogged(r) {
+		s.serveLogged(w, r)
 		return
+	}
+	s.dispatch(w, r)
+}
+
+// servedBy 标明请求由哪一部分处理，请求日志据此决定路由标签。
+type servedBy int
+
+const (
+	servedAPI servedBy = iota
+	servedAdmin
+	servedDocs
+)
+
+func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) servedBy {
+	if s.serveAdmin(w, r) {
+		return servedAdmin
 	}
 	if serveDocumentation(w, r, s.config.DocsEnabled) {
-		return
+		return servedDocs
 	}
 	s.handler.ServeHTTP(w, r)
+	return servedAPI
 }
 func respond(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

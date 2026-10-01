@@ -40,12 +40,17 @@
     "telegram": {
       "bot_token_env": "MSIME_ADMIN_TELEGRAM_TOKEN",
       "chat_id": ""
+    },
+    "logs": {
+      "loki_url": "",
+      "selector": "{namespace=\"app\",container=\"msime-backend\"}"
     }
   },
   "docs_enabled": false,
   "listen": "127.0.0.1:8080",
   "max_concurrent": 32,
   "replicas": 1,
+  "request_log": true,
   "timeout_seconds": 30,
   "clients": [
     {

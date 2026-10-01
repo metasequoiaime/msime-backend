@@ -62,7 +62,7 @@ func TestAdminShellAndSearchWithDatabase(t *testing.T) {
 	t.Setenv("TEST_ADMIN_TOKEN", strings.Repeat("q", 48))
 	s, err := New(Config{
 		Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
-		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN", Environment: "测试环境"},
+		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN", Environment: "测试环境", Logs: AdminLogsConfig{LokiURL: "http://loki.example.test:3100"}},
 		Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
 	})
 	if err != nil {
@@ -99,13 +99,18 @@ func TestAdminShellAndSearchWithDatabase(t *testing.T) {
 			Role        string   `json:"role"`
 			Permissions []string `json:"permissions"`
 		} `json:"me"`
-		Pending             map[string]int `json:"pending"`
-		UnreadNotifications int            `json:"unread_notifications"`
-		Status              string         `json:"status"`
+		Pending             map[string]int  `json:"pending"`
+		UnreadNotifications int             `json:"unread_notifications"`
+		Status              string          `json:"status"`
+		Features            map[string]bool `json:"features"`
 	}
 	get("/api/shell", &shell)
+	// 配置了 admin.logs 时外壳报告服务日志已启用，前端据此显示该页。
+	if len(shell.Features) != 1 || !shell.Features["logs"] {
+		t.Fatalf("shell features %+v", shell.Features)
+	}
 	// The legacy token has no email: no name and no notifications, every permission but manage_permissions.
-	if shell.Version != msimebackend.Version() || shell.Environment != "测试环境" || shell.Me.Email != "" || shell.Me.Role != account.RoleMaintainer || len(shell.Me.Permissions) != 7 || slices.Contains(shell.Me.Permissions, account.PermManagePermissions) {
+	if shell.Version != msimebackend.Version() || shell.Environment != "测试环境" || shell.Me.Email != "" || shell.Me.Role != account.RoleMaintainer || len(shell.Me.Permissions) != len(account.AllAdminPermissions())-1 || slices.Contains(shell.Me.Permissions, account.PermManagePermissions) {
 		t.Fatalf("shell %+v", shell)
 	}
 	if len(shell.Pending) != 3 || shell.Pending["dict_prs"] != 0 || shell.Pending["community"] != 0 || shell.Pending["issues"] != 0 || shell.UnreadNotifications != 0 {

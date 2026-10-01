@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const permissionKeys = ["review_dict_pr", "review_community", "triage_issues", "ban_users", "publish_notices", "trigger_release", "view_cloud_usage", "manage_permissions"] as const;
+export const permissionKeys = ["review_dict_pr", "review_community", "triage_issues", "ban_users", "publish_notices", "trigger_release", "view_cloud_usage", "view_logs", "manage_permissions"] as const;
 export type Permission = (typeof permissionKeys)[number];
 
 export const roleLabels: Record<string, string> = { maintainer: "维护者", reviewer: "审核志愿者", operator: "运营/客服", readonly: "只读" };
@@ -17,6 +17,8 @@ export const shellSchema = z.object({
   unread_notifications: z.number().int().nonnegative(),
   // unknown: no service probe has run yet, or the last one is more than 3 minutes old.
   status: z.enum(["ok", "degraded", "down", "unknown"]),
+  // 部署配置中启用的可选功能；logs 为 true 时才显示服务日志页。旧版服务端没有这个字段，按全部未启用处理。
+  features: z.object({ logs: z.boolean() }).optional(),
 });
 export type Shell = z.infer<typeof shellSchema>;
 

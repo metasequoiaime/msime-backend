@@ -16,5 +16,7 @@ func AdminRouteList() []account.AdminRoute {
 		}
 		routes = append(routes, account.AdminRoute{Method: "*", Path: path})
 	}
+	// 日志流不在 adminServerRoutes 表里（它绕过请求超时，由 serveAdmin 单独分发），在这里补上。
+	routes = append(routes, account.AdminRoute{Method: "GET", Path: adminLogsStreamPath})
 	return append(routes, account.AdminRouteList()...)
 }
