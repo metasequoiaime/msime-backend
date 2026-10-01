@@ -40,6 +40,15 @@ FIXTURES = {
     "/api/auth/logout": {"ok": True},
 }
 
+# Crash page (U9): one open group without install ids and one known group with a GitHub issue and a stack sample.
+CRASH_GROUP = {"signature": "0123456789abcdef", "platform": "ios", "version": "1.0.0", "title": "EXC_BAD_ACCESS", "status": "known", "issue_url": "https://github.com/metasequoiaime/msime-ios/issues/7", "first_seen": "2026-09-20T00:00:00Z", "last_seen": "2026-10-01T00:00:00Z", "count_7d": 12, "count_prev_7d": 9, "devices_7d": 8, "new": False}
+FIXTURES.update({
+    "/api/crash-groups": {"items": [CRASH_GROUP, {**CRASH_GROUP, "signature": "fedcba9876543210", "platform": "windows", "title": "Server exited", "status": "open", "issue_url": None, "count_7d": 3, "count_prev_7d": 0, "devices_7d": None, "new": True}], "has_more": False, "platforms": [{"platform": "ios", "count": 1}, {"platform": "windows", "count": 1}], "summary": {"groups": 2, "crashes_7d": 15, "devices_7d": 8, "installs_today": None, "crash_free_rate": 0.9962}},
+    "/api/crash-groups/0123456789abcdef": {"group": CRASH_GROUP, "samples": [{"id": "crash-1", "platform": "ios", "version": "1.0.0", "message": "EXC_BAD_ACCESS", "stack": "2 MSIME 0x1 KeyboardViewController.layoutCandidates() + 120", "resolved": False, "created_at": "2026-10-01T00:00:00Z"}]},
+    "/api/crash-groups/0123456789abcdef/issue": {"target": {"platform": "ios", "name": "iOS", "repo": "metasequoiaime/msime-ios"}, "issue_url": CRASH_GROUP["issue_url"]},
+    "/api/crash-groups/fedcba9876543210/issue": {"target": None, "issue_url": None},
+})
+
 
 def production_csp() -> str:
     match = re.search(r'Header\(\)\.Set\("Content-Security-Policy", "([^"]+)"\)', ADMIN_GO.read_text())
@@ -138,6 +147,17 @@ def main() -> int:
                     expect(page.get_by_role("complementary", name="后台导航")).to_be_visible()
                     expect(page.locator("header h1")).to_have_text(title)
                     violations(path)
+
+                page.goto(base + "/crash")
+                expect(page.get_by_text("99.62%")).to_be_visible()
+                expect(page.get_by_role("button", name="建 Issue")).to_be_disabled()
+                page.get_by_role("button", name="查看堆栈").click()
+                drawer = page.get_by_role("dialog", name="EXC_BAD_ACCESS")
+                expect(drawer.get_by_text("KeyboardViewController.layoutCandidates() + 120")).to_be_visible()
+                expect(drawer.get_by_text("metasequoiaime/msime-ios", exact=True)).to_be_visible()
+                page.keyboard.press("Escape")
+                expect(drawer).to_be_hidden()
+                violations("crash drawer")
 
                 for old, new in REDIRECTS.items():
                     page.goto(base + old)

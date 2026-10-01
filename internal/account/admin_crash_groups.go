@@ -2,7 +2,16 @@ package account
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -41,32 +50,565 @@ var (
 	actionReopenCrash  = setCrashResolved(false)
 )
 
-// actionCrashGroupStatus sets the status in value (open, known or fixed) on the crash group id.
+// crashSignaturePattern is the shape of a crash group signature: the first 16 hex digits of a sha256.
+var crashSignaturePattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+// ValidCrashSignature reports whether s can name a crash group.
+func ValidCrashSignature(s string) bool { return crashSignaturePattern.MatchString(s) }
+
+// crashGroupStatuses are the states a crash group can be in.
+var crashGroupStatuses = map[string]bool{"open": true, "known": true, "fixed": true}
+
+// actionCrashGroupStatus sets the status in value (open, known or fixed) on the crash group id. The response carries the previous status so the console can undo.
 func actionCrashGroupStatus(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
-	return actionResult{}, errNotImplemented
+	if !ValidCrashSignature(v.ID) {
+		return actionResult{}, actionFail(400, "invalid_id")
+	}
+	var status string
+	if json.Unmarshal(v.Value, &status) != nil || !crashGroupStatuses[status] {
+		return actionResult{}, actionFail(400, "invalid_value")
+	}
+	var previous string
+	err := tx.QueryRow(ctx, `SELECT status FROM admin_crash_groups WHERE signature=$1 FOR UPDATE`, v.ID).Scan(&previous)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return actionResult{}, actionFail(404, "not_found")
+	}
+	if err != nil {
+		return actionResult{}, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE admin_crash_groups SET status=$2 WHERE signature=$1`, v.ID, status); err != nil {
+		return actionResult{}, err
+	}
+	detail := map[string]any{"from": previous, "to": status}
+	if v.Reason != "" {
+		detail["reason"] = v.Reason
+	}
+	return actionResult{Affected: 1, Detail: detail, Extra: map[string]any{"previous": previous}}, nil
+}
+
+// crashGroupRow is one crash group with its counts, as the crash page shows it.
+type crashGroupRow struct {
+	Signature string    `json:"signature"`
+	Platform  string    `json:"platform"`
+	Version   string    `json:"version"`
+	Title     string    `json:"title"`
+	Status    string    `json:"status"`
+	IssueURL  *string   `json:"issue_url"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	// Count7d and CountPrev7d are the crashes of the last 7 days and of the 7 days before; the console derives the trend from them.
+	Count7d     int64 `json:"count_7d"`
+	CountPrev7d int64 `json:"count_prev_7d"`
+	// Devices7d is the number of distinct installs that crashed in the last 7 days, or null when none of those crashes carried an install id.
+	Devices7d *int64 `json:"devices_7d"`
+	// New marks a group first seen within the last 7 days.
+	New bool `json:"new"`
+}
+
+// crashGroupColumns selects a crashGroupRow from admin_crash_groups g joined with the per-signature counts c of crashGroupCounts.
+const crashGroupColumns = `g.signature,g.platform,g.version,g.title,g.status,g.issue_url,g.first_seen,g.last_seen,COALESCE(c.c7,0),COALESCE(c.p7,0),CASE WHEN COALESCE(c.reported,0)=0 THEN NULL ELSE c.devices END,g.first_seen>=now()-interval '7 days'`
+
+// crashGroupCounts counts the crashes of the last 14 days per signature; $1 restricts it to one signature when non-empty.
+const crashGroupCounts = `SELECT signature,
+ count(*) FILTER (WHERE created_at>=now()-interval '7 days') AS c7,
+ count(*) FILTER (WHERE created_at<now()-interval '7 days') AS p7,
+ count(install_id) FILTER (WHERE created_at>=now()-interval '7 days') AS reported,
+ count(DISTINCT install_id) FILTER (WHERE created_at>=now()-interval '7 days') AS devices
+ FROM admin_events WHERE kind='crash' AND signature IS NOT NULL AND created_at>=now()-interval '14 days' AND ($1='' OR signature=$1)
+ GROUP BY signature`
+
+func scanCrashGroup(row pgx.Row) (crashGroupRow, error) {
+	var g crashGroupRow
+	err := row.Scan(&g.Signature, &g.Platform, &g.Version, &g.Title, &g.Status, &g.IssueURL, &g.FirstSeen, &g.LastSeen, &g.Count7d, &g.CountPrev7d, &g.Devices7d, &g.New)
+	return g, err
+}
+
+// crashGroupsLimit caps the groups one page load returns; the busiest and most recent come first.
+const crashGroupsLimit = 500
+
+// crashSummary is the tile row of the crash page. Installs and sessions come from the optional active and session telemetry, so each is null rather than zero while clients do not report it.
+type crashSummary struct {
+	Groups        int64    `json:"groups"`
+	Crashes7d     int64    `json:"crashes_7d"`
+	Devices7d     *int64   `json:"devices_7d"`
+	InstallsToday *int64   `json:"installs_today"`
+	CrashFreeRate *float64 `json:"crash_free_rate"`
+}
+
+type crashPlatformCount struct {
+	Platform string `json:"platform"`
+	Count    int64  `json:"count"`
 }
 
 // adminCrashGroups serves GET /api/crash-groups?platform=.
 func (a *Service) adminCrashGroups(w http.ResponseWriter, r *http.Request, _ string) {
-	notImplemented(w)
+	query := r.URL.Query()
+	for key := range query {
+		if key != "platform" {
+			writeError(w, 400, "invalid_filter")
+			return
+		}
+	}
+	platform := query.Get("platform")
+	if len(query["platform"]) > 1 || !resourceText(platform, 0, 32, false) {
+		writeError(w, 400, "invalid_filter")
+		return
+	}
+	ctx := r.Context()
+	// One snapshot for the rows, the chip counts and the tiles, so they agree with each other.
+	tx, err := a.store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `WITH c AS (`+crashGroupCounts+`)
+SELECT `+crashGroupColumns+` FROM admin_crash_groups g LEFT JOIN c USING(signature)
+WHERE ($2='' OR g.platform=$2)
+ORDER BY COALESCE(c.c7,0) DESC,g.last_seen DESC,g.signature LIMIT $3`, "", platform, crashGroupsLimit+1)
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (crashGroupRow, error) { return scanCrashGroup(row) })
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	hasMore := len(items) > crashGroupsLimit
+	if hasMore {
+		items = items[:crashGroupsLimit]
+	}
+	rows, err = tx.Query(ctx, `SELECT platform,count(*) FROM admin_crash_groups GROUP BY platform ORDER BY platform`)
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	platforms, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (crashPlatformCount, error) {
+		var p crashPlatformCount
+		return p, row.Scan(&p.Platform, &p.Count)
+	})
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	var summary crashSummary
+	err = tx.QueryRow(ctx, `SELECT
+ (SELECT count(*) FROM admin_crash_groups WHERE $1='' OR platform=$1),
+ count(*) FILTER (WHERE kind='crash'),
+ CASE WHEN count(install_id) FILTER (WHERE kind='crash')=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE kind='crash') END,
+ CASE WHEN count(install_id)=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE created_at>=date_trunc('day',now())) END,
+ CASE WHEN count(*) FILTER (WHERE kind='session')=0 THEN NULL ELSE GREATEST(0,1-(count(*) FILTER (WHERE kind='session_crash'))::float8/(count(*) FILTER (WHERE kind='session'))) END
+FROM admin_events WHERE created_at>=now()-interval '7 days' AND ($1='' OR platform=$1)`, platform).Scan(&summary.Groups, &summary.Crashes7d, &summary.Devices7d, &summary.InstallsToday, &summary.CrashFreeRate)
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	write(w, 200, map[string]any{"items": items, "has_more": hasMore, "platforms": platforms, "summary": summary})
+}
+
+// crashSample is one stored crash of a group, for the stack view.
+type crashSample struct {
+	ID        string    `json:"id"`
+	Platform  string    `json:"platform"`
+	Version   string    `json:"version"`
+	Message   string    `json:"message"`
+	Stack     string    `json:"stack"`
+	Resolved  bool      `json:"resolved"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// crashGroupSamples is how many of the latest crashes the group view shows.
+const crashGroupSamples = 5
+
+// crashGroup reads one group with its counts and latest samples; a missing group is pgx.ErrNoRows.
+func (a *Service) crashGroup(ctx context.Context, signature string, samples int) (crashGroupRow, []crashSample, error) {
+	tx, err := a.store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return crashGroupRow{}, nil, err
+	}
+	defer tx.Rollback(ctx)
+	group, err := scanCrashGroup(tx.QueryRow(ctx, `WITH c AS (`+crashGroupCounts+`)
+SELECT `+crashGroupColumns+` FROM admin_crash_groups g LEFT JOIN c USING(signature) WHERE g.signature=$1`, signature))
+	if err != nil {
+		return crashGroupRow{}, nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT id,platform,version,message,stack,resolved,created_at FROM admin_events WHERE kind='crash' AND signature=$1 ORDER BY created_at DESC,id DESC LIMIT $2`, signature, samples)
+	if err != nil {
+		return crashGroupRow{}, nil, err
+	}
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (crashSample, error) {
+		var s crashSample
+		return s, row.Scan(&s.ID, &s.Platform, &s.Version, &s.Message, &s.Stack, &s.Resolved, &s.CreatedAt)
+	})
+	return group, items, err
 }
 
 // adminCrashGroup serves GET /api/crash-groups/{signature}.
 func (a *Service) adminCrashGroup(w http.ResponseWriter, r *http.Request, signature string) {
-	notImplemented(w)
+	if !ValidCrashSignature(signature) {
+		writeError(w, 400, "invalid_id")
+		return
+	}
+	group, samples, err := a.crashGroup(r.Context(), signature, crashGroupSamples)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, 404, "not_found")
+		return
+	}
+	if err != nil {
+		a.error(w, err)
+		return
+	}
+	write(w, 200, map[string]any{"group": group, "samples": samples})
 }
 
-// crashSignature groups a crash: the first 16 hex digits of sha256 over the normalized message and the first non-system stack frame. Empty means the crash is not grouped.
-func crashSignature(message, stack string) string {
+// CrashIssueSource is what a GitHub issue for a crash group is written from.
+type CrashIssueSource struct {
+	Signature   string
+	Platform    string
+	Version     string
+	Title       string
+	Status      string
+	IssueURL    string
+	FirstSeen   time.Time
+	LastSeen    time.Time
+	Count7d     int64
+	CountPrev7d int64
+	// Devices7d is -1 when the crashes carry no install id.
+	Devices7d int64
+	// Sample is the latest crash, if any is still stored.
+	Sample *CrashIssueSample
+}
+
+// CrashIssueSample is the crash quoted in an issue.
+type CrashIssueSample struct {
+	Version   string
+	Message   string
+	Stack     string
+	CreatedAt time.Time
+}
+
+// ErrCrashGroupNotFound is returned for a signature without a crash group.
+var ErrCrashGroupNotFound = errors.New("crash group not found")
+
+// CrashGroupForIssue reads the crash group signature for a GitHub issue; a missing group is ErrCrashGroupNotFound.
+func (a *Service) CrashGroupForIssue(ctx context.Context, signature string) (CrashIssueSource, error) {
+	group, samples, err := a.crashGroup(ctx, signature, 1)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CrashIssueSource{}, ErrCrashGroupNotFound
+	}
+	if err != nil {
+		return CrashIssueSource{}, err
+	}
+	source := CrashIssueSource{Signature: group.Signature, Platform: group.Platform, Version: group.Version, Title: group.Title, Status: group.Status, FirstSeen: group.FirstSeen, LastSeen: group.LastSeen, Count7d: group.Count7d, CountPrev7d: group.CountPrev7d, Devices7d: -1}
+	if group.IssueURL != nil {
+		source.IssueURL = *group.IssueURL
+	}
+	if group.Devices7d != nil {
+		source.Devices7d = *group.Devices7d
+	}
+	if len(samples) > 0 {
+		s := samples[0]
+		source.Sample = &CrashIssueSample{Version: s.Version, Message: s.Message, Stack: s.Stack, CreatedAt: s.CreatedAt}
+	}
+	return source, nil
+}
+
+// SetCrashGroupIssue records the GitHub issue opened for a crash group, marks the group known and audits both in one transaction. Call it only after the issue was created.
+func (a *Service) SetCrashGroupIssue(ctx context.Context, signature, repo string, number int64, url string) error {
+	tx, err := a.store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var previous string
+	err = tx.QueryRow(ctx, `SELECT status FROM admin_crash_groups WHERE signature=$1 FOR UPDATE`, signature).Scan(&previous)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrCrashGroupNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE admin_crash_groups SET status='known',issue_url=$2 WHERE signature=$1`, signature, url); err != nil {
+		return err
+	}
+	if err = auditTx(ctx, tx, "crash_group_issue", signature, map[string]any{"repo": repo, "number": number, "issue_url": url, "from": previous, "to": "known"}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// Crash spikes: a group whose last 7 days exceed the 7 days before by more than 20% (a new group counts as rising), with at least crashSpikeMinimum crashes so a single report does not alert anyone, notifies the console at most once per crashSpikeQuiet.
+const (
+	crashSpikeRise    = 1.2
+	crashSpikeMinimum = 5
+	crashSpikeQuiet   = "7 days"
+)
+
+// crashSpikeLock serializes spike checks across replicas, so concurrent jobs cannot both notify the same spike.
+const crashSpikeLock int64 = 0x6d73696d65637273
+
+// NotifyCrashSpikes records a crash_spike notification, in one transaction, for every crash group that rose more than 20% week over week and was not notified within the last 7 days, and returns how many it found.
+func (a *Service) NotifyCrashSpikes(ctx context.Context) (int, error) {
+	tx, err := a.store.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, crashSpikeLock); err != nil {
+		return 0, err
+	}
+	spikes, err := crashSpikes(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	for _, spike := range spikes {
+		if err = a.Notify(ctx, tx, spike.notification()); err != nil {
+			return 0, err
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(spikes), nil
+}
+
+// crashSpike is one group that rose past the spike threshold.
+type crashSpike struct {
+	Signature, Platform, Title string
+	Count7d, CountPrev7d       int64
+}
+
+// notification phrases the spike like the console's other alerts, for example "ios 崩溃分组 EXC_BAD_ACCESS 上升 32%".
+func (s crashSpike) notification() Notification {
+	title := []rune(s.Title)
+	if len(title) > 80 {
+		title = append(title[:79], '…')
+	}
+	text := s.Platform + " 新增崩溃分组 " + string(title)
+	if s.CountPrev7d > 0 {
+		rise := (s.Count7d*100+s.CountPrev7d/2)/s.CountPrev7d - 100
+		text = s.Platform + " 崩溃分组 " + string(title) + " 上升 " + strconv.FormatInt(rise, 10) + "%"
+	}
+	return Notification{Kind: NotifyCrashSpike, Title: text, TargetPage: "crash", TargetID: s.Signature}
+}
+
+// crashSpikes lists the groups to notify, skipping fixed groups and those already notified within crashSpikeQuiet.
+func crashSpikes(ctx context.Context, tx pgx.Tx) ([]crashSpike, error) {
+	rows, err := tx.Query(ctx, `WITH c AS (`+crashGroupCounts+`)
+SELECT g.signature,g.platform,g.title,c.c7,c.p7 FROM admin_crash_groups g JOIN c USING(signature)
+WHERE g.status<>'fixed' AND c.c7>=$2 AND c.c7>c.p7*$3::float8
+ AND NOT EXISTS (SELECT 1 FROM admin_notifications n WHERE n.kind=$4 AND n.target_id=g.signature AND n.created_at>now()-$5::interval)
+ORDER BY c.c7 DESC,g.signature`, "", crashSpikeMinimum, crashSpikeRise, NotifyCrashSpike, crashSpikeQuiet)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (crashSpike, error) {
+		var s crashSpike
+		return s, row.Scan(&s.Signature, &s.Platform, &s.Title, &s.Count7d, &s.CountPrev7d)
+	})
+}
+
+var (
+	crashAddressPattern  = regexp.MustCompile(`0[xX][0-9a-fA-F]+`)
+	crashUUIDPattern     = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	crashHexRunPattern   = regexp.MustCompile(`\b[0-9a-fA-F]{8,}\b`)
+	crashDigitsPattern   = regexp.MustCompile(`[0-9]+`)
+	crashFrameIndex      = regexp.MustCompile(`^(?:#?[0-9]+[:.]?\s+|at\s+)+`)
+	crashFrameOffset     = regexp.MustCompile(`\s*\+\s*[0-9]+\s*$`)
+	crashFrameLineNumber = regexp.MustCompile(`(?::[0-9]+)+`)
+	crashSpaces          = regexp.MustCompile(`\s+`)
+)
+
+// crashSystemPrefixes mark frames of the operating system, language runtimes and standard libraries; the first frame whose fields match none of them identifies where the crash happened in our code.
+var crashSystemPrefixes = []string{
+	// Apple
+	"libsystem_", "libdyld", "libobjc", "dyld", "libdispatch", "libswift", "uikit", "corefoundation", "foundation", "graphicsservices", "appkit", "hitoolbox", "frontboardservices", "coreautolayout",
+	// Windows and .NET
+	"ntdll", "kernel32", "kernelbase", "ucrtbase", "msvcp", "vcruntime", "user32", "combase", "rpcrt4", "system.", "microsoft.",
+	// JVM and Android
+	"java.", "javax.", "jdk.", "sun.", "android.", "androidx.", "dalvik.", "com.android.", "kotlin.", "kotlinx.", "libart", "libandroid_runtime", "art::",
+	// C and C++ runtimes, Linux, HarmonyOS
+	"libc.", "libc++", "libstdc++", "libpthread", "libgcc", "libm.", "ld-linux", "__libc_start", "start_thread", "libace", "libmusl",
+	// Rust
+	"std::", "core::", "alloc::", "rust_begin_unwind", "__rust", "backtrace::",
+	// Unsymbolicated
+	"???", "<unknown>",
+}
+
+// crashSystemFrame reports whether a normalized, lowercased frame belongs to the system: any of its fields (module, symbol) starts with a system prefix.
+func crashSystemFrame(frame string) bool {
+	for _, field := range strings.Fields(frame) {
+		field = strings.TrimLeft(field, "-+[(")
+		for _, prefix := range crashSystemPrefixes {
+			if strings.HasPrefix(field, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// normalizeCrashFrame strips what varies between builds and runs from one stack line: frame numbers, addresses, offsets and line numbers.
+func normalizeCrashFrame(line string) string {
+	line = strings.TrimSpace(line)
+	line = crashFrameIndex.ReplaceAllString(line, "")
+	line = crashAddressPattern.ReplaceAllString(line, "")
+	line = crashFrameOffset.ReplaceAllString(line, "")
+	line = crashFrameLineNumber.ReplaceAllString(line, "")
+	return strings.ToLower(strings.TrimSpace(crashSpaces.ReplaceAllString(line, " ")))
+}
+
+// normalizeCrashMessage keeps the first non-blank line of a crash message with addresses, identifiers and numbers masked, so the same failure groups across runs.
+func normalizeCrashMessage(message string) string {
+	line := crashFirstLine(message)
+	line = crashAddressPattern.ReplaceAllString(line, "0x?")
+	line = crashUUIDPattern.ReplaceAllString(line, "?")
+	line = crashHexRunPattern.ReplaceAllString(line, "?")
+	line = crashDigitsPattern.ReplaceAllString(line, "#")
+	return strings.ToLower(strings.TrimSpace(crashSpaces.ReplaceAllString(line, " ")))
+}
+
+func crashFirstLine(text string) string {
+	for line := range strings.SplitSeq(text, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
 	return ""
 }
 
-// upsertCrashGroup records a crash with a non-empty signature in its group, inside the telemetry insert's transaction.
-func (a *Service) upsertCrashGroup(ctx context.Context, tx pgx.Tx, signature, platform, version, title string) error {
-	return nil
+// crashStackLines bounds how many stack lines are searched for the first non-system frame.
+const crashStackLines = 256
+
+// crashSignature groups a crash: the first 16 hex digits of sha256 over the normalized message and the first non-system stack frame. Empty means the crash is not grouped.
+func crashSignature(message, stack string) string {
+	normalized := normalizeCrashMessage(message)
+	frame := ""
+	lines := strings.Split(stack, "\n")
+	if len(lines) > crashStackLines {
+		lines = lines[:crashStackLines]
+	}
+	for _, line := range lines {
+		if candidate := normalizeCrashFrame(line); candidate != "" && !crashSystemFrame(candidate) {
+			frame = candidate
+			break
+		}
+	}
+	if normalized == "" && frame == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(normalized + "\n" + frame))
+	return hex.EncodeToString(sum[:8])
 }
+
+// crashGroupTitle is the title of a new crash group: the first non-blank line of its message, at most 200 characters.
+func crashGroupTitle(message string) string {
+	line := crashFirstLine(message)
+	if utf8.RuneCountInString(line) > 200 {
+		line = string([]rune(line)[:200])
+	}
+	return line
+}
+
+// upsertCrashGroup records a crash with a non-empty signature in its group, inside the telemetry insert's transaction: a new group starts open, an existing one moves its last sighting, platform and version forward.
+func (a *Service) upsertCrashGroup(ctx context.Context, tx pgx.Tx, signature, platform, version, title string) error {
+	if signature == "" {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO admin_crash_groups(signature,platform,version,title) VALUES($1,$2,$3,$4)
+ON CONFLICT(signature) DO UPDATE SET platform=EXCLUDED.platform,version=EXCLUDED.version,last_seen=GREATEST(admin_crash_groups.last_seen,EXCLUDED.last_seen)`, signature, platform, version, title)
+	return err
+}
+
+// Backfill bounds: each batch is one transaction, and one startup handles at most crashBackfillBatches of them so a large history cannot hold up startup; the rest continues at the next start.
+const (
+	crashBackfillBatch   = 500
+	crashBackfillBatches = 40
+)
 
 // backfillCrashSignatures computes the signature of stored crashes that have none, with crashSignature, and creates their groups. AdminReady runs it at every startup, so it must be cheap when nothing is left to fill.
 func (a *Service) backfillCrashSignatures(ctx context.Context) error {
+	// The keyset cursor moves past crashes that cannot be grouped, so they are read once per startup instead of in a loop.
+	var afterTime time.Time
+	afterID := ""
+	for range crashBackfillBatches {
+		more, lastTime, lastID, err := a.backfillCrashBatch(ctx, afterTime, afterID)
+		if err != nil || !more {
+			return err
+		}
+		afterTime, afterID = lastTime, lastID
+	}
 	return nil
+}
+
+// crashBackfillGroup aggregates the crashes of one signature found in a batch.
+type crashBackfillGroup struct {
+	platform, version, title string
+	first, last              time.Time
+}
+
+// backfillCrashBatch signs the next batch of unsigned crashes after the cursor and reports whether more may follow, with the new cursor.
+func (a *Service) backfillCrashBatch(ctx context.Context, afterTime time.Time, afterID string) (bool, time.Time, string, error) {
+	tx, err := a.store.pool.Begin(ctx)
+	if err != nil {
+		return false, afterTime, afterID, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT id,platform,version,message,stack,created_at FROM admin_events
+WHERE kind='crash' AND signature IS NULL AND (created_at,id)>($1,$2) ORDER BY created_at,id LIMIT $3`, afterTime, afterID, crashBackfillBatch)
+	if err != nil {
+		return false, afterTime, afterID, err
+	}
+	type event struct {
+		id, platform, version, message, stack string
+		created                               time.Time
+	}
+	events, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (event, error) {
+		var e event
+		return e, row.Scan(&e.id, &e.platform, &e.version, &e.message, &e.stack, &e.created)
+	})
+	if err != nil || len(events) == 0 {
+		return false, afterTime, afterID, err
+	}
+	var ids, signatures []string
+	groups := map[string]*crashBackfillGroup{}
+	for _, e := range events {
+		signature := crashSignature(e.message, e.stack)
+		if signature == "" {
+			continue
+		}
+		ids, signatures = append(ids, e.id), append(signatures, signature)
+		group := groups[signature]
+		if group == nil {
+			group = &crashBackfillGroup{title: crashGroupTitle(e.message), first: e.created}
+			groups[signature] = group
+		}
+		// Events arrive oldest first, so the latest platform and version win.
+		group.platform, group.version, group.last = e.platform, e.version, e.created
+	}
+	if len(ids) > 0 {
+		if _, err = tx.Exec(ctx, `UPDATE admin_events e SET signature=v.signature FROM unnest($1::text[],$2::text[]) v(id,signature) WHERE e.id=v.id AND e.signature IS NULL`, ids, signatures); err != nil {
+			return false, afterTime, afterID, err
+		}
+		var keys, platforms, versions, titles []string
+		var firsts, lasts []time.Time
+		for signature, group := range groups {
+			keys, platforms, versions, titles = append(keys, signature), append(platforms, group.platform), append(versions, group.version), append(titles, group.title)
+			firsts, lasts = append(firsts, group.first), append(lasts, group.last)
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO admin_crash_groups(signature,platform,version,title,first_seen,last_seen)
+SELECT * FROM unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::timestamptz[],$6::timestamptz[])
+ON CONFLICT(signature) DO UPDATE SET first_seen=LEAST(admin_crash_groups.first_seen,EXCLUDED.first_seen),
+ last_seen=GREATEST(admin_crash_groups.last_seen,EXCLUDED.last_seen),
+ platform=CASE WHEN EXCLUDED.last_seen>admin_crash_groups.last_seen THEN EXCLUDED.platform ELSE admin_crash_groups.platform END,
+ version=CASE WHEN EXCLUDED.last_seen>admin_crash_groups.last_seen THEN EXCLUDED.version ELSE admin_crash_groups.version END`, keys, platforms, versions, titles, firsts, lasts); err != nil {
+			return false, afterTime, afterID, err
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, afterTime, afterID, err
+	}
+	last := events[len(events)-1]
+	return len(events) == crashBackfillBatch, last.created, last.id, nil
 }
