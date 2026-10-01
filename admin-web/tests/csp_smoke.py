@@ -160,6 +160,8 @@ def main() -> int:
                 page.goto(base + "/words?focus=2")
                 expect(page.get_by_text("仅显示搜索定位的词条")).to_be_visible()
                 expect(words.get_by_text("代购")).to_be_hidden()
+                page.goto(base + "/words?focus=999")
+                expect(page.get_by_text("搜索定位的词条已不在名单中")).to_be_visible()
                 violations("/words")
 
                 page.goto(base + "/")

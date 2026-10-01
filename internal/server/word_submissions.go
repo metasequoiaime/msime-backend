@@ -445,7 +445,7 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 	sub := submission{kind: kind, note: note}
 	if s.accounts != nil {
 		var blocked []wordRejection
-		blocked, sub.flagged, err = screenSubmission(ctx, s.accounts.Sensitive(), entryTexts(words, english, translations), input.Note)
+		blocked, sub.flagged, err = screenSubmission(ctx, s.accounts.Sensitive(), entryTexts(words, english, translations), note)
 		switch {
 		case errors.Is(err, errNoteBlocked):
 			wordsFail(w, 400, "blocked_word", "备注包含不允许提交的内容，请修改后再提交。")
@@ -945,59 +945,66 @@ func listedLines(content string, lines []submissionLine) alreadyListedError {
 // errNoteBlocked is a submission whose note hits a block-level sensitive word.
 var errNoteBlocked = errors.New("note hits a blocked sensitive word")
 
-// entryTexts is the text of each entry the sensitive word list screens: the word, or both columns of an English word or translation. Columns are joined by NUL, which validation never lets into a field and plain matching does not strip, so a match cannot span two columns.
-func entryTexts(words []wordSubmissionEntry, english []englishSubmissionEntry, translations []translationSubmissionEntry) []string {
-	var texts []string
+// entryTexts is the text of each entry the sensitive word list screens: the word, or both columns of an English word or translation. Each column is matched on its own, so a match never spans two columns.
+func entryTexts(words []wordSubmissionEntry, english []englishSubmissionEntry, translations []translationSubmissionEntry) [][]string {
+	var texts [][]string
 	for _, e := range words {
-		texts = append(texts, e.Word)
+		texts = append(texts, []string{e.Word})
 	}
 	for _, e := range english {
-		texts = append(texts, e.Word+"\x00"+e.Display)
+		texts = append(texts, []string{e.Word, e.Display})
 	}
 	for _, e := range translations {
-		texts = append(texts, e.Source+"\x00"+e.Gloss)
+		texts = append(texts, []string{e.Source, e.Gloss})
 	}
 	return texts
 }
 
-// screenSubmission matches every entry and the note against the sensitive word list. Entries with a block hit come back as blocked_word rejections, a note with one as errNoteBlocked, and review hits as the flags the commit message carries (the entry's position and the matched categories, never the configured patterns, which stay private).
-func screenSubmission(ctx context.Context, matcher account.SensitiveMatcher, texts []string, note string) ([]wordRejection, []string, error) {
+// screenSubmission matches every column of every entry and the note against the sensitive word list. Entries with a block hit come back as blocked_word rejections, a note with one as errNoteBlocked, and review hits as the flags the commit message carries (the entry's position and the matched categories, never the configured patterns, which stay private).
+func screenSubmission(ctx context.Context, matcher account.SensitiveMatcher, texts [][]string, note string) ([]wordRejection, []string, error) {
 	var blocked []wordRejection
 	var flagged []string
-	review := func(what string, hits []account.SensitiveHit) {
+	// screen matches the columns of one entry; it reports whether any hit blocks, and the categories of the hits otherwise.
+	screen := func(columns []string) (bool, []string, error) {
 		var categories []string
-		for _, h := range hits {
-			if !slices.Contains(categories, h.Category) {
-				categories = append(categories, h.Category)
+		for _, column := range columns {
+			if strings.TrimSpace(column) == "" {
+				continue
+			}
+			hits, err := matcher.Match(ctx, column)
+			if err != nil {
+				return false, nil, err
+			}
+			for _, h := range hits {
+				if h.Level == account.SensitiveBlock {
+					return true, nil, nil
+				}
+				if !slices.Contains(categories, h.Category) {
+					categories = append(categories, h.Category)
+				}
 			}
 		}
-		flagged = append(flagged, what+" ("+strings.Join(categories, ", ")+")")
+		return false, categories, nil
 	}
-	for i, text := range texts {
-		hits, err := matcher.Match(ctx, text)
-		if err != nil {
-			return nil, nil, err
-		}
+	for i, columns := range texts {
+		block, categories, err := screen(columns)
 		switch {
-		case len(hits) == 0:
-		case hits[0].Level == account.SensitiveBlock:
+		case err != nil:
+			return nil, nil, err
+		case block:
 			blocked = append(blocked, wordRejection{i, "blocked_word", "包含不允许提交的内容"})
-		default:
-			review("entry "+strconv.Itoa(i+1), hits)
+		case len(categories) > 0:
+			flagged = append(flagged, "entry "+strconv.Itoa(i+1)+" ("+strings.Join(categories, ", ")+")")
 		}
 	}
-	if strings.TrimSpace(note) != "" {
-		hits, err := matcher.Match(ctx, note)
-		if err != nil {
-			return nil, nil, err
-		}
-		switch {
-		case len(hits) == 0:
-		case hits[0].Level == account.SensitiveBlock:
-			return nil, nil, errNoteBlocked
-		default:
-			review("note", hits)
-		}
+	block, categories, err := screen([]string{note})
+	switch {
+	case err != nil:
+		return nil, nil, err
+	case block:
+		return nil, nil, errNoteBlocked
+	case len(categories) > 0:
+		flagged = append(flagged, "note ("+strings.Join(categories, ", ")+")")
 	}
 	return blocked, flagged, nil
 }

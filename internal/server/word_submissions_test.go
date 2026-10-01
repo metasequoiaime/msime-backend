@@ -1204,6 +1204,11 @@ func TestWordSubmissionSensitiveWordsAndRecording(t *testing.T) {
 	if body := decodeBody(t, w); w.Code != 400 || body["code"] != "blocked_word" {
 		t.Fatal(w.Code, w.Body.String())
 	}
+	// A zero-width character the note sanitiser strips cannot hide a word from the screen.
+	w = post(`{"entries":[{"word":"堪堪","pinyin":"kan'kan"}],"note":"刷\u200b单","token":"turnstile-token"}`)
+	if body := decodeBody(t, w); w.Code != 400 || body["code"] != "blocked_word" {
+		t.Fatal(w.Code, w.Body.String())
+	}
 	if f.count("POST /app/installations/77/access_tokens") != 0 || f.count("GET "+wordsTestRepo+"/pulls") != 0 {
 		t.Fatal("blocked submissions must not reach GitHub", f.calls)
 	}
@@ -1237,13 +1242,13 @@ func TestWordSubmissionSensitiveWordsAndRecording(t *testing.T) {
 	}
 }
 
-// screenSubmission fails closed: a matcher error stops the submission instead of letting unscreened text through.
+// screenSubmission fails closed: a matcher error stops the submission instead of letting unscreened text through. Each column of an entry is matched on its own.
 func TestWordSubmissionScreeningFailure(t *testing.T) {
-	_, _, err := screenSubmission(context.Background(), failingMatcher{}, []string{"堪堪"}, "")
+	_, _, err := screenSubmission(context.Background(), failingMatcher{}, [][]string{{"堪堪"}}, "")
 	if err == nil {
 		t.Fatal("matcher errors must be returned")
 	}
-	blocked, flagged, err := screenSubmission(context.Background(), staticMatcher{"代购": account.SensitiveReview, "刷单": account.SensitiveBlock}, []string{"代购", "刷单", "好"}, "代购")
+	blocked, flagged, err := screenSubmission(context.Background(), staticMatcher{"代购": account.SensitiveReview, "刷单": account.SensitiveBlock}, [][]string{{"代购"}, {"好", "刷单"}, {"好"}}, "代购")
 	if err != nil || len(blocked) != 1 || blocked[0].Index != 1 || strings.Join(flagged, "; ") != "entry 1 (custom); note (custom)" {
 		t.Fatal(blocked, flagged, err)
 	}

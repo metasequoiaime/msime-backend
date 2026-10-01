@@ -67,14 +67,21 @@ type sensitiveWords struct {
 	mu      sync.Mutex
 	words   []sensitiveWord
 	loaded  time.Time
+	edited  time.Time
 	pending map[sensitiveHitKey]int64
 	flushed time.Time
 }
 
-// invalidate makes the next Match reload the list, so a console edit applies at once on this replica; other replicas pick it up within sensitiveRefresh.
+// sensitiveEditWindow is how long after a console edit the cache is treated as short-lived. The edit's transaction commits only after the action returns (within the 15s admin request deadline), so a Match racing that commit can load the old list; reloading at most every sensitiveEditRefresh during this window makes the edit apply within that interval of its commit instead of after a full sensitiveRefresh.
+const (
+	sensitiveEditWindow  = 15 * time.Second
+	sensitiveEditRefresh = time.Second
+)
+
+// invalidate makes the next Match reload the list, so a console edit applies at once on this replica; other replicas pick it up within sensitiveRefresh. It runs inside the edit's transaction, before the commit, so it also opens sensitiveEditWindow.
 func (s *sensitiveWords) invalidate() {
 	s.mu.Lock()
-	s.loaded = time.Time{}
+	s.loaded, s.edited = time.Time{}, time.Now()
 	s.mu.Unlock()
 }
 
@@ -83,7 +90,11 @@ func (s *sensitiveWords) list(ctx context.Context, store *Store, now time.Time) 
 	fresh := func() ([]sensitiveWord, bool) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.words, !s.loaded.IsZero() && now.Sub(s.loaded) < sensitiveRefresh
+		maxAge := sensitiveRefresh
+		if !s.edited.IsZero() && now.Sub(s.edited) < sensitiveEditWindow {
+			maxAge = sensitiveEditRefresh
+		}
+		return s.words, !s.loaded.IsZero() && now.Sub(s.loaded) < maxAge
 	}
 	if words, ok := fresh(); ok {
 		return words, nil
@@ -147,12 +158,14 @@ func compileSensitiveRegex(pattern string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
-// foldSensitive normalises text for matching: full-width ASCII becomes half-width, letters lowercase, and with dropSpace every white space character is removed so spacing cannot split a plain word.
+// foldSensitive normalises text for matching: invisible format characters (zero-width spaces and joiners, bidi marks) are removed so they cannot split a word, full-width ASCII becomes half-width, letters lowercase, and with dropSpace every white space character is removed so spacing cannot split a plain word.
 func foldSensitive(text string, dropSpace bool) string {
 	var b strings.Builder
 	b.Grow(len(text))
 	for _, r := range text {
 		switch {
+		case unicode.Is(unicode.Cf, r):
+			continue
 		case r == '　':
 			r = ' '
 		case r >= '！' && r <= '～':
@@ -223,7 +236,7 @@ ON CONFLICT (word_id,day) DO UPDATE SET count=admin_sensitive_hits.count+EXCLUDE
 // sensitiveMatcher is the SensitiveMatcher handed out by Sensitive; it reaches the database and the cached state through the Service.
 type sensitiveMatcher struct{ a *Service }
 
-// Match reports every word text hits, block hits first, at most once per word, and counts each hit. Plain words match a case-insensitive substring of the text with white space removed; regexes match case-insensitively against the text with white space kept. Full-width ASCII is folded to half-width for both.
+// Match reports every word text hits, block hits first, at most once per word, and counts each hit. Plain words match a case-insensitive substring of the text with white space and format characters removed; regexes match case-insensitively against the text with white space kept, either with full-width ASCII folded to half-width or as written. Format characters are ignored for both.
 func (m sensitiveMatcher) Match(ctx context.Context, text string) ([]SensitiveHit, error) {
 	now := time.Now()
 	words, err := m.a.sensitive.list(ctx, m.a.store, now)
@@ -234,9 +247,16 @@ func (m sensitiveMatcher) Match(ctx context.Context, text string) ([]SensitiveHi
 		return nil, nil
 	}
 	compact, spaced := foldSensitive(text, true), foldSensitive(text, false)
+	// A regex written with full-width letters is not folded (folding a pattern could change its meaning), so regexes also run against the text with only format characters removed.
+	visible := strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, text)
 	var hits []SensitiveHit
 	for _, w := range words {
-		if (w.re != nil && w.re.MatchString(spaced)) || (w.re == nil && strings.Contains(compact, w.plain)) {
+		if (w.re != nil && (w.re.MatchString(spaced) || (visible != spaced && w.re.MatchString(visible)))) || (w.re == nil && strings.Contains(compact, w.plain)) {
 			hits = append(hits, w.hit)
 		}
 	}

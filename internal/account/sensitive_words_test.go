@@ -336,3 +336,28 @@ func TestWordSubmissionStore(t *testing.T) {
 		t.Fatal(string(list[0].Entries))
 	}
 }
+
+// Invisible format characters cannot split a word, and a regex written with full-width letters still matches the text as typed.
+func TestSensitiveMatcherFolding(t *testing.T) {
+	a, _ := sensitiveFixture(t)
+	ctx := context.Background()
+	plain := addSensitive(t, a, `{"pattern":"加V","category":"ad","level":"block"}`, 200)
+	wide := addSensitive(t, a, `{"pattern":"/ＱＱ\\d{5,}/","category":"ad","level":"review"}`, 200)
+	m := a.Sensitive()
+	for _, text := range []string{"加​V", "加⁠ ｖ", "‮加v"} {
+		if hits, err := m.Match(ctx, text); err != nil || len(hits) != 1 || hits[0].WordID != plain {
+			t.Fatalf("%q: %v %v", text, hits, err)
+		}
+	}
+	if hits, err := m.Match(ctx, "ＱＱ123456"); err != nil || len(hits) != 1 || hits[0].WordID != wide {
+		t.Fatal(hits, err)
+	}
+	// A console edit racing a reload: a row that becomes visible after the cache was loaded (the edit's commit) is picked up within the short post-edit refresh, not after the full interval.
+	if _, err := a.store.pool.Exec(ctx, `INSERT INTO admin_sensitive_words(pattern,is_regex,category,level,created_by) VALUES('代购',false,'ad','review','t')`); err != nil {
+		t.Fatal(err)
+	}
+	words, err := a.sensitive.list(ctx, a.store, time.Now().Add(2*sensitiveEditRefresh))
+	if err != nil || len(words) != 3 {
+		t.Fatal(words, err)
+	}
+}

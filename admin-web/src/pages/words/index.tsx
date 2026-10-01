@@ -215,8 +215,10 @@ export default function WordsPage() {
   // On phones the chips get their own horizontally scrolling row, because the table toolbar leaves them too little width next to the search box.
   const chips = <FilterChips label="分类" value={filter} onChange={setFilter} className={cn(mobile && "flex-nowrap *:shrink-0")}
     options={[{ key: "all", label: "全部", count: rows?.length ?? 0 }, ...sensitiveCategories.map(key => ({ key, label: categoryLabels[key], count: counts.byCategory[key] ?? 0 }))]} />;
-  const focusBar = focused && <div className="flex flex-wrap items-center gap-2 text-[13px] text-body">
-    <span>仅显示搜索定位的词条</span>
+  // A link to a word that was deleted since says so instead of silently showing the whole list.
+  const focusMissing = Boolean(focus) && rows !== undefined && !focused;
+  const focusBar = (focused || focusMissing) && <div className="flex flex-wrap items-center gap-2 text-[13px] text-body">
+    <span>{focused ? "仅显示搜索定位的词条" : "搜索定位的词条已不在名单中"}</span>
     <Button size="sm" variant="outline" onClick={() => setSearch({ focus: undefined })}>显示全部</Button>
   </div>;
 
@@ -247,7 +249,7 @@ export default function WordsPage() {
       <StatTile label="近 7 天命中" value={stat(counts.hits)} />
     </StatGrid>
 
-    {mobile && !focused && <div className="mb-3 overflow-x-auto pb-1">{chips}</div>}
+    {mobile && !focusBar && <div className="mb-3 overflow-x-auto pb-1">{chips}</div>}
 
     <DataTable
       ariaLabel="敏感词列表"
