@@ -206,6 +206,20 @@ func TestConsolePublicEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 		{"crash telemetry", "POST", "/v1/telemetry/events", `{"id":"telemetry-failure-crash-01","kind":"crash","platform":"windows","version":"1","message":"boom","stack":"at main.go:1\nat runtime.go:2","install_id":"device-windows-0001"}`, false},
 		{"active telemetry", "POST", "/v1/telemetry/events", `{"id":"telemetry-failure-active-1","kind":"active","platform":"windows","version":"1","install_id":"device-windows-0002"}`, false},
 		{"site mirrors", "GET", "/v1/site/download-mirrors", "", false},
+		{"skins", "GET", "/v1/community/skins", "", true},
+		{"skin", "GET", "/v1/community/skins/fail-skin", "", true},
+		{"delete skin", "DELETE", "/v1/community/skins/fail-skin", "", true},
+		{"resources", "GET", "/v1/community/resources?kind=dictionary", "", true},
+		{"resource", "GET", "/v1/community/resources/fail-dict", "", true},
+		{"delete resource", "DELETE", "/v1/community/resources/fail-dict", "", true},
+		{"candidate skins", "GET", "/v1/community/candidate-skins", "", true},
+		{"candidate skin", "GET", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc", "", true},
+		{"candidate preview", "GET", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc/preview", "", true},
+		{"candidate visibility", "PATCH", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc", `{"visibility":"private"}`, true},
+		{"delete candidate", "DELETE", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc", "", true},
+		{"plugins", "GET", "/v1/community/plugins", "", true},
+		{"plugin", "GET", "/v1/community/plugins/fa334455-1234-4234-8234-000000000001", "", true},
+		{"delete plugin", "DELETE", "/v1/community/plugins/fa334455-1234-4234-8234-000000000001", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
