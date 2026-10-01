@@ -128,13 +128,15 @@ func IsPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/community/") || strings.HasPrefix(path, "/v1/auth/") || path == "/v1/users/me" || strings.HasPrefix(path, "/v1/users/me/")
 }
 
-// accountRouteTimeout is the context each mounted route runs under: 15 s, except the uploads whose body alone can take longer: the dictionary snapshot restore and a candidate-skin publish or replacement.
+// accountRouteTimeout is the context each mounted route runs under: 15 s, except the transfers whose body alone can take longer: the dictionary snapshot restore, a candidate-skin publish or replacement, and a plugin pack publish or download.
 func accountRouteTimeout(pattern string) time.Duration {
 	switch pattern {
 	case "PUT /v1/users/me/dictionary/snapshot":
 		return snapshotRestoreTimeout
 	case "POST /v1/community/candidate-skins", "PUT /v1/community/candidate-skins/{id}":
 		return candidatePublishTimeout
+	case "POST /v1/community/plugins", "POST /v1/community/plugins/{id}/download":
+		return pluginTransferTimeout
 	default:
 		return 15 * time.Second
 	}
@@ -159,6 +161,12 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"GET /v1/community/candidate-skins/{id}/preview":   (*Service).communityCandidatePreview,
 		"POST /v1/community/candidate-skins/{id}/download": (*Service).communityCandidateDownload,
 		"PUT /v1/community/candidate-skins/{id}/rating":    (*Service).communityCandidateRate,
+		"GET /v1/community/plugins":                        (*Service).communityPluginList,
+		"POST /v1/community/plugins":                       (*Service).communityPluginPublish,
+		"GET /v1/community/plugins/{id}":                   (*Service).communityPluginDetail,
+		"DELETE /v1/community/plugins/{id}":                (*Service).communityPluginDelete,
+		"POST /v1/community/plugins/{id}/download":         (*Service).communityPluginDownload,
+		"PUT /v1/community/plugins/{id}/rating":            (*Service).communityPluginRate,
 		"GET /v1/community/skins":                          (*Service).communityList,
 		"POST /v1/community/skins":                         (*Service).communityPublish,
 		"GET /v1/community/skins/{id}":                     (*Service).communityDetail,

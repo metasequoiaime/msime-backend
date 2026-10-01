@@ -70,7 +70,7 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 		a.adminUser(w, r, strings.TrimPrefix(path, "users/"))
 		return
 	}
-	for _, section := range []string{"skins", "candidate-skins", "dictionaries", "replies"} {
+	for _, section := range []string{"skins", "candidate-skins", "plugins", "dictionaries", "replies"} {
 		if id, ok := strings.CutPrefix(path, section+"/"); ok {
 			a.adminContent(w, r, section, id)
 			return
@@ -96,6 +96,8 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
    'open_crashes',(SELECT count(*) FROM admin_events WHERE kind='crash' AND NOT resolved),
    'skins',(SELECT count(*) FROM community_skins),
    'skin_downloads',(SELECT count(*) FROM community_skin_downloads),
+   'plugins',(SELECT count(*) FROM community_plugins),
+   'plugin_downloads',(SELECT count(*) FROM community_plugin_downloads),
    'dictionaries',(SELECT count(*) FROM community_resources WHERE kind='dictionary'),
    'replies',(SELECT count(*) FROM community_resources WHERE kind='reply'),
    'resource_saves',(SELECT count(*) FROM community_resource_saves),
@@ -134,6 +136,7 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 		"dictionaries":    `SELECT id,name,description,owner_id,revision,created_at,updated_at,jsonb_array_length(content->'entries') AS entries,(SELECT count(*) FROM community_resource_saves WHERE resource_id=community_resources.id) AS saves FROM community_resources WHERE kind='dictionary'`,
 		"replies":         `SELECT id,name,description,owner_id,revision,created_at,updated_at,content->>'prompt' AS prompt FROM community_resources WHERE kind='reply'`,
 		"candidate-skins": `SELECT s.id,s.package_id,s.name,COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'||upper(left(u.id,6))) AS author,(SELECT COALESCE(sum(size),0) FROM community_candidate_skin_files WHERE skin_id=s.id) AS size,(SELECT count(*) FROM community_candidate_skin_files WHERE skin_id=s.id) AS file_count,s.visibility,s.created_at,s.updated_at FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id`,
+		"plugins":         `SELECT p.id,p.kind,p.plugin_id,p.name,p.version,COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'||upper(left(u.id,6))) AS author,p.owner_id,p.size,p.sha256,(SELECT count(*) FROM community_plugin_downloads WHERE pack_id=p.id) AS downloads,p.created_at FROM community_plugins p JOIN auth_users u ON u.id=p.owner_id`,
 		"downloads":       `SELECT id,platform,version,created_at FROM admin_events WHERE kind='download'`,
 		"crashes":         `SELECT id,platform,version,message,stack,resolved,created_at FROM admin_events WHERE kind='crash'`,
 		"audit":           `SELECT id,actor,action,target,created_at FROM admin_audit`,
@@ -190,6 +193,7 @@ func (a *Service) adminAction(w http.ResponseWriter, r *http.Request) {
 		"revoke_sessions":       `UPDATE auth_sessions SET revoked=true WHERE user_id=$1`,
 		"delete_skin":           `DELETE FROM community_skins WHERE id=$1`,
 		"delete_candidate_skin": `DELETE FROM community_candidate_skins WHERE id=$1`,
+		"delete_plugin":         `DELETE FROM community_plugins WHERE id=$1`,
 		"delete_dictionary":     `DELETE FROM community_resources WHERE id=$1 AND kind='dictionary'`,
 		"delete_reply":          `DELETE FROM community_resources WHERE id=$1 AND kind='reply'`,
 		"resolve_crash":         `UPDATE admin_events SET resolved=true WHERE id=$1 AND kind='crash'`,
