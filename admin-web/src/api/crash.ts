@@ -86,13 +86,3 @@ export function crashTrend(group: Pick<CrashGroup, "count_7d" | "count_prev_7d" 
   if (change === 0) return { text: "持平", rising: false };
   return change > 0 ? { text: `↑ ${change}%`, rising: true } : { text: `↓ ${-change}%`, rising: false };
 }
-
-// crashIssueErrors are the Chinese messages for the issue endpoint's own error codes; shared codes come from the API client.
-export const crashIssueErrors: Record<string, string> = {
-  issue_exists: "这个分组已经建过 Issue。",
-  issue_in_progress: "另一个请求正在为这个分组建 Issue，请稍后刷新。",
-  platform_not_configured: "该平台未在 admin.github.platforms 中配置仓库，无法建 Issue。",
-  github_unavailable: "GitHub 暂时不可用，Issue 未创建，请稍后重试。",
-  github_rejected: "GitHub 拒绝了请求，请检查 GitHub App 对该仓库的 issues 权限。",
-  issue_not_recorded: "Issue 已在 GitHub 创建，但未能写回分组，请刷新后手动标记。",
-};

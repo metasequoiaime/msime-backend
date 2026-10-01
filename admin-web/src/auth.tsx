@@ -16,8 +16,6 @@ type Auth = {
   logout: () => Promise<void>;
   login: (token: string) => Promise<void>;
   reload: () => void;
-  // api is the untyped request helper used by the pre-console components; new code uses useAPI() from api/client.
-  api: (path: string, signal?: AbortSignal, body?: unknown) => Promise<unknown>;
 };
 const AuthContext = createContext<Auth | null>(null);
 
@@ -61,16 +59,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setError("");
     setSession(result);
   }, [client]);
-  const api = useCallback(async (path: string, signal?: AbortSignal, body?: unknown) => {
-    try {
-      return await requestAPI(path, z.unknown(), { signal, body, token });
-    } catch (err) {
-      if (err instanceof APIError && err.status === 401) onUnauthorized();
-      throw err;
-    }
-  }, [token, onUnauthorized]);
   const credentials = useMemo(() => ({ token, onUnauthorized }), [token, onUnauthorized]);
-  const value = useMemo<Auth>(() => ({ authenticated: session?.authenticated ?? false, loading, session, error, logout, login, reload: () => window.location.reload(), api }), [session, loading, error, logout, login, api]);
+  const value = useMemo<Auth>(() => ({ authenticated: session?.authenticated ?? false, loading, session, error, logout, login, reload: () => window.location.reload() }), [session, loading, error, logout, login]);
   return <AuthContext.Provider value={value}><APICredentialsContext.Provider value={credentials}>{children}</APICredentialsContext.Provider></AuthContext.Provider>;
 }
 

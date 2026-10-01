@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { APIError, errorMessage } from "./client";
 
 // Dictionary pull request review: GET /api/dict-prs, GET /api/dict-prs/{n}, POST /api/dict-prs/{n}/approve|reject|trim (internal/server/admin_dict_prs.go).
 
@@ -67,23 +66,4 @@ export const kindLabels: Record<Entry["kind"], string> = { words: "词语", engl
 // authorLabel shows website submissions, which the word-submission GitHub App opens, as 官网机器人.
 export function authorLabel(pr: Pick<PRSummary, "author" | "author_bot">): string {
   return pr.author_bot ? "官网机器人" : `@${pr.author}`;
-}
-
-const reviewMessages: Record<string, string> = {
-  pr_changed: "PR 有了新的提交，请刷新后重新核对词条。",
-  not_open: "这个 PR 已经不是待审核状态，请刷新列表。",
-  not_mergeable: "GitHub 暂时无法合并这个 PR（可能有冲突或检查未通过）。",
-  github_uncertain: "无法确认 GitHub 上的操作结果，请先在 GitHub 上核对再重试。",
-  github_unavailable: "暂时无法连接 GitHub，请稍后重试。",
-  github_rejected: "GitHub App 凭据被拒绝，请检查 admin.github 配置。",
-  github_error: "GitHub 拒绝了这次操作，请在 GitHub 上查看 PR 状态。",
-  invalid_keep: "勾选的词条无效，请刷新后重试。",
-  invalid_head_sha: "缺少 PR 版本信息，请刷新后重试。",
-  invalid_reason: "驳回原因不能为空，且不超过 500 字。",
-};
-
-// reviewErrorMessage explains the review endpoints' own error codes, which the shared client only knows by HTTP status.
-export function reviewErrorMessage(error: unknown): string {
-  if (error instanceof APIError && reviewMessages[error.code]) return reviewMessages[error.code];
-  return errorMessage(error);
 }

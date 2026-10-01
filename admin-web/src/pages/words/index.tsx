@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { APIError, errorMessage, useAPI } from "../../api/client";
+import { errorMessage, isAPIError, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
 import { addSensitiveWordResultSchema, categoryLabels, displayPattern, levelLabels, parsePatternInput, sensitiveCategories, sensitiveWordsSchema } from "../../api/words";
 import type { SensitiveCategory, SensitiveLevel, SensitiveWord } from "../../api/words";
@@ -26,12 +26,6 @@ const categoryOptions: readonly SensitiveCategory[] = ["custom", "ad", "vulgar",
 
 // Batch actions accept at most 100 ids per request, so larger selections go out in chunks.
 const BATCH_LIMIT = 100;
-
-const addErrors: Record<string, string> = {
-  invalid_pattern: "规则无效：正则需符合 RE2 语法且不能匹配空文本，长度不超过 200 个字符，不能含换行等控制字符。",
-  invalid_category: "请选择有效的分类。",
-  invalid_level: "请选择有效的处理方式。",
-};
 
 function creatorLabel(createdBy: string): string {
   if (createdBy === "legacy-token") return "旧版密钥";
@@ -119,9 +113,8 @@ export default function WordsPage() {
         toast(`已添加「${typed}」`);
       },
       onError: error => {
-        const code = error instanceof APIError ? error.code : "";
-        if (code === "exists") toast(`「${typed}」已在名单中`);
-        else toast(`添加失败：${addErrors[code] ?? errorMessage(error)}`);
+        if (isAPIError(error, "exists")) toast(`「${typed}」已在名单中`);
+        else toast(`添加失败：${errorMessage(error)}`);
       },
     });
   };

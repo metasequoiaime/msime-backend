@@ -1,19 +1,16 @@
 import { useCallback, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { APIError, useAPI } from "../../api/client";
+import { useAPI } from "../../api/client";
 import type { API } from "../../api/client";
 import { keys } from "../../api/keys";
-import { crashIssueCreatedSchema, crashIssueErrors, crashStatusSchema } from "../../api/crash";
+import { crashIssueCreatedSchema, crashStatusSchema } from "../../api/crash";
 import type { CrashGroup, CrashStatus } from "../../api/crash";
 import { useToast } from "../../ui/toast";
 
-// createCrashIssue opens the group's GitHub issue, turning the endpoint's own error codes into Chinese messages for the failure toast.
+// createCrashIssue opens the group's GitHub issue; the client turns the endpoint's error codes into the failure toast's copy.
 function createCrashIssue(api: API, signature: string, keepalive: boolean) {
-  return api.post(`crash-groups/${signature}/issue`, crashIssueCreatedSchema, {}, { keepalive }).catch((error: unknown) => {
-    const message = error instanceof APIError ? crashIssueErrors[error.code] : undefined;
-    throw message ? new Error(message) : error;
-  });
+  return api.post(`crash-groups/${signature}/issue`, crashIssueCreatedSchema, {}, { keepalive });
 }
 
 export type CrashActions = {

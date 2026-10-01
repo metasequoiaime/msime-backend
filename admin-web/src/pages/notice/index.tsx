@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { APIError, errorMessage, useAPI } from "../../api/client";
+import { errorMessage, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
-import { noticeChannels, noticeErrorMessages, noticePlatforms, noticesSchema, noticeValueMaxBytes } from "../../api/notice";
+import { noticeChannels, noticePlatforms, noticesSchema, noticeValueMaxBytes } from "../../api/notice";
 import type { Notice, NoticeStatus, NoticeValue } from "../../api/notice";
 import { PageIntro } from "../../shell/page-intro";
 import { usePageSearch } from "../../shell/page-search";
@@ -28,11 +28,6 @@ const statusPill: Record<NoticeStatus, { label: string; tone: Tone }> = {
 };
 
 type ListFilter = "current" | "archived";
-
-function noticeError(error: unknown): string {
-  if (error instanceof APIError && noticeErrorMessages[error.code]) return noticeErrorMessages[error.code];
-  return errorMessage(error);
-}
 
 function targetsLabel(targets: string[]): string {
   if (targets.includes("all")) return "全部平台";
@@ -117,7 +112,7 @@ export default function NoticePage() {
     if (!value.title) problem = "请先填写标题";
     else if (value.targets.length === 0) problem = "请选择投放范围";
     else if (publishing && value.channels.length === 0) problem = "请至少选择一个渠道";
-    else if (valueTooLarge(value)) problem = noticeErrorMessages.invalid_value;
+    else if (valueTooLarge(value)) problem = "公告内容过长，请缩短正文。";
     if (problem) {
       toast(problem);
       return null;
@@ -131,7 +126,7 @@ export default function NoticePage() {
     try {
       await save.mutateAsync({ id: form.id, value });
     } catch (error) {
-      toast(`操作失败：${noticeError(error)}`);
+      toast(`操作失败：${errorMessage(error)}`);
       return;
     }
     // Saving keeps the chosen targets and channels for the next notice, as in the design.
@@ -149,7 +144,7 @@ export default function NoticePage() {
     try {
       await publish.mutateAsync({ id: form.id, value });
     } catch (error) {
-      toast(`操作失败：${noticeError(error)}`);
+      toast(`操作失败：${errorMessage(error)}`);
       return;
     }
     setForm(emptyForm);
@@ -167,7 +162,7 @@ export default function NoticePage() {
     try {
       await archive.mutateAsync(notice.id);
     } catch (error) {
-      toast(`操作失败：${noticeError(error)}`);
+      toast(`操作失败：${errorMessage(error)}`);
       return;
     }
     if (form.id === notice.id) setForm(emptyForm);

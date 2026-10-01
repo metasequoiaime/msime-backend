@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useAPI } from "../../api/client";
+import { errorMessage, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
 import type { Release, ReleasePlatform } from "../../api/release";
 import { releaseHistorySchema, releaseOkSchema, releasePath, releasesSchema, withdrawResultSchema } from "../../api/release";
@@ -15,7 +15,6 @@ import { DetailBody, DetailHeader } from "./detail";
 import type { DetailHandlers } from "./detail";
 import { NotesDialog, TriggerDialog } from "./dialogs";
 import { PlatformCard } from "./list";
-import { releaseDisplayError, releaseErrorText } from "./shared";
 
 type DialogState =
   | { kind: "trigger"; platform: ReleasePlatform; version: string }
@@ -46,7 +45,7 @@ export default function ReleasePage() {
     enabled: Boolean(platformID),
   });
   const refresh = () => client.invalidateQueries({ queryKey: keys.page("release") });
-  const fail = (error: unknown) => toast(`操作失败：${releaseErrorText(error)}`);
+  const fail = (error: unknown) => toast(`操作失败：${errorMessage(error)}`);
 
   const trigger = useMutation({
     mutationFn: (v: { platform: ReleasePlatform; version: string }) => api.post(releasePath(v.platform.id, undefined, "trigger"), releaseOkSchema, { version: v.version }),
@@ -96,14 +95,14 @@ export default function ReleasePage() {
         : <Skeleton className="h-[34px] w-64" />}
       {selected ? <DetailBody key={selected.id} platform={selected} history={history.data} loading={history.isPending} error={history.error} onRetry={() => history.refetch()}
         focusTag={focusPlatform === selected.id && focusTag ? focusTag : undefined} handlers={handlers} />
-        : history.isError ? <ErrorState error={releaseDisplayError(history.error)} onRetry={() => history.refetch()} /> : <Skeleton className="h-64" />}
+        : history.isError ? <ErrorState error={history.error} onRetry={() => history.refetch()} /> : <Skeleton className="h-64" />}
     </div>;
   } else if (list.isPending) {
     content = <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3.5 max-[759px]:grid-cols-1" role="status" aria-label="正在加载">
       {[0, 1, 2].map(i => <Skeleton key={i} className="h-[300px] rounded-[18px]" />)}
     </div>;
   } else if (list.isError) {
-    content = <ErrorState error={releaseDisplayError(list.error)} onRetry={() => list.refetch()} />;
+    content = <ErrorState error={list.error} onRetry={() => list.refetch()} />;
   } else if (platforms.length === 0) {
     content = <NotConfigured title="未配置发布平台">在 config.json 的 admin.github.platforms 中配置平台名称、仓库、tag 前缀和发布流水线后，这里会显示各平台的 GitHub Release。</NotConfigured>;
   } else {

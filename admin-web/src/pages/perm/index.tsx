@@ -130,7 +130,7 @@ function Members({ data }: { data: Permissions }) {
       toast(text);
       if (v.action === "add") setEmail("");
     },
-    onError: error => toast(isAPIError(error, "admin_exists") ? "该邮箱已经是管理员" : isAPIError(error, "admin_limit") ? "最多只能添加 100 名管理员" : `操作失败：${errorMessage(error)}`),
+    onError: error => toast(`操作失败：${errorMessage(error)}`),
     onSettled: () => client.invalidateQueries({ queryKey: keys.page("perm") }),
   });
   const submit = (event: FormEvent) => {

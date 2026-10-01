@@ -48,15 +48,3 @@ export type NoticeValue = { title: string; body: string; targets: string[]; chan
 // noticeValueMaxBytes is the server's limit for an action value; long bodies are rejected before they are sent.
 export const noticeValueMaxBytes = 8192;
 
-// noticeErrorMessages turns the notice actions' specific error codes into console copy.
-export const noticeErrorMessages: Record<string, string> = {
-  telegram_disabled: "服务端未配置 Telegram 渠道（admin.telegram），请取消勾选 Telegram。",
-  telegram_failed: "Telegram 推送失败，公告没有发布，请稍后重试。",
-  not_draft: "这条公告已经发布或归档，不能再编辑，请刷新列表。",
-  already_archived: "这条公告已经归档。",
-  invalid_title: "标题不能为空，最多 200 字，且不能包含控制字符。",
-  invalid_body: "正文过长或包含不支持的字符。",
-  invalid_targets: "请选择投放范围。",
-  invalid_channels: "请至少选择一个渠道。",
-  invalid_value: "公告内容过长，请缩短正文。",
-};

@@ -1,5 +1,5 @@
 import { format } from "date-fns";
-import { APIError, errorMessage, isAPIError } from "../../api/client";
+import { codeMessage } from "../../api/client";
 import type { Release, ReleaseStatus } from "../../api/release";
 import type { Tone } from "../../ui/pill";
 
@@ -15,35 +15,9 @@ export const noteKindClass: Record<string, string> = {
   待办: "bg-warn-soft text-warn",
 };
 
-const releaseErrors: Record<string, string> = {
-  no_workflow: "该平台没有配置发布流水线（admin.github.platforms[].release_workflow）。",
-  workflow_not_found: "GitHub 上找不到这个平台的发布流水线文件。",
-  workflow_rejected: "发布流水线拒绝了这次触发：需要 workflow_dispatch 触发器和 version 输入。",
-  invalid_version: "版本号格式不正确，例如 v0.5.5。",
-  invalid_body: "发布说明过长或包含不支持的内容。",
-  invalid_tag: "tag 与平台的前缀不匹配。",
-  not_published: "草稿还没有发布，不能撤回。",
-  already_withdrawn: "该版本已经撤回。",
-  release_rejected: "GitHub 拒绝了这次修改。",
-  github_unavailable: "GitHub 暂时无法访问，请稍后重试。",
-  github_rejected: "GitHub App 的凭据或权限被拒绝，请检查安装权限。",
-  github_repo_not_found: "GitHub App 无法访问该仓库，请检查仓库名和安装范围。",
-};
-
-export function releaseErrorText(error: unknown): string {
-  for (const [code, text] of Object.entries(releaseErrors)) {
-    if (isAPIError(error, code)) return text;
-  }
-  return errorMessage(error);
-}
-
-// releaseDisplayError gives ErrorState the release wording for the codes above, so a 502 from GitHub reads as a GitHub problem rather than a server or database failure; other errors (github_disabled among them) pass through unchanged.
-export function releaseDisplayError(error: unknown): unknown {
-  return error instanceof APIError && Object.hasOwn(releaseErrors, error.code) ? new Error(releaseErrors[error.code]) : error;
-}
-
+// platformErrorText phrases the error code a listing reports for one platform instead of failing the whole request.
 export function platformErrorText(code: string): string {
-  return releaseErrors[code] ?? "读取失败，请稍后重试。";
+  return codeMessage(code) ?? "读取失败，请稍后重试。";
 }
 
 export function releaseDate(release: Release): string {

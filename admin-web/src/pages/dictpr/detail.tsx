@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
-import { useAPI } from "../../api/client";
+import { errorMessage, useAPI } from "../../api/client";
 import type { Entry, PRState, PRSummary } from "../../api/dictpr";
-import { approveSchema, authorLabel, flagLabels, flagTones, kindLabels, prDetailSchema, rejectSchema, reviewErrorMessage, stateLabels, stateTones, trimSchema } from "../../api/dictpr";
+import { approveSchema, authorLabel, flagLabels, flagTones, kindLabels, prDetailSchema, rejectSchema, stateLabels, stateTones, trimSchema } from "../../api/dictpr";
 import { keys } from "../../api/keys";
 import { usePageHotkeys } from "../../shell/hotkeys";
 import { relativeTime } from "../../shell/notifications";
@@ -65,7 +65,7 @@ export function PRDetailCard({ pr, repo, overrides, setOverrides, onNext, onPrev
       setOverrides(previous => ({ ...previous, [`${number}@${result.head_sha}`]: Object.fromEntries(Array.from({ length: result.count }, (_, index) => [index, true])) }));
       toast(`已在 #${number} 推送修改：只保留勾选的 ${result.count} 条`);
     },
-    onError: error => toast(`操作失败：${reviewErrorMessage(error)}`),
+    onError: error => toast(`操作失败：${errorMessage(error)}`),
     onSettled: refresh,
   });
   // Merging and rejecting cannot be taken back on GitHub, so both wait 4s behind the toast's 撤销 before the request is sent.
@@ -77,7 +77,7 @@ export function PRDetailCard({ pr, repo, overrides, setOverrides, onNext, onPrev
       undo: () => markOptimistic(number, null),
       onCommitError: error => {
         markOptimistic(number, null);
-        toast(`操作失败：${reviewErrorMessage(error)}`);
+        toast(`操作失败：${errorMessage(error)}`);
         void refresh();
       },
     });

@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
-import { APIError, errorMessage, isGithubDisabled, useAPI } from "../../api/client";
+import { errorMessage, isGithubDisabled, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
 import { issueActionResultSchema, issueDetailSchema, issueKey, issuePath, issueRef, issuesSchema, parseIssueKey } from "../../api/issues";
 import type { IssueAction, IssueDetail, IssueEvent, IssuePlatform, IssueRef, IssueRow, IssueState, IssueStateFilter } from "../../api/issues";
@@ -58,20 +58,6 @@ const closeReasons: Record<string, string> = { completed: "（已完成）", not
 
 // Labels that the table already shows as type or state, so the 标签 line leaves them out.
 const typeAndStateLabels = ["triaged", "duplicate", "bug", "enhancement", "feature", "idea", "documentation", "docs"];
-
-// issueErrorText phrases the GitHub-specific failures of the issue endpoints, which the shared client only knows by status.
-function issueErrorText(error: unknown): string {
-  if (error instanceof APIError) {
-    if (error.code === "github_unavailable") return "GitHub 暂时无法访问，请稍后重试。";
-    if (error.code === "github_rejected") return "GitHub 拒绝了请求：请确认 GitHub App 已安装到该仓库并有 Issue 读写权限。";
-  }
-  return errorMessage(error);
-}
-
-// issueError rewrites GitHub failures for ErrorState; github_disabled stays as is so ErrorState shows its 未配置 state.
-function issueError(error: unknown): unknown {
-  return error instanceof APIError && (error.code === "github_unavailable" || error.code === "github_rejected") ? new Error(issueErrorText(error)) : error;
-}
 
 function extraLabels(row: IssueRow, platforms: readonly IssuePlatform[]): string[] {
   const hidden = new Set([...typeAndStateLabels, ...platforms.map(p => p.label.toLowerCase())]);
@@ -183,7 +169,7 @@ export default function IssuesPage() {
     try {
       return await work();
     } catch (error) {
-      toast(`操作失败：${issueErrorText(error)}`);
+      toast(`操作失败：${errorMessage(error)}`);
       return false;
     }
   }, [toast]);
@@ -255,7 +241,7 @@ export default function IssuesPage() {
       setReply("");
       toast("回复已发送");
     },
-    onError: error => toast(`发送失败：${issueErrorText(error)}`),
+    onError: error => toast(`发送失败：${errorMessage(error)}`),
   });
 
   if (list.isError && isGithubDisabled(list.error)) {
@@ -299,7 +285,7 @@ export default function IssuesPage() {
         ariaLabel="Issue 列表"
         data={data?.items}
         loading={list.isPending}
-        error={list.isError ? issueError(list.error) : undefined}
+        error={list.isError ? list.error : undefined}
         onRetry={() => void list.refetch()}
         columns={columns}
         getRowId={getRowId}
@@ -356,7 +342,7 @@ function IssueDrawer({ onClose, fallback, detail, platformName, platforms, canTr
   const data = detail.data;
   const row: IssueRow | undefined = data?.issue ?? fallback;
   const status = <>
-    {detail.isError && <ErrorState className="mb-4" error={issueError(detail.error)} onRetry={() => void detail.refetch()} />}
+    {detail.isError && <ErrorState className="mb-4" error={detail.error} onRetry={() => void detail.refetch()} />}
     {detail.isPending && <SkeletonRows rows={4} className="mb-2 p-0" />}
   </>;
   if (!row) return <DetailDrawer open onClose={onClose} title="Issue 详情">{status}</DetailDrawer>;

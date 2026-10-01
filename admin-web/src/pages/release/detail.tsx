@@ -9,7 +9,7 @@ import { Pill } from "../../ui/pill";
 import { Segmented } from "../../ui/segmented";
 import { StatGrid, StatTile } from "../../ui/stat-tile";
 import { Empty, ErrorState, SkeletonRows } from "../../ui/states";
-import { formatCount, formatSize, noteKindClass, releaseDate, releaseDisplayError, statusLabel, statusTone } from "./shared";
+import { formatCount, formatSize, noteKindClass, releaseDate, statusLabel, statusTone } from "./shared";
 
 export type DetailHandlers = {
   canTrigger: boolean;
@@ -60,7 +60,7 @@ export function DetailBody({ platform, history, loading, error, onRetry, focusTa
         <Button size="sm" variant="primary" disabled={!handlers.canTrigger || !platform.workflow} title={triggerTitle}
           onClick={() => handlers.onTrigger(platform, current && current.status !== "released" ? current.version : "")}>触发发布</Button>
       </div>
-      {loading ? <SkeletonRows rows={4} /> : error ? <ErrorState className="m-4" error={releaseDisplayError(error)} onRetry={onRetry} /> : releases.length === 0
+      {loading ? <SkeletonRows rows={4} /> : error ? <ErrorState className="m-4" error={error} onRetry={onRetry} /> : releases.length === 0
         ? <Empty title="还没有发布">{`仓库 ${platform.repo} 中没有以 ${platform.tag_prefix} 开头的 Release。`}</Empty>
         : <ul className="m-0 list-none p-0">
           {releases.map(release => <HistoryRow key={release.tag} release={release} focused={focusTag === release.tag} open={openTag === release.tag} onToggle={() => setOpen(openTag === release.tag ? null : release.tag)}

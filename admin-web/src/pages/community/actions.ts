@@ -1,21 +1,15 @@
 import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { APIError, errorMessage, useAPI } from "../../api/client";
+import { errorMessage, isAPIError, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
 import type { Moderation, Section } from "../../api/community";
 import { removeReasons } from "../../api/community";
 import { useConfirm } from "../../ui/confirm";
 import { useToast } from "../../ui/toast";
 
-// Moderation-specific failure codes, which the shared client only knows by their HTTP status.
-const failureMessages: Record<string, string> = {
-  not_removed: "该内容已不在下架状态，请刷新后重试。",
-  owner_banned: "作者账号已被封禁，解封账号后内容才会恢复。",
-  conflict: "该内容已被其他审核员下架，未做改动。",
-};
-
+// A moderation conflict means another reviewer removed the item first, which reads better than the client's generic conflict copy.
 function failure(error: unknown): string {
-  return error instanceof APIError ? failureMessages[error.code] ?? errorMessage(error) : errorMessage(error);
+  return isAPIError(error, "conflict") ? "该内容已被其他审核员下架，未做改动。" : errorMessage(error);
 }
 
 // Target is what an action needs to know about an item, from a list row or a detail.
