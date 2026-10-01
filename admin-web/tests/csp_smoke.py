@@ -38,6 +38,17 @@ FIXTURES = {
     "/api/notifications/read": {"ok": True},
     "/api/search": {"items": [{"kind": "user", "id": "u1", "title": "smoke-user", "where": "用户账号", "target": "users"}]},
     "/api/auth/logout": {"ok": True},
+    "/api/dict-prs": {"repo": "metasequoiaime/msime-dictionary", "counts": {"open": 1, "merged": 1, "closed": 0, "all": 2}, "items": [
+        {"number": 9, "title": "feat(custom): add 2 words", "author": "msime-words[bot]", "author_bot": True, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z", "state": "open", "url": "https://github.com/metasequoiaime/msime-dictionary/pull/9", "note": "地名", "counts": {"total": 2, "new": 1, "dup": 1, "flagged": 0}},
+        {"number": 8, "title": "feat(custom): add 1 word", "author": "msime-words[bot]", "author_bot": True, "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-21T00:00:00Z", "state": "merged", "url": "https://github.com/metasequoiaime/msime-dictionary/pull/8", "note": "", "counts": None},
+    ]},
+    "/api/dict-prs/9": {"repo": "metasequoiaime/msime-dictionary", "head_sha": "head9", "mergeable": True, "submissions": [{"kind": "words", "note": "地名", "created_at": "2026-10-01T00:00:00Z"}],
+        "pull": {"number": 9, "title": "feat(custom): add 2 words", "author": "msime-words[bot]", "author_bot": True, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z", "state": "open", "url": "https://github.com/metasequoiaime/msime-dictionary/pull/9", "note": "地名", "counts": {"total": 2, "new": 1, "dup": 1, "flagged": 0}},
+        "entries": [
+            {"index": 0, "file": "custom/words.txt", "kind": "words", "word": "江汉油田", "pinyin": "jiang'han'you'tian", "flag": "new"},
+            {"index": 1, "file": "custom/words.txt", "kind": "words", "word": "潜江", "pinyin": "qian'jiang", "flag": "dup", "reason": "词库中已有这个词条"},
+        ]},
+    "/api/dict-prs/9/trim": {"ok": True, "count": 1, "removed": 1, "head_sha": "head10"},
 }
 
 
@@ -143,6 +154,32 @@ def main() -> int:
                     page.goto(base + old)
                     page.wait_for_url(base + new)
                     violations(old)
+
+                page.goto(base + "/dictpr")
+                expect(page.get_by_role("list", name="#9 的词条")).to_contain_text("江汉油田")
+                expect(page.get_by_text("已勾选 1 / 2 条", exact=False)).to_be_visible()
+                page.get_by_role("checkbox", name="收录「潜江」").check()
+                expect(page.get_by_text("已勾选 2 / 2 条", exact=False)).to_be_visible()
+                page.get_by_role("checkbox", name="收录「潜江」").uncheck()
+                # Page shortcuts are ignored while a form field (the checkbox) has focus.
+                page.get_by_role("list", name="词库 PR 列表").get_by_role("button").first.focus()
+                page.keyboard.press("r")
+                dialog = page.get_by_role("dialog", name="驳回 #9？")
+                expect(dialog).to_be_visible()
+                page.keyboard.press("Escape")
+                expect(dialog).to_be_hidden()
+                page.get_by_role("button", name="仅保留勾选项").click()
+                expect(page.get_by_text("已在 #9 推送修改：只保留勾选的 1 条", exact=True)).to_be_visible()
+                page.keyboard.press("a")
+                expect(page.get_by_text("#9 已通过（1 条）", exact=True)).to_be_visible()
+                page.get_by_role("button", name="撤销").click()
+                expect(page.get_by_text("已撤销", exact=True)).to_be_visible()
+                page.get_by_role("radio", name=re.compile("已通过")).click()
+                expect(page.get_by_role("list", name="词库 PR 列表")).to_contain_text("#8")
+                page.set_viewport_size({"width": 390, "height": 800})
+                expect(page.get_by_role("list", name="词库 PR 列表")).to_be_visible()
+                page.set_viewport_size({"width": 1280, "height": 860})
+                violations("dictpr")
 
                 page.goto(base + "/")
                 expect(page.locator("header")).to_contain_text("测试环境")
