@@ -9,6 +9,7 @@ import (
 	"errors"
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 	"github.com/metasequoiaime/MSIME-Backend/internal/contract"
+	"github.com/metasequoiaime/MSIME-Backend/internal/githubapp"
 	"github.com/metasequoiaime/MSIME-Backend/internal/skins"
 	"io"
 	"log/slog"
@@ -21,6 +22,9 @@ import (
 )
 
 type skinJobOwnerKey struct{}
+
+// noticesPath is the public, unauthenticated feed of live console notices.
+const noticesPath = "/v1/notices"
 
 type bucket struct {
 	tokens  float64
@@ -48,6 +52,13 @@ type Server struct {
 	mu          sync.Mutex
 	buckets     map[string]bucket
 	handler     http.Handler
+
+	// adminGitHub is the console's GitHub App client; nil when admin.github is not configured.
+	adminGitHub *githubapp.Client
+	// adminJobs tracks the console's background jobs, started by startAdminJobs.
+	adminJobs sync.WaitGroup
+	// metrics aggregates upstream calls for the console's cloud and status pages.
+	metrics serviceMetrics
 }
 
 func New(c Config) (*Server, error) {
@@ -75,6 +86,12 @@ func New(c Config) (*Server, error) {
 	}
 	s.initAdminGoogle()
 	s.accounts.ConfigureEngine(c.Engine)
+	if c.Admin.Enabled {
+		s.accounts.ConfigureAdmin(s.config.Admin.accountSettings())
+		s.accounts.ConfigureNoticeBroadcaster(s.noticeBroadcaster())
+		s.adminGitHub = s.config.Admin.adminGitHubClient()
+		s.startAdminJobs()
+	}
 	if c.WordSubmissions.enabled() && s.accounts != nil {
 		s.words = newWordSubmitter(c.WordSubmissions, c.AllowedOrigins, s.accounts)
 	}
@@ -96,6 +113,9 @@ func New(c Config) (*Server, error) {
 	})
 	account.Mount(mux, s.accounts)
 	mux.HandleFunc("POST /v1/telemetry/events", s.accounts.Telemetry)
+	// Console-managed public data: the live notices feed needs no credentials, a content report needs a signed-in user (the /v1/community/ prefix skips Bearer authentication in the middleware and the handler checks the session itself).
+	mux.HandleFunc("GET "+noticesPath, account.Route(s.accounts, "GET "+noticesPath, (*account.Service).PublicNotices))
+	mux.HandleFunc("POST /v1/community/reports", account.Route(s.accounts, "POST /v1/community/reports", (*account.Service).CommunityReport))
 	mux.HandleFunc("POST /v1/input/{operation}", s.inputQuery)
 	mux.HandleFunc("GET /v1/input/capabilities", s.inputCapabilities)
 	mux.HandleFunc("GET /v1/catalog/{kind}", s.inputCatalog)
@@ -165,7 +185,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if r.URL.Path == contract.HealthPath || account.IsPath(r.URL.Path) {
+		if r.URL.Path == contract.HealthPath || r.URL.Path == noticesPath || account.IsPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

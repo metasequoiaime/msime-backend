@@ -24,6 +24,15 @@ type adminMemoryStore struct {
 	allowed  map[string]bool
 	flows    map[string]account.AdminLoginFlow
 	sessions map[string]account.AdminIdentity
+	// roles maps a member to its role and permissions; a member without an entry is a maintainer with every permission.
+	roles map[string]adminMemoryRole
+	// tokens are personal access tokens.
+	tokens map[string]account.AdminIdentity
+}
+
+type adminMemoryRole struct {
+	role  string
+	perms []string
 }
 
 func (m *adminMemoryStore) SaveAdminFlow(_ context.Context, k string, v account.AdminLoginFlow) error {
@@ -57,6 +66,22 @@ func (m *adminMemoryStore) DeleteAdminSession(_ context.Context, k string) error
 
 func (m *adminMemoryStore) AdminEmailAllowed(_ context.Context, email string) (bool, error) {
 	return m.allowed[email], nil
+}
+func (m *adminMemoryStore) AdminMemberRole(_ context.Context, email string) (string, []string, error) {
+	if !m.allowed[email] {
+		return "", nil, account.ErrInvalid
+	}
+	if role, ok := m.roles[email]; ok {
+		return role.role, role.perms, nil
+	}
+	return account.RoleMaintainer, account.AllAdminPermissions(), nil
+}
+func (m *adminMemoryStore) AdminTokenIdentity(_ context.Context, token string) (account.AdminIdentity, error) {
+	v, ok := m.tokens[token]
+	if !ok {
+		return v, account.ErrInvalid
+	}
+	return v, nil
 }
 
 type adminTestKeys struct{ public *rsa.PublicKey }

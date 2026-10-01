@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -197,6 +198,72 @@ func TestStartupMigratesCommunityCandidateSkinTablesAddedLater(t *testing.T) {
 			var exists bool
 			if err = admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2)`, schema, table).Scan(&exists); err != nil || !exists {
 				t.Fatal(table, exists, err)
+			}
+		})
+	}
+}
+
+// Every table, column and constraint the admin console added is probed at startup, so a database migrated before any one of them existed gets it created. Objects that public endpoints use are probed by Ready and must heal with the admin host disabled; the admin-only ones heal through AdminReady.
+func TestStartupMigratesAdminConsoleObjectsAddedLater(t *testing.T) {
+	public := []string{
+		"community_reports", "word_submissions", "admin_crash_groups", "admin_notices", "admin_sensitive_words", "admin_sensitive_hits",
+		"community_skins.moderation", "community_skins.moderated_by", "community_resources.previous_moderation", "community_candidate_skins.moderated_at", "community_plugins.moderation_reason",
+		"auth_users.banned_at", "auth_users.ban_reason", "auth_users.banned_by", "auth_sessions.user_agent",
+		"admin_events.artifact", "admin_events.channel", "admin_events.install_id", "admin_events.signature", "admin_events_kind_check",
+	}
+	adminOnly := []string{
+		"admin_roles", "admin_role_permissions", "admin_tokens", "admin_notifications", "admin_notification_reads", "admin_preferences", "admin_service_metrics", "admin_service_daily", "admin_incidents", "release_asset_snapshots",
+		"admin_audit.detail", "admin_members.role", "admin_sessions.id", "admin_sessions.name", "admin_sessions.created_at", "admin_sessions.last_seen_at", "admin_sessions.user_agent",
+	}
+	for _, object := range append(append([]string{}, public...), adminOnly...) {
+		t.Run(object, func(t *testing.T) {
+			admin, schema := disposableSchema(t)
+			ctx := context.Background()
+			db, err := account.Open(ctx, os.Getenv("MSIME_TEST_DATABASE_URL"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+			quoted := pgx.Identifier{schema}.Sanitize()
+			table, column, isColumn := strings.Cut(object, ".")
+			exists := `SELECT to_regclass($1||'.'||$2) IS NOT NULL`
+			args := []any{schema, table}
+			switch {
+			case object == "admin_events_kind_check":
+				_, err = admin.Exec(ctx, "ALTER TABLE "+quoted+".admin_events DROP CONSTRAINT admin_events_kind_check, ADD CONSTRAINT admin_events_kind_check CHECK(kind IN ('download','crash'))")
+				exists = `SELECT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=$1 AND c.conname=$2 AND pg_get_constraintdef(c.oid) LIKE '%session_crash%')`
+			case isColumn:
+				_, err = admin.Exec(ctx, "ALTER TABLE "+quoted+"."+pgx.Identifier{table}.Sanitize()+" DROP COLUMN "+pgx.Identifier{column}.Sanitize()+" CASCADE")
+				exists = `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3)`
+				args = append(args, column)
+			default:
+				_, err = admin.Exec(ctx, "DROP TABLE "+quoted+"."+pgx.Identifier{table}.Sanitize()+" CASCADE")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
+			t.Setenv("TEST_CLIENT_TOKEN", testToken)
+			t.Setenv("TEST_ADMIN_TOKEN", strings.Repeat("q", 48))
+			config := Config{
+				Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
+				Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
+			}
+			if slices.Contains(adminOnly, object) {
+				config.Admin = AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN"}
+			}
+			s, err := New(config)
+			if err != nil {
+				t.Fatalf("missing %s was not migrated at startup: %v", object, err)
+			}
+			s.CloseAccounts()
+			s.Close()
+			var restored bool
+			if err = admin.QueryRow(ctx, exists, args...).Scan(&restored); err != nil || !restored {
+				t.Fatal(object, "not restored", err)
 			}
 		})
 	}

@@ -39,6 +39,9 @@ var communityCandidateSkinSchema string
 
 //go:embed community_plugin_schema.sql
 var communityPluginSchema string
+
+//go:embed admin_ops_schema.sql
+var adminOpsSchema string
 var ErrInvalid = errors.New("invalid_credentials")
 var ErrLimited = errors.New("rate_limit_exceeded")
 var ErrConflict = errors.New("identity_already_linked")
@@ -143,14 +146,14 @@ func (s *Store) MigrateAs(ctx context.Context, role string) error {
 			return e
 		}
 	}
-	if _, e = tx.Exec(ctx, schema+"\n"+userDataSchema+"\n"+communitySchema+"\n"+adminSchema+"\n"+translationSchema+"\n"+candidateSkinSchema+"\n"+communityCandidateSkinSchema+"\n"+communityPluginSchema); e != nil {
+	if _, e = tx.Exec(ctx, schema+"\n"+userDataSchema+"\n"+communitySchema+"\n"+adminSchema+"\n"+translationSchema+"\n"+candidateSkinSchema+"\n"+communityCandidateSkinSchema+"\n"+communityPluginSchema+"\n"+adminOpsSchema); e != nil {
 		return e
 	}
 	return tx.Commit(ctx)
 }
 func (s *Store) Ready(ctx context.Context) error {
 	var n int
-	return s.pool.QueryRow(ctx, `SELECT count(*) FROM auth_users u
+	if e := s.pool.QueryRow(ctx, `SELECT count(*) FROM auth_users u
  LEFT JOIN user_preferences p ON p.user_id=u.id
  LEFT JOIN user_clipboard_settings cs ON cs.user_id=u.id
  LEFT JOIN user_clipboard c ON c.user_id=u.id
@@ -178,7 +181,38 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_plugin_ratings cpr ON cpr.user_id=u.id
  LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture='' AND ai.updated_at IS NULL
  LEFT JOIN auth_challenges ch ON false AND ch.code_verifier||ch.redirect_uri=''
- LEFT JOIN auth_provider_tokens pt ON false WHERE false`).Scan(&n)
+ LEFT JOIN auth_provider_tokens pt ON false WHERE false`).Scan(&n); e != nil {
+		return e
+	}
+	return s.consoleReady(ctx)
+}
+
+// consoleReady probes what the admin console added to tables and paths that run whether or not the admin host is enabled: community moderation and reports, bans, session user agents, dictionary submissions, the extended telemetry columns and kinds, crash groups, public notices and sensitive words. Any of them missing sends startup through the migration.
+func (s *Store) consoleReady(ctx context.Context) error {
+	if _, e := s.pool.Exec(ctx, `SELECT moderation,previous_moderation,moderation_reason,moderated_by,moderated_at FROM community_skins WHERE false;
+SELECT moderation,previous_moderation,moderation_reason,moderated_by,moderated_at FROM community_resources WHERE false;
+SELECT moderation,previous_moderation,moderation_reason,moderated_by,moderated_at FROM community_candidate_skins WHERE false;
+SELECT moderation,previous_moderation,moderation_reason,moderated_by,moderated_at FROM community_plugins WHERE false;
+SELECT id,kind,item_id,reporter_id,reason,detail,created_at FROM community_reports WHERE false;
+SELECT banned_at,ban_reason,banned_by FROM auth_users WHERE false;
+SELECT user_agent FROM auth_sessions WHERE false;
+SELECT id,pr_number,kind,entries,note,created_at FROM word_submissions WHERE false;
+SELECT artifact,channel,install_id,signature FROM admin_events WHERE false;
+SELECT signature,platform,version,title,status,issue_url,first_seen,last_seen FROM admin_crash_groups WHERE false;
+SELECT id,title,body,targets,channels,status,created_by,created_at,published_at,updated_at FROM admin_notices WHERE false;
+SELECT id,pattern,is_regex,category,level,created_by,created_at FROM admin_sensitive_words WHERE false;
+SELECT word_id,day,count FROM admin_sensitive_hits WHERE false`); e != nil {
+		return e
+	}
+	// The telemetry kinds live in a CHECK constraint, which no SELECT can probe.
+	var current bool
+	if e := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='admin_events'::regclass AND conname='admin_events_kind_check' AND pg_get_constraintdef(oid) LIKE '%session_crash%')`).Scan(&current); e != nil {
+		return e
+	}
+	if !current {
+		return errors.New("admin_events kind constraint predates the active and session kinds")
+	}
+	return nil
 }
 func (s *Store) Rate(ctx context.Context, key string, limit int, window time.Duration) error {
 	var n int
@@ -379,7 +413,7 @@ func (s *Store) DeleteUser(ctx context.Context, uid string) error {
 	return e
 }
 func (s *Store) Prune(ctx context.Context) {
-	for _, q := range []string{"DELETE FROM admin_login_flows WHERE expires_at<now()", "DELETE FROM admin_sessions WHERE expires_at<now()", "DELETE FROM auth_challenges WHERE expires_at<now()", "DELETE FROM auth_rates WHERE expires_at<now()", "DELETE FROM auth_sessions WHERE expires_at<now()"} {
+	for _, q := range []string{"DELETE FROM admin_login_flows WHERE expires_at<now()", "DELETE FROM admin_sessions WHERE expires_at<now()", "DELETE FROM admin_tokens WHERE expires_at<now()", "DELETE FROM auth_challenges WHERE expires_at<now()", "DELETE FROM auth_rates WHERE expires_at<now()", "DELETE FROM auth_sessions WHERE expires_at<now()"} {
 		s.pool.Exec(ctx, q)
 	}
 }

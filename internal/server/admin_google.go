@@ -91,6 +91,10 @@ type adminAuthStore interface {
 	AdminSession(context.Context, string) (account.AdminIdentity, error)
 	DeleteAdminSession(context.Context, string) error
 	AdminEmailAllowed(context.Context, string) (bool, error)
+	// AdminMemberRole resolves an enabled member's role and permissions; see account.Service.AdminMemberRole.
+	AdminMemberRole(context.Context, string) (string, []string, error)
+	// AdminTokenIdentity resolves a personal access token (account.AdminTokenPrefix) to its identity.
+	AdminTokenIdentity(context.Context, string) (account.AdminIdentity, error)
 }
 type adminGoogleAuth struct {
 	oauth    oauth2.Config
@@ -138,9 +142,34 @@ func (s *Server) adminBearer(r *http.Request) bool {
 	expected := sha256.Sum256([]byte(s.config.Admin.token))
 	return s.config.Admin.token != "" && strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare(supplied[:], expected[:]) == 1
 }
+
+// adminPersonalToken returns the personal access token the request carries, if any.
+func adminPersonalToken(r *http.Request) (string, bool) {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return token, ok && strings.HasPrefix(token, account.AdminTokenPrefix)
+}
+
 func (s *Server) adminIdentity(r *http.Request) (string, string, error) {
 	if s.adminBearer(r) {
 		return "legacy-token", "", nil
+	}
+	// A personal access token stands for its holder, whose membership is checked as for a session.
+	if token, ok := adminPersonalToken(r); ok {
+		if s.adminStore == nil {
+			return "", "", account.ErrInvalid
+		}
+		identity, err := s.adminStore.AdminTokenIdentity(r.Context(), token)
+		if err != nil {
+			return "", "", err
+		}
+		allowed, err := s.adminEmailAllowed(r.Context(), identity.Email)
+		if err != nil {
+			return "", "", err
+		}
+		if !allowed {
+			return "", "", account.ErrInvalid
+		}
+		return "pat:" + strings.ToLower(identity.Email), identity.Email, nil
 	}
 	if s.adminGoogle == nil {
 		return "", "", account.ErrInvalid
@@ -164,6 +193,10 @@ func (s *Server) adminIdentity(r *http.Request) (string, string, error) {
 }
 func (s *Server) adminMutationOrigin(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method == "GET" || r.Method == "HEAD" || s.adminBearer(r) {
+		return true
+	}
+	// Bearer tokens are never sent by the browser on its own, so they need no cross-site protection.
+	if _, ok := adminPersonalToken(r); ok {
 		return true
 	}
 	// Cookie authentication requires an explicit same-origin browser request.

@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS admin_events (
  id text PRIMARY KEY,
- kind text NOT NULL CHECK(kind IN ('download','crash')),
+ kind text NOT NULL CONSTRAINT admin_events_kind_check CHECK(kind IN ('download','crash','active','session','session_crash')),
  platform text NOT NULL,
  version text NOT NULL,
  message text NOT NULL DEFAULT '',
@@ -35,4 +35,182 @@ CREATE TABLE IF NOT EXISTS admin_members (
  enabled boolean NOT NULL DEFAULT true,
  created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Admin console. Every statement below is additive and idempotent: the startup readiness probes re-run this file whenever one of these objects is missing.
+ALTER TABLE admin_audit ADD COLUMN IF NOT EXISTS detail jsonb NOT NULL DEFAULT '{}';
+
+-- Role-based access. Owners from the deployment configuration and the legacy token never need a row here; members get their permissions through admin_members.role.
+CREATE TABLE IF NOT EXISTS admin_roles (
+ key text PRIMARY KEY CHECK(key ~ '^[a-z][a-z0-9_]{0,31}$'),
+ name text NOT NULL CHECK(length(name) BETWEEN 1 AND 32),
+ builtin boolean NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS admin_role_permissions (
+ role text NOT NULL REFERENCES admin_roles(key) ON DELETE CASCADE,
+ permission text NOT NULL CHECK(permission IN ('review_dict_pr','review_community','triage_issues','ban_users','publish_notices','trigger_release','view_cloud_usage','manage_permissions')),
+ PRIMARY KEY(role,permission)
+);
+-- A built-in role gets its default permissions only in the statement that creates the role row, so a matrix edited later through the console is never reset by a re-run migration.
+WITH created AS (
+ INSERT INTO admin_roles(key,name,builtin) VALUES ('maintainer','维护者',true),('reviewer','审核志愿者',true),('operator','运营/客服',true),('readonly','只读',true)
+ ON CONFLICT(key) DO NOTHING RETURNING key
+)
+INSERT INTO admin_role_permissions(role,permission)
+SELECT d.role,d.permission FROM created c JOIN (VALUES
+ ('maintainer','review_dict_pr'),('maintainer','review_community'),('maintainer','triage_issues'),('maintainer','ban_users'),('maintainer','publish_notices'),('maintainer','trigger_release'),('maintainer','view_cloud_usage'),('maintainer','manage_permissions'),
+ ('reviewer','review_dict_pr'),('reviewer','review_community'),('reviewer','triage_issues'),
+ ('operator','triage_issues'),('operator','ban_users'),('operator','publish_notices'),('operator','view_cloud_usage'),
+ ('readonly','view_cloud_usage')
+) d(role,permission) ON d.role=c.key
+ON CONFLICT DO NOTHING;
+-- Maintainers can never lose permission management; the console refuses that revocation, and this restores it should the row be removed by hand.
+INSERT INTO admin_role_permissions(role,permission) VALUES ('maintainer','manage_permissions') ON CONFLICT DO NOTHING;
+-- Members added before roles existed could do everything but manage admins, so they become maintainers.
+ALTER TABLE admin_members ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'maintainer';
+-- Added separately: a REFERENCES clause inside ADD COLUMN IF NOT EXISTS is not guarded by IF NOT EXISTS on every server version.
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='admin_members'::regclass AND conname='admin_members_role_fkey') THEN
+  ALTER TABLE admin_members ADD CONSTRAINT admin_members_role_fkey FOREIGN KEY(role) REFERENCES admin_roles(key);
+ END IF;
+END $$;
+
+-- Session metadata for the personal page. id is a short random handle the console can show and revoke by, because the token hash must never leave the server. It is built from md5 rather than gen_random_uuid(), which is core only from PostgreSQL 13 while the documented minimum is 12.
+ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT left(md5(random()::text||clock_timestamp()::text),16);
+ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT '' CHECK(length(name)<=200);
+ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS last_seen_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS user_agent text NOT NULL DEFAULT '' CHECK(length(user_agent)<=256);
+CREATE UNIQUE INDEX IF NOT EXISTS admin_sessions_id ON admin_sessions(id);
+CREATE INDEX IF NOT EXISTS admin_sessions_email ON admin_sessions(email);
+
+-- Personal access tokens (Authorization: Bearer msime_pat_...). Only the SHA-256 of the token is stored; the holder's admin membership is re-checked on every request.
+CREATE TABLE IF NOT EXISTS admin_tokens (
+ hash text PRIMARY KEY,
+ email text NOT NULL CHECK(email=lower(email)),
+ last4 text NOT NULL CHECK(length(last4)=4),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '30 days'
+);
+CREATE INDEX IF NOT EXISTS admin_tokens_email ON admin_tokens(email);
+CREATE INDEX IF NOT EXISTS admin_tokens_expiry ON admin_tokens(expires_at);
+
+-- Telemetry extensions. All optional, so older clients keep working: artifact and channel describe a download, install_id is an anonymous per-install identifier, signature groups crashes.
+ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS artifact text CHECK(length(artifact) BETWEEN 1 AND 64);
+ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS channel text CHECK(length(channel) BETWEEN 1 AND 32);
+ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS install_id text CHECK(length(install_id) BETWEEN 16 AND 64);
+ALTER TABLE admin_events ADD COLUMN IF NOT EXISTS signature text CHECK(signature ~ '^[0-9a-f]{16}$');
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='admin_events'::regclass AND conname='admin_events_kind_check' AND pg_get_constraintdef(oid) LIKE '%session_crash%') THEN
+  ALTER TABLE admin_events DROP CONSTRAINT IF EXISTS admin_events_kind_check;
+  ALTER TABLE admin_events ADD CONSTRAINT admin_events_kind_check CHECK(kind IN ('download','crash','active','session','session_crash'));
+ END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS admin_events_signature ON admin_events(signature,created_at DESC) WHERE signature IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS admin_crash_groups (
+ signature text PRIMARY KEY CHECK(signature ~ '^[0-9a-f]{16}$'),
+ platform text NOT NULL,
+ version text NOT NULL,
+ title text NOT NULL,
+ status text NOT NULL DEFAULT 'open' CHECK(status IN ('open','known','fixed')),
+ issue_url text,
+ first_seen timestamptz NOT NULL DEFAULT now(),
+ last_seen timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS admin_crash_groups_seen ON admin_crash_groups(last_seen DESC);
+
+CREATE TABLE IF NOT EXISTS admin_notices (
+ id bigserial PRIMARY KEY,
+ title text NOT NULL DEFAULT '' CHECK(length(title)<=200),
+ body text NOT NULL DEFAULT '' CHECK(length(body)<=20000),
+ targets text[] NOT NULL DEFAULT '{}',
+ channels text[] NOT NULL DEFAULT '{}',
+ status text NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','live','archived')),
+ created_by text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ published_at timestamptz,
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS admin_notices_live ON admin_notices(published_at DESC) WHERE status='live';
+
+CREATE TABLE IF NOT EXISTS admin_notifications (
+ id bigserial PRIMARY KEY,
+ kind text NOT NULL CHECK(length(kind) BETWEEN 1 AND 32),
+ title text NOT NULL CHECK(length(title) BETWEEN 1 AND 300),
+ target_page text NOT NULL DEFAULT '' CHECK(length(target_page)<=32),
+ target_id text NOT NULL DEFAULT '' CHECK(length(target_id)<=200),
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS admin_notifications_time ON admin_notifications(created_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS admin_notification_reads (
+ email text NOT NULL CHECK(email=lower(email)),
+ notification_id bigint NOT NULL REFERENCES admin_notifications(id) ON DELETE CASCADE,
+ PRIMARY KEY(email,notification_id)
+);
+CREATE TABLE IF NOT EXISTS admin_preferences (
+ email text PRIMARY KEY CHECK(email=lower(email)),
+ prefs jsonb NOT NULL DEFAULT '{}',
+ read_all_before timestamptz
+);
+
+-- Upstream service monitoring: hourly call buckets, a daily availability rollup kept for 60 days, and incidents.
+CREATE TABLE IF NOT EXISTS admin_service_metrics (
+ service text NOT NULL,
+ hour timestamptz NOT NULL,
+ calls bigint NOT NULL DEFAULT 0,
+ errors bigint NOT NULL DEFAULT 0,
+ latency_buckets jsonb NOT NULL DEFAULT '{}',
+ usage numeric NOT NULL DEFAULT 0,
+ PRIMARY KEY(service,hour)
+);
+CREATE TABLE IF NOT EXISTS admin_service_daily (
+ service text NOT NULL,
+ day date NOT NULL,
+ ok_minutes integer NOT NULL DEFAULT 0,
+ total_minutes integer NOT NULL DEFAULT 0,
+ degraded boolean NOT NULL DEFAULT false,
+ p95_ms integer,
+ PRIMARY KEY(service,day)
+);
+CREATE TABLE IF NOT EXISTS admin_incidents (
+ id bigserial PRIMARY KEY,
+ service text NOT NULL,
+ title text NOT NULL CHECK(length(title) BETWEEN 1 AND 200),
+ description text NOT NULL DEFAULT '' CHECK(length(description)<=5000),
+ state text NOT NULL DEFAULT 'open' CHECK(state IN ('open','resolved')),
+ started_at timestamptz NOT NULL DEFAULT now(),
+ resolved_at timestamptz,
+ auto boolean NOT NULL DEFAULT false,
+ CHECK((state='resolved')=(resolved_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS admin_incidents_time ON admin_incidents(started_at DESC);
+-- At most one automatically opened incident per service is open at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS admin_incidents_auto_open ON admin_incidents(service) WHERE state='open' AND auto;
+
+-- Daily download_count snapshots of GitHub Release assets; a day's downloads are the difference between adjacent snapshots.
+CREATE TABLE IF NOT EXISTS release_asset_snapshots (
+ repo text NOT NULL,
+ tag text NOT NULL,
+ asset text NOT NULL,
+ day date NOT NULL,
+ download_count bigint NOT NULL CHECK(download_count>=0),
+ PRIMARY KEY(repo,tag,asset,day)
+);
+
+-- Sensitive words screen community uploads and dictionary submissions. Hits are counted per word and day.
+CREATE TABLE IF NOT EXISTS admin_sensitive_words (
+ id bigserial PRIMARY KEY,
+ pattern text NOT NULL UNIQUE CHECK(length(pattern) BETWEEN 1 AND 200),
+ is_regex boolean NOT NULL DEFAULT false,
+ category text NOT NULL CHECK(category IN ('ad','vulgar','abuse','illegal','custom')),
+ level text NOT NULL CHECK(level IN ('block','review')),
+ created_by text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS admin_sensitive_hits (
+ word_id bigint NOT NULL REFERENCES admin_sensitive_words(id) ON DELETE CASCADE,
+ day date NOT NULL,
+ count bigint NOT NULL DEFAULT 0 CHECK(count>=0),
+ PRIMARY KEY(word_id,day)
 );

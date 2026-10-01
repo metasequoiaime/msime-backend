@@ -16,7 +16,7 @@ func TestAdminHTTPValidationAndAuditAtomicity(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.AdminHTTP(w, r.WithContext(WithAdminActor(r.Context(), "test-admin")))
+		a.AdminHTTP(w, r.WithContext(adminTestContext(r.Context(), "test-admin")))
 	})
 	for _, body := range []string{`{`, `{} {}`, `{"action":"resolve_crash","id":"missing","extra":true}`, `{"action":"unknown","id":"missing"}`, `{"action":"resolve_crash","id":""}`, `{"action":"revoke_session","id":"missing"}`} {
 		apiRequest(t, handler, "POST", "/api/actions", body, "", 400)

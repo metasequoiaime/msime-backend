@@ -88,7 +88,7 @@ func TestServiceLifecycleAndUnavailableDatabase(t *testing.T) {
 		}
 	}
 	w := httptest.NewRecorder()
-	a.adminAction(w, jsonRequest("POST", "/api/actions", `{"id":"user","action":"revoke_sessions"}`, ""))
+	a.adminAction(w, adminJSONRequest("POST", "/api/actions", `{"id":"user","action":"revoke_sessions"}`))
 	if w.Code != 503 {
 		t.Fatal(w.Code)
 	}
@@ -133,7 +133,9 @@ func TestReadOnlyDatabaseRejectsMutationsWithoutSuccess(t *testing.T) {
 		{"delete", "DELETE", "/v1/users/me", "", a.delete},
 		{"clipboard setting", "PUT", "/v1/users/me/clipboard/settings", `{"enabled":true}`, a.clipboardSettings},
 		{"preferences", "PUT", "/v1/users/me/preferences", `{"revision":0,"settings":{}}`, a.preferences},
-		{"admin action", "POST", "/api/actions", `{"id":"` + user.User.ID + `","action":"revoke_sessions"}`, a.adminAction},
+		{"admin action", "POST", "/api/actions", `{"id":"` + user.User.ID + `","action":"revoke_sessions"}`, func(w http.ResponseWriter, r *http.Request) {
+			a.adminAction(w, r.WithContext(adminTestContext(r.Context(), "legacy-token")))
+		}},
 		{"telemetry", "POST", "/v1/telemetry/events", `{"id":"readonly-event-0001","kind":"download","platform":"ios","version":"1"}`, a.Telemetry},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

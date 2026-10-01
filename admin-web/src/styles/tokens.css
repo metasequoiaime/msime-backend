@@ -1,0 +1,176 @@
+/* Design tokens from the admin console prototype. Light summer is the base palette; data-theme and data-season on <html> switch the overrides below. */
+:root {
+  --bg: #F5FAF6;
+  --panel: #FFFFFF;
+  --panel-2: #EDF5EF;
+  --ink: #0F2419;
+  --body: #34473B;
+  --muted: #5E7266;
+  --accent: #1E8E4E;
+  --accent-ink: #17783F;
+  --accent-soft: rgba(30, 142, 78, .1);
+  --accent-ring: rgba(30, 142, 78, .28);
+  --btn: #1E8E4E;
+  --btn-fg: #fff;
+  --hair: rgba(15, 36, 25, .08);
+  --hair-2: rgba(15, 36, 25, .15);
+  --shadow: 0 1px 2px rgba(15, 36, 25, .04), 0 10px 28px rgba(15, 36, 25, .06);
+  --warn: #A35A14;
+  --warn-soft: rgba(196, 120, 40, .12);
+  --bad: #B4382A;
+  --bad-soft: rgba(180, 56, 42, .1);
+  --info: #2F6FA8;
+  --info-soft: rgba(47, 111, 168, .1);
+  --pop-shadow: 0 0 0 1px var(--hair), 0 18px 48px rgba(0, 0, 0, .16);
+  --scrim: rgba(10, 20, 14, .35);
+  --chart-2: #3C8DBC;
+  --chart-3: #E0913A;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0E1712;
+  --panel: #15211A;
+  --panel-2: #1C2B22;
+  --ink: #EEF4EF;
+  --body: #C4D2C8;
+  --muted: #8FA396;
+  --accent: #6FD08B;
+  --accent-ink: #86DB9E;
+  --accent-soft: rgba(111, 208, 139, .12);
+  --accent-ring: rgba(111, 208, 139, .3);
+  --btn: #6FD08B;
+  --btn-fg: #0E1A12;
+  --hair: rgba(255, 255, 255, .07);
+  --hair-2: rgba(255, 255, 255, .14);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 32px rgba(0, 0, 0, .35);
+  --warn: #E3A55E;
+  --warn-soft: rgba(227, 165, 94, .13);
+  --bad: #EE8577;
+  --bad-soft: rgba(238, 133, 119, .12);
+  --info: #7DB4E6;
+  --info-soft: rgba(125, 180, 230, .12);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"][data-season="spring"] {
+  --bg: #F5FAF1;
+  --panel-2: #ECF5E6;
+  --accent: #4A9A3C;
+  --accent-ink: #3B7F2F;
+  --accent-soft: rgba(74, 154, 60, .11);
+  --accent-ring: rgba(74, 154, 60, .3);
+  --btn: #4A9A3C;
+}
+
+:root[data-theme="light"][data-season="autumn"] {
+  --bg: #FBF6EF;
+  --panel-2: #F5ECE1;
+  --ink: #2A1A10;
+  --body: #4A3A30;
+  --muted: #7A675B;
+  --accent: #B9582B;
+  --accent-ink: #9C4520;
+  --accent-soft: rgba(185, 88, 43, .1);
+  --accent-ring: rgba(185, 88, 43, .3);
+  --btn: #B9582B;
+  --hair: rgba(42, 26, 16, .08);
+  --hair-2: rgba(42, 26, 16, .15);
+}
+
+:root[data-theme="light"][data-season="winter"] {
+  --bg: #F3F6F7;
+  --panel-2: #E8EEF0;
+  --ink: #10202A;
+  --body: #344650;
+  --muted: #5D6E78;
+  --accent: #2E6F7A;
+  --accent-ink: #245C66;
+  --accent-soft: rgba(46, 111, 122, .1);
+  --accent-ring: rgba(46, 111, 122, .3);
+  --btn: #2E6F7A;
+  --hair: rgba(16, 32, 42, .08);
+  --hair-2: rgba(16, 32, 42, .15);
+}
+
+:root[data-theme="dark"][data-season="spring"] {
+  --accent: #9AD67F;
+  --accent-ink: #B0E197;
+  --accent-soft: rgba(154, 214, 127, .13);
+  --accent-ring: rgba(154, 214, 127, .3);
+  --btn: #9AD67F;
+}
+
+:root[data-theme="dark"][data-season="autumn"] {
+  --bg: #17120E;
+  --panel: #211A15;
+  --panel-2: #2B221B;
+  --accent: #F0A06E;
+  --accent-ink: #F5B58C;
+  --accent-soft: rgba(240, 160, 110, .13);
+  --accent-ring: rgba(240, 160, 110, .3);
+  --btn: #F0A06E;
+  --btn-fg: #22140B;
+}
+
+:root[data-theme="dark"][data-season="winter"] {
+  --bg: #0E1517;
+  --panel: #151F22;
+  --panel-2: #1C292D;
+  --accent: #7FC6CF;
+  --accent-ink: #9AD4DB;
+  --accent-soft: rgba(127, 198, 207, .13);
+  --accent-ring: rgba(127, 198, 207, .3);
+  --btn: #7FC6CF;
+  --btn-fg: #0B1A1D;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-ink: var(--ink);
+  --color-body: var(--body);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ring: var(--accent-ring);
+  --color-btn: var(--btn);
+  --color-btn-fg: var(--btn-fg);
+  --color-hair: var(--hair);
+  --color-hair-2: var(--hair-2);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-scrim: var(--scrim);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --shadow-card: var(--shadow);
+  --shadow-pop: var(--pop-shadow);
+  --shadow-dialog: 0 24px 64px rgba(0, 0, 0, .25);
+  --font-sans: "PingFang SC", "Noto Sans SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --animate-page-in: pageIn .35s cubic-bezier(.22, 1, .36, 1) both;
+  --animate-pop-in: pageIn .18s ease-out both;
+  --animate-drawer-in: drawerIn .25s cubic-bezier(.22, 1, .36, 1) both;
+  --animate-toast-in: toastIn .22s ease-out both;
+}
+
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes drawerIn {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}

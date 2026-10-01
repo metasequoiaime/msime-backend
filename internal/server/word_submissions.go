@@ -29,6 +29,7 @@ import (
 
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 	"github.com/metasequoiaime/MSIME-Backend/internal/engine"
+	"github.com/metasequoiaime/MSIME-Backend/internal/githubapp"
 )
 
 // Anonymous dictionary submissions from the website (msime-web#213). A visitor proposes words with their quanpin reading, English words with the form to show, or candidate-window translations; after Cloudflare Turnstile and a per-address PostgreSQL rate limit, the server appends them to custom/words.txt, custom/english.txt or custom/translations.txt in metasequoiaime/msime-dictionary on one rolling pull request that maintainers review. Nothing about the visitor is stored, and entries, notes and tokens are never logged.
@@ -51,7 +52,7 @@ const (
 	wordSubmissionBranches  = "community-words/"
 	wordSubmissionTimeout   = 45 * time.Second
 	defaultTurnstileURL     = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-	defaultGitHubAPIURL     = "https://api.github.com"
+	defaultGitHubAPIURL     = githubapp.DefaultAPIURL
 )
 
 // Conservative per-address limits. They count requests that passed Turnstile, so an automated client cannot use up a visitor's quota without solving a challenge. The shorter window is checked first so a burst does not also consume the daily allowance.
@@ -208,10 +209,9 @@ type wordSubmitter struct {
 	client    *http.Client
 	now       func() time.Time
 	// Serialises the read-modify-write on GitHub within this process so two local requests never race for the same blob SHA. Replicas can still race; GitHub's SHA check turns that into a 409.
-	writes      sync.Mutex
-	tokenMu     sync.Mutex
-	token       string
-	tokenExpiry time.Time
+	writes sync.Mutex
+	// Installation tokens minted for the dictionary repository, shared by every call through app().
+	github githubapp.Cache
 	// The base dictionary's median word weights, once the Engine has computed them.
 	mediansMu     sync.Mutex
 	medians       map[int]int

@@ -615,7 +615,7 @@ func TestCommunityPluginModeration(t *testing.T) {
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
-		a.AdminHTTP(w, r.WithContext(WithAdminActor(r.Context(), "google:test:moderator@example.test")))
+		a.AdminHTTP(w, r.WithContext(adminTestContext(r.Context(), "google:test:moderator@example.test")))
 		return w
 	}
 	archiveText := base64.StdEncoding.EncodeToString(archive)

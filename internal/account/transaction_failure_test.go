@@ -235,7 +235,7 @@ func testUserDataTransactions(t *testing.T, native bool) {
 
 	operations["admin revoke sessions"] = func(s *Store, f fixture) error {
 		w := httptest.NewRecorder()
-		(&Service{store: s}).adminAction(w, jsonRequest("POST", "/api/actions", `{"action":"revoke_sessions","id":"`+f.user.User.ID+`"}`, ""))
+		(&Service{store: s}).adminAction(w, adminJSONRequest("POST", "/api/actions", `{"action":"revoke_sessions","id":"`+f.user.User.ID+`"}`))
 		if w.Code != 200 {
 			return fmt.Errorf("HTTP %d: %s", w.Code, w.Body.String())
 		}

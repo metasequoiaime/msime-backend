@@ -41,6 +41,11 @@ type Service struct {
 	tokenKey []byte
 	// googleTokenURL overrides the Google token endpoint in tests; empty means the production endpoint.
 	googleTokenURL string
+
+	// Admin console state: the deployment settings, the sensitive word matcher and the notice broadcaster.
+	admin       AdminSettings
+	sensitive   sensitiveWords
+	broadcaster NoticeBroadcaster
 }
 
 func New(ctx context.Context, c Config) (*Service, error) {
@@ -209,25 +214,30 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"PATCH /v1/users/me":                                (*Service).update,
 		"DELETE /v1/users/me":                               (*Service).delete,
 	} {
-		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			if a == nil {
-				writeError(w, 503, "user_auth_disabled")
-				return
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), accountRouteTimeout(pattern))
-			defer cancel()
-			r = r.WithContext(ctx)
-			host, _, e := net.SplitHostPort(r.RemoteAddr)
-			if e != nil {
-				host = r.RemoteAddr
-			}
-			// 默认只信任 TCP 对端，不使用可伪造的转发头。代理配置见部署文档。
-			if e = a.store.Rate(ctx, "ip:"+hash(host), 120, time.Minute); e != nil {
-				a.error(w, e)
-				return
-			}
-			method(a, w, r)
-		})
+		mux.HandleFunc(pattern, Route(a, pattern, method))
+	}
+}
+
+// Route wraps an account handler with the nil check, per-address rate limit and timeout every Mount route gets. The server uses it for account handlers it registers itself.
+func Route(a *Service, pattern string, method func(*Service, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if a == nil {
+			writeError(w, 503, "user_auth_disabled")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), accountRouteTimeout(pattern))
+		defer cancel()
+		r = r.WithContext(ctx)
+		host, _, e := net.SplitHostPort(r.RemoteAddr)
+		if e != nil {
+			host = r.RemoteAddr
+		}
+		// 默认只信任 TCP 对端，不使用可伪造的转发头。代理配置见部署文档。
+		if e = a.store.Rate(ctx, "ip:"+hash(host), 120, time.Minute); e != nil {
+			a.error(w, e)
+			return
+		}
+		method(a, w, r)
 	}
 }
 func write(w http.ResponseWriter, status int, value any) {

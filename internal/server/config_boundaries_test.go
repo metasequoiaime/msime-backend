@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,5 +138,105 @@ func TestLoadConfigStrictJSON(t *testing.T) {
 	}
 	if len(c.Clients) != 1 || c.Clients[0].token != os.Getenv("CONFIG_TEST_TOKEN") {
 		t.Fatal("credentials not loaded")
+	}
+}
+
+// The console blocks of admin: environment, github, services and telegram are optional, defaulted, and rejected when half configured.
+func TestAdminConsoleConfigBoundaries(t *testing.T) {
+	t.Setenv("CONSOLE_ADMIN_TOKEN", strings.Repeat("a", 40))
+	t.Setenv("CONSOLE_GITHUB_KEY", wordsKeyPEM(t, false))
+	t.Setenv("CONSOLE_TELEGRAM_TOKEN", "123456789:"+strings.Repeat("T", 35))
+	t.Setenv("CONSOLE_BAD", "not a key")
+	valid := func() AdminConfig {
+		return AdminConfig{
+			Enabled: true, TokenEnv: "CONSOLE_ADMIN_TOKEN",
+			GitHub: AdminGitHubConfig{AppID: 1, InstallationID: 2, PrivateKeyEnv: "CONSOLE_GITHUB_KEY", IssueRepos: []string{"metasequoiaime/msime", "metasequoiaime/msime-windows"}, Platforms: []AdminPlatformConfig{
+				{ID: "windows", Name: "Windows", Repo: "metasequoiaime/msime-windows", TagPrefix: "windows-v", ReleaseWorkflow: "release.yml", Assignee: "houko", Label: "windows"},
+				{ID: "macos", Name: "macOS", Repo: "metasequoiaime/msime", TagPrefix: "macos-v"},
+			}},
+			Services: []AdminServiceConfig{{Key: "translation", Name: "翻译", Provider: "DeepL", Quota: AdminServiceQuota{Limit: 500000, Unit: "chars", UnitPrice: 0.0001}}, {Key: "chat", Name: "对话"}},
+			Telegram: AdminTelegramConfig{BotTokenEnv: "CONSOLE_TELEGRAM_TOKEN", ChatID: "@msime_news"},
+		}
+	}
+	c := valid()
+	if err := c.validate(true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if c.Environment != "生产环境" || c.GitHub.DictionaryRepo != "metasequoiaime/msime-dictionary" || c.GitHub.APIURL != "https://api.github.com" || c.GitHub.key == nil || c.Services[1].SlowMS != 3000 || c.Services[0].Quota.Period != "month" || c.Telegram.botToken == "" || c.Telegram.APIURL != "https://api.telegram.org" {
+		t.Fatalf("defaults: %+v", c)
+	}
+	if client := c.adminGitHubClient(); client == nil || client.AppID != 1 || client.Cache == nil {
+		t.Fatal("GitHub client not built", client)
+	}
+	settings := c.accountSettings()
+	if len(settings.Services) != 2 || settings.Services[0].QuotaUnit != "chars" || settings.Environment != "生产环境" {
+		t.Fatalf("%+v", settings)
+	}
+	bare := AdminConfig{Enabled: true, TokenEnv: "CONSOLE_ADMIN_TOKEN"}
+	if err := bare.validate(true, nil); err != nil || bare.adminGitHubClient() != nil {
+		t.Fatal("an admin without console blocks must start with GitHub disabled", err)
+	}
+	unset := valid()
+	unset.GitHub.AppID, unset.GitHub.PrivateKeyEnv = 0, "CONSOLE_BAD"
+	if err := unset.validate(true, nil); err != nil || unset.adminGitHubClient() != nil {
+		t.Fatal("app_id 0 must disable GitHub whatever else the block holds", err)
+	}
+	cases := map[string]func(*AdminConfig){
+		"environment long":         func(c *AdminConfig) { c.Environment = strings.Repeat("环", 33) },
+		"environment spaces":       func(c *AdminConfig) { c.Environment = " staging" },
+		"github app id":            func(c *AdminConfig) { c.GitHub.AppID = -1 },
+		"github installation":      func(c *AdminConfig) { c.GitHub.InstallationID = 0 },
+		"github key":               func(c *AdminConfig) { c.GitHub.PrivateKeyEnv = "CONSOLE_BAD" },
+		"github api url":           func(c *AdminConfig) { c.GitHub.APIURL = "http://api.github.com" },
+		"github dictionary repo":   func(c *AdminConfig) { c.GitHub.DictionaryRepo = "msime-dictionary" },
+		"github issue repo":        func(c *AdminConfig) { c.GitHub.IssueRepos = []string{"metasequoiaime/msime", "MetasequoiaIME/msime"} },
+		"platform id":              func(c *AdminConfig) { c.GitHub.Platforms[1].ID = "windows" },
+		"platform name":            func(c *AdminConfig) { c.GitHub.Platforms[0].Name = "" },
+		"platform repo":            func(c *AdminConfig) { c.GitHub.Platforms[0].Repo = "x" },
+		"platform tag prefix":      func(c *AdminConfig) { c.GitHub.Platforms[0].TagPrefix = "" },
+		"platform workflow":        func(c *AdminConfig) { c.GitHub.Platforms[0].ReleaseWorkflow = "../release.yml" },
+		"platform assignee":        func(c *AdminConfig) { c.GitHub.Platforms[0].Assignee = "-bad" },
+		"platform label":           func(c *AdminConfig) { c.GitHub.Platforms[0].Label = "a,b" },
+		"service key":              func(c *AdminConfig) { c.Services[1].Key = "translation" },
+		"service name":             func(c *AdminConfig) { c.Services[0].Name = "" },
+		"service unit":             func(c *AdminConfig) { c.Services[0].Quota.Unit = "tokens" },
+		"service unit missing":     func(c *AdminConfig) { c.Services[0].Quota.Unit = "" },
+		"service period":           func(c *AdminConfig) { c.Services[0].Quota.Period = "day" },
+		"service price":            func(c *AdminConfig) { c.Services[0].Quota.UnitPrice = -1 },
+		"service slow":             func(c *AdminConfig) { c.Services[0].SlowMS = -1 },
+		"telegram chat":            func(c *AdminConfig) { c.Telegram.ChatID = "news" },
+		"telegram token":           func(c *AdminConfig) { c.Telegram.BotTokenEnv = "CONSOLE_BAD" },
+		"telegram api url":         func(c *AdminConfig) { c.Telegram.APIURL = "http://api.telegram.org" },
+		"telegram url without bot": func(c *AdminConfig) { c.Telegram = AdminTelegramConfig{APIURL: "https://api.telegram.org"} },
+		"token looks like a pat": func(c *AdminConfig) {
+			t.Setenv("CONSOLE_PAT_LIKE", "msime_pat_"+strings.Repeat("p", 40))
+			c.TokenEnv = "CONSOLE_PAT_LIKE"
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := valid()
+			mutate(&c)
+			if c.validate(true, nil) == nil {
+				t.Fatal("invalid admin console configuration accepted")
+			}
+		})
+	}
+}
+
+// config.example.json documents every configuration key, so it must decode strictly into Config.
+func TestConfigExampleDecodesStrictly(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	var c Config
+	if err = d.Decode(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Admin.Environment == "" || c.Admin.GitHub.DictionaryRepo == "" || len(c.Admin.GitHub.Platforms) == 0 || len(c.Admin.Services) == 0 || c.Admin.Telegram.BotTokenEnv == "" {
+		t.Fatalf("admin console keys missing from the example: %+v", c.Admin)
 	}
 }

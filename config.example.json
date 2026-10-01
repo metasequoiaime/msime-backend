@@ -8,6 +8,38 @@
       "secret_env": "MSIME_ADMIN_GOOGLE_SECRET",
       "redirect_uri": "https://admin.msime.app/api/auth/google/callback",
       "allowed_emails_env": "MSIME_ADMIN_GOOGLE_EMAILS"
+    },
+    "environment": "生产环境",
+    "github": {
+      "app_id": 0,
+      "installation_id": 0,
+      "private_key_env": "MSIME_ADMIN_GITHUB_APP_KEY",
+      "dictionary_repo": "metasequoiaime/msime-dictionary",
+      "issue_repos": ["metasequoiaime/msime", "metasequoiaime/msime-windows"],
+      "platforms": [
+        {
+          "id": "windows",
+          "name": "Windows",
+          "repo": "metasequoiaime/msime-windows",
+          "tag_prefix": "windows-v",
+          "release_workflow": "release.yml",
+          "assignee": "houko",
+          "label": "windows"
+        }
+      ]
+    },
+    "services": [
+      {
+        "key": "translation",
+        "name": "翻译",
+        "provider": "DeepL",
+        "quota": {"limit": 500000, "unit": "chars", "period": "month", "unit_price": 0},
+        "slow_ms": 3000
+      }
+    ],
+    "telegram": {
+      "bot_token_env": "MSIME_ADMIN_TELEGRAM_TOKEN",
+      "chat_id": ""
     }
   },
   "docs_enabled": false,
