@@ -336,7 +336,7 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 
 ### `POST /v1/telemetry/events`
 
-不需要认证：不需要设备令牌或用户会话，带了 `Authorization` 也会被忽略，不做校验，所以未登录的客户端、msime-windows 和官网都能上报，仍带令牌的旧客户端照常工作。请求体最多 32 KiB，`Content-Type: application/json`，成功返回 `202 {"accepted":true}`。按客户端地址（见「客户端地址」）限流：每分钟 60 次，与登录和社区接口的 120 次分开计数；`crash` 每个地址每天另限 20 次，超出返回 429 和 `Retry-After: 3600`。
+不需要认证：不需要设备令牌或用户会话，带了 `Authorization` 也会被忽略，不做校验，所以未登录的客户端、msime-windows 和官网都能上报，仍带令牌的旧客户端照常工作。请求体最多 32 KiB，`Content-Type: application/json`，成功返回 `202 {"accepted":true}`。按客户端地址（见「客户端地址」）限流：每分钟 60 次，与登录和社区接口的 120 次分开计数；`crash` 每个地址每天另限 20 次，超出返回 429 和 `Retry-After: 3600`；已记录过的 ID 重试时直接返回 202，不占这 20 次。
 
 | 字段 | 规则 |
 | --- | --- |

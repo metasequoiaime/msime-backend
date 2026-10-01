@@ -134,6 +134,7 @@ func TestTruncateStack(t *testing.T) {
 		{"abcdef", 3, "abc"},
 		{"\nabcdef", 3, "\nab"},
 		{"界界\n界界", 4, "界界"},
+		{"a\nbc\nd", 4, "a\nbc"},
 	} {
 		if got := truncateStack(tc.stack, tc.limit); got != tc.want {
 			t.Errorf("truncateStack(%q, %d) = %q, want %q", tc.stack, tc.limit, got, tc.want)
@@ -196,6 +197,10 @@ func TestTelemetryAnonymousRouteLimits(t *testing.T) {
 	w := send("198.51.100.20", "", event(200, "crash"))
 	if w.Code != 429 || w.Header().Get("Retry-After") != "3600" {
 		t.Fatal("crash limit", w.Code, w.Header().Get("Retry-After"))
+	}
+	// 已记录的崩溃用同一 ID 重试时按重复事件接受，不占当天的额度，所以额度用完后仍返回 202。
+	if w = send("198.51.100.20", "", event(100, "crash")); w.Code != 202 {
+		t.Fatal("a retried crash was charged against the daily limit", w.Code)
 	}
 	if w = send("198.51.100.21", "", event(201, "crash")); w.Code != 202 {
 		t.Fatal("crash limit leaked across addresses", w.Code)

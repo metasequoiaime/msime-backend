@@ -99,6 +99,10 @@ func truncateStack(stack string, limit int) string {
 		n++
 	}
 	head := stack[:cut]
+	// 截断点正好落在换行符上时 head 已经以完整的行结尾。
+	if stack[cut] == '\n' {
+		return head
+	}
 	if i := strings.LastIndexByte(head, '\n'); i > 0 {
 		return head[:i]
 	}
@@ -125,6 +129,15 @@ func (a *Service) Telemetry(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	signature := ""
 	if v.Kind == "crash" {
+		// 已记录的 ID 是客户端重试（例如上次的 202 在网络中丢失），直接按重复事件返回 202，不再占用当天的崩溃额度；否则同一条崩溃重试几次就会挤掉其他崩溃。
+		var seen bool
+		if err := a.store.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM admin_events WHERE id=$1)`, v.ID).Scan(&seen); err != nil {
+			a.error(w, err)
+			return
+		} else if seen {
+			write(w, 202, map[string]bool{"accepted": true})
+			return
+		}
 		if err := a.RateLimit(ctx, "telemetry-crash", a.clientAddress(r), telemetryCrashDailyLimit, 24*time.Hour); errors.Is(err, ErrLimited) {
 			// 每日窗口不会在一分钟内重开，所以让客户端把排队的崩溃留一小时再发，而不是每分钟重试。
 			w.Header().Set("Retry-After", "3600")
