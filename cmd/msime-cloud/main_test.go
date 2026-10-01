@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +25,8 @@ type fakeCloud struct {
 	issued    int
 	refreshes int
 	seen      []string
+	// googleURL replaces the authorization URL the Google challenge answers with.
+	googleURL string
 }
 
 func (f *fakeCloud) issue() map[string]any {
@@ -45,9 +50,18 @@ func (f *fakeCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method + " " + r.URL.Path {
 	case "POST /v1/auth/challenges":
+		if body["provider"] == "google" {
+			target, _ := body["target"].(string)
+			authorization := f.googleURL
+			if authorization == "" {
+				authorization = "https://accounts.google.com/o/oauth2/auth?" + url.Values{"redirect_uri": {target}, "state": {"s-123"}, "client_id": {"synthetic"}}.Encode()
+			}
+			reply(200, map[string]any{"challenge_id": "g1", "expires_in": 600, "nonce": "n", "authorization_url": authorization})
+			return
+		}
 		reply(200, map[string]any{"challenge_id": "c1", "expires_in": 300})
 	case "POST /v1/auth/login":
-		if body["challenge_id"] != "c1" || body["credential"] != "123456" {
+		if !(body["challenge_id"] == "c1" && body["credential"] == "123456") && !(body["challenge_id"] == "g1" && body["credential"] == "google-code") {
 			reply(401, map[string]any{"error": map[string]string{"code": "invalid_credential"}})
 			return
 		}
@@ -134,7 +148,8 @@ func TestSignInKeepsTheSessionPrivatelyAndCallsWithIt(t *testing.T) {
 	h := newHarness(t)
 	h.signIn()
 	info, err := os.Stat(filepath.Join(h.dir, "credentials.json"))
-	if err != nil || info.Mode().Perm() != 0o600 {
+	// Windows has no permission bits; the file is private through the per-user ACL on the profile directory it lives in.
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("credentials file: %v %v", info, err)
 	}
 	if code, out, _ := h.run("", "whoami"); code != 0 || !strings.Contains(out, `"id": "u1"`) {
@@ -411,5 +426,123 @@ func TestLogoutAllAndAFailedRefreshAreReported(t *testing.T) {
 	}
 	if kept, ok, _ := sessions.get(broken.URL); !ok || kept.RefreshToken != current.RefreshToken {
 		t.Fatal("a refresh the server failed should keep the session for a retry")
+	}
+}
+
+// browser acts as the user's browser: it follows the authorization URL straight back to the loopback redirect, after a stray request with another state.
+func browser(t *testing.T, query url.Values) func(string) error {
+	return func(address string) error {
+		parsed, err := url.Parse(address)
+		if err != nil {
+			return err
+		}
+		redirect := parsed.Query().Get("redirect_uri")
+		go func() {
+			stray, err := http.Get(redirect + "?state=other&code=x")
+			if err != nil || stray.StatusCode != http.StatusNotFound {
+				t.Errorf("a callback with another state should be ignored: %v %v", stray, err)
+				return
+			}
+			stray.Body.Close()
+			query.Set("state", parsed.Query().Get("state"))
+			response, err := http.Get(redirect + "?" + query.Encode())
+			if err != nil {
+				t.Errorf("callback: %v", err)
+				return
+			}
+			response.Body.Close()
+		}()
+		return nil
+	}
+}
+
+func (h *harness) runWithBrowser(browse func(string) error, args ...string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	c := cli{env: func(name string) string { return h.env[name] }, stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr, client: http.DefaultClient, now: func() time.Time { return h.now }, browse: browse}
+	return c.run(args), stdout.String(), stderr.String()
+}
+
+func TestGoogleSignInRelaysTheCodeTheBrowserBringsBack(t *testing.T) {
+	h := newHarness(t)
+	code, out, errText := h.runWithBrowser(browser(t, url.Values{"code": {"google-code"}}), "login", "google")
+	if code != 0 || !strings.Contains(out, `"id": "u1"`) || !strings.Contains(errText, "accounts.google.com") {
+		t.Fatalf("login google: %d %s %s", code, out, errText)
+	}
+	if code, _, _ := h.run("", "whoami"); code != 0 {
+		t.Fatal("the Google session was not kept")
+	}
+	for _, line := range h.cloud.seen {
+		if strings.HasPrefix(line, "POST /v1/auth/challenges") && !strings.HasSuffix(line, "auth=") {
+			t.Fatalf("the challenge carried credentials: %s", line)
+		}
+	}
+}
+
+func TestGoogleSignInCanBeCancelledOrRefused(t *testing.T) {
+	h := newHarness(t)
+	code, _, errText := h.runWithBrowser(browser(t, url.Values{"error": {"access_denied"}}), "login", "google")
+	if code != 1 || !strings.Contains(errText, "cancelled") {
+		t.Fatalf("cancelled: %d %s", code, errText)
+	}
+	opened := false
+	h.cloud.googleURL = "https://evil.example/o/oauth2/auth?state=s"
+	code, _, errText = h.runWithBrowser(func(string) error { opened = true; return nil }, "login", "google")
+	if code != 1 || opened || !strings.Contains(errText, "not one this command opens") {
+		t.Fatalf("foreign address: %d %v %s", code, opened, errText)
+	}
+	if code, _, _ := h.run("", "login", "google", "--browser", "maybe"); code != 2 {
+		t.Fatal("an unknown --browser value should be a usage error")
+	}
+}
+
+func TestGoogleStateIsCheckedAgainstTheLoopbackTarget(t *testing.T) {
+	target := "http://127.0.0.1:50000/callback"
+	good := "https://accounts.google.com/o/oauth2/auth?" + url.Values{"redirect_uri": {target}, "state": {"s"}}.Encode()
+	if state, err := googleState(good, target); err != nil || state != "s" {
+		t.Fatalf("good: %q %v", state, err)
+	}
+	for _, bad := range []string{
+		"http://accounts.google.com/o/oauth2/auth?redirect_uri=" + url.QueryEscape(target) + "&state=s",
+		"https://accounts.google.com/o/oauth2/auth?redirect_uri=" + url.QueryEscape("http://127.0.0.1:1/callback") + "&state=s",
+		"https://accounts.google.com/o/oauth2/auth?redirect_uri=" + url.QueryEscape(target),
+		"https://accounts.google.com/o/oauth2/auth?redirect_uri=" + url.QueryEscape(target) + "&state=a&state=b",
+		"https://user@accounts.google.com/o/oauth2/auth?redirect_uri=" + url.QueryEscape(target) + "&state=s",
+		good + "#fragment",
+	} {
+		if _, err := googleState(bad, target); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}
+
+func TestTheVersionIsTheBackendRelease(t *testing.T) {
+	h := newHarness(t)
+	if code, out, _ := h.run("", "version"); code != 0 || !strings.HasPrefix(out, "msime-cloud ") || strings.TrimSpace(out) == "msime-cloud" {
+		t.Fatalf("version: %d %q", code, out)
+	}
+}
+
+func TestTheLoopbackGivesUpWithoutACodeOrInTime(t *testing.T) {
+	listen := func() (net.Listener, string) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return listener, "http://" + listener.Addr().String() + "/callback"
+	}
+	listener, address := listen()
+	go func() {
+		if response, err := http.Get(address + "?state=s"); err == nil {
+			response.Body.Close()
+		}
+	}()
+	if _, err := receiveGoogleCode(listener, "s", 5*time.Second); err == nil || !strings.Contains(err.Error(), "without a Google authorization code") {
+		t.Fatalf("no code: %v", err)
+	}
+	listener.Close()
+	listener, _ = listen()
+	defer listener.Close()
+	if _, err := receiveGoogleCode(listener, "s", 50*time.Millisecond); err == nil || !strings.Contains(err.Error(), "in time") {
+		t.Fatalf("timeout: %v", err)
 	}
 }

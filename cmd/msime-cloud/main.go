@@ -1,4 +1,4 @@
-// Command msime-cloud lets an AI assistant, or a person, use the 水杉云 API from a shell: list and describe its operations, sign in with an email or SMS code, and call any operation with the session attached and refreshed. Responses go to stdout; anything for a person goes to stderr.
+// Command msime-cloud lets an AI assistant, or a person, use the 水杉云 API from a shell: list and describe its operations, sign in with an email or SMS code or with Google, and call any operation with the session attached and refreshed. Responses go to stdout; anything for a person goes to stderr.
 package main
 
 import (
@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	msimebackend "github.com/metasequoiaime/MSIME-Backend"
 )
 
 const usage = `usage: msime-cloud <command> [arguments]
@@ -27,8 +29,11 @@ const usage = `usage: msime-cloud <command> [arguments]
                                          send a sign-in code and print the challenge_id
   login finish --challenge ID --code CODE
                                          sign in with the code the user received and keep the session
+  login google [--browser false]         sign in with Google in the browser, or print the address to open
+                                         with --browser false; waits up to 5 minutes for the browser
   whoami                                 print the signed-in user
   logout [--all]                         end this session, or every session of the user, and forget it
+  version                                print the version
 
 PATH may be a template from routes or a concrete path. /v1 paths go to the API with the kept session (or MSIME_CLOUD_TOKEN) when the operation needs one; /api paths go to the admin site with MSIME_ADMIN_TOKEN. A request body is a JSON object given inline, or read from stdin with -; -F sends multipart form fields instead, @ reading a file. A response that is not JSON or text needs -o.
 
@@ -63,10 +68,12 @@ type cli struct {
 	stderr io.Writer
 	client *http.Client
 	now    func() time.Time
+	// browse opens a URL in the user's browser.
+	browse func(string) error
 }
 
 func main() {
-	c := cli{env: os.Getenv, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, client: &http.Client{Timeout: requestTimeout}, now: time.Now}
+	c := cli{env: os.Getenv, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, client: &http.Client{Timeout: requestTimeout}, now: time.Now, browse: openBrowser}
 	os.Exit(c.run(os.Args[1:]))
 }
 
@@ -91,6 +98,9 @@ func (c cli) dispatch(args []string) error {
 	}
 	command, args := args[0], args[1:]
 	switch command {
+	case "version", "--version":
+		fmt.Fprintln(c.stdout, "msime-cloud "+msimebackend.Version())
+		return nil
 	case "help", "-h", "--help":
 		fmt.Fprintln(c.stdout, usage)
 		return nil
@@ -400,7 +410,7 @@ func (c cli) print(response *http.Response, output string) error {
 
 func (c cli) login(args []string) error {
 	if len(args) == 0 {
-		return usageError{"login needs start or finish"}
+		return usageError{"login needs start, finish or google"}
 	}
 	step, flags := args[0], map[string]string{}
 	for i := 1; i < len(args); i += 2 {
@@ -434,34 +444,49 @@ func (c cli) login(args []string) error {
 		if len(flags) != 2 || challenge == "" || code == "" {
 			return usageError{"login finish takes --challenge ID --code CODE"}
 		}
-		body, _ := json.Marshal(map[string]string{"challenge_id": challenge, "credential": code})
-		response, err := c.do(server, request{method: "POST", path: "/v1/auth/login", body: body, contentType: "application/json"}, "")
-		if err != nil {
-			return err
+		return c.signIn(server, challenge, code)
+	case "google":
+		open := true
+		switch {
+		case len(flags) == 0:
+		case len(flags) == 1 && flags["browser"] == "false":
+			open = false
+		default:
+			return usageError{"login google takes only --browser false"}
 		}
-		defer response.Body.Close()
-		data, err := io.ReadAll(response.Body)
-		if err != nil {
-			return err
-		}
-		if response.StatusCode != http.StatusOK {
-			fmt.Fprintln(c.stdout, strings.TrimSpace(string(data)))
-			return statusError{response.Status}
-		}
-		var tokens tokenResponse
-		if err = json.Unmarshal(data, &tokens); err != nil || tokens.AccessToken == "" {
-			return errors.New("the sign-in response carries no token")
-		}
-		signedIn := tokens.session(c.now())
-		if err = c.store().put(server, &signedIn); err != nil {
-			return err
-		}
-		// The tokens stay in the credentials file; only the user is shown.
-		user, _ := json.MarshalIndent(json.RawMessage(tokens.User), "", "  ")
-		fmt.Fprintln(c.stdout, string(user))
-		return nil
+		return c.googleSignIn(server, open)
 	}
-	return usageError{"login needs start or finish"}
+	return usageError{"login needs start, finish or google"}
+}
+
+// signIn completes a challenge with credential, keeps the session and prints the user.
+func (c cli) signIn(server, challenge, credential string) error {
+	body, _ := json.Marshal(map[string]string{"challenge_id": challenge, "credential": credential})
+	response, err := c.do(server, request{method: "POST", path: "/v1/auth/login", body: body, contentType: "application/json"}, "")
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		fmt.Fprintln(c.stdout, strings.TrimSpace(string(data)))
+		return statusError{response.Status}
+	}
+	var tokens tokenResponse
+	if err = json.Unmarshal(data, &tokens); err != nil || tokens.AccessToken == "" {
+		return errors.New("the sign-in response carries no token")
+	}
+	signedIn := tokens.session(c.now())
+	if err = c.store().put(server, &signedIn); err != nil {
+		return err
+	}
+	// The tokens stay in the credentials file; only the user is shown.
+	user, _ := json.MarshalIndent(json.RawMessage(tokens.User), "", "  ")
+	fmt.Fprintln(c.stdout, string(user))
+	return nil
 }
 
 func (c cli) logout(args []string) error {

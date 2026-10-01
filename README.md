@@ -159,7 +159,7 @@ Windows 设置中选择“MSIME 共通后端（实时语音）”，地址填写
 
 ## 命令行（msime-cloud）
 
-`cmd/msime-cloud` 是给 AI 助手（以及人）在终端里使用水杉云的命令行：列出与查看接口、用邮箱或短信验证码登录、调用任意接口并自动附带和刷新会话。响应写到 stdout（JSON 自动缩进），提示写到 stderr；2xx 退出 0，服务端返回错误或调用失败退出 1（错误正文仍会打印），用法错误退出 2。
+`cmd/msime-cloud` 是给 AI 助手（以及人）在终端里使用水杉云的命令行：列出与查看接口、用邮箱或短信验证码或 Google 账号登录、调用任意接口并自动附带和刷新会话。每次后端发版会把 macOS（arm64/x86_64）、Linux（x86_64/arm64）和 Windows x86_64 的构建连同 `SHA256SUMS` 附在对应的 GitHub Release 上。响应写到 stdout（JSON 自动缩进），提示写到 stderr；2xx 退出 0，服务端返回错误或调用失败退出 1（错误正文仍会打印），用法错误退出 2。
 
 ```sh
 go build -o msime-cloud ./cmd/msime-cloud
@@ -167,13 +167,16 @@ go build -o msime-cloud ./cmd/msime-cloud
 ./msime-cloud describe GET /v1/users/me/dictionaries/pinyin   # 参数、请求体与响应 schema
 ./msime-cloud login start --email user@example.com      # 返回 challenge_id，验证码发到邮箱
 ./msime-cloud login finish --challenge <id> --code 123456
+./msime-cloud login google                              # 打开浏览器登录 Google，最多等待 5 分钟
 ./msime-cloud call GET /v1/users/me/dictionaries/pinyin -q q=你好
 echo '{"display_name":"昵称"}' | ./msime-cloud call PATCH /v1/users/me -
 ./msime-cloud call POST /v1/community/plugins -F file=@pack.zip
 MSIME_ADMIN_TOKEN=... ./msime-cloud call GET /api/overview -q days=7
 ```
 
-`/v1` 接口的列表和说明直接取自内嵌的 `internal/server/swagger/openapi.json`，随规范自动更新；匿名接口不发送令牌。`/api` 路径发往管理后台并使用 `MSIME_ADMIN_TOKEN`，其路由表写在 `cmd/msime-cloud/routes.go`，由测试对照 `internal/account/admin.go` 检查。默认连接 `https://api.msime.app` 与 `https://admin.msime.app`，可用 `MSIME_CLOUD_URL`、`MSIME_ADMIN_URL` 改为本地服务；设置 `MSIME_CLOUD_TOKEN` 时改用该设备令牌或访问令牌。登录会话按服务地址保存在用户配置目录下 `msime-cloud/credentials.json`（权限 0600，可用 `MSIME_CLOUD_CONFIG_DIR` 指定目录），刷新令牌经文件锁串行使用，避免多个命令同时刷新时重放旧令牌导致会话被撤销。
+`/v1` 接口的列表和说明直接取自内嵌的 `internal/server/swagger/openapi.json`，随规范自动更新；匿名接口不发送令牌。`/api` 路径发往管理后台并使用 `MSIME_ADMIN_TOKEN`，其路由表写在 `cmd/msime-cloud/routes.go`，由测试对照 `internal/account/admin.go` 检查。默认连接 `https://api.msime.app` 与 `https://admin.msime.app`，可用 `MSIME_CLOUD_URL`、`MSIME_ADMIN_URL` 改为本地服务；设置 `MSIME_CLOUD_TOKEN` 时改用该设备令牌或访问令牌。Google 登录沿用桌面端的回环流程：命令在 `127.0.0.1` 上临时监听，只打开指向 `accounts.google.com`、回调为本机监听地址的授权页，收到 `state` 匹配的回调后再用授权码登录；`--browser false` 只打印地址，由用户自行打开。Apple 和微信登录依赖官方 SDK 或已登记的 HTTPS 回调，命令行不支持。./msime-cloud login finish --challenge <id> --code 123456
+./msime-cloud login google                              # 打开浏览器登录 Google，最多等待 5 分钟
+用户配置目录下 `msime-cloud/credentials.json`（权限 0600，可用 `MSIME_CLOUD_CONFIG_DIR` 指定目录），刷新令牌经文件锁串行使用，避免多个命令同时刷新时重放旧令牌导致会话被撤销。
 
 ## Swagger / OpenAPI
 
