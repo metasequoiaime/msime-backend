@@ -127,11 +127,17 @@ type CommunitySkin struct {
 	moderation string
 	// Category 是图库分类，取值与候选窗皮肤相同（candidateSkinCategories），只在请求带 include=category 时出现（见 communitySkinItem）。
 	Category string `json:"category,omitempty"`
+	// Saved 和 Saves 是当前用户是否收藏（匿名为 false）和收藏总数，只在请求带 `fields=saved` 时出现（见 communitySavedFields）。
+	Saved *bool `json:"saved,omitempty"`
+	Saves *int  `json:"saves,omitempty"`
+	saved bool
+	saves int
 }
 
-// communitySkinItem 按客户端的声明裁剪条目：没有 fields=moderation 时去掉审核状态，没有 include=category 时去掉分类，未声明的响应因此与加入这些字段之前逐字节相同。
+// communitySkinItem 按客户端的声明裁剪条目：没有 fields=moderation 时去掉审核状态，没有 fields=saved 时去掉收藏状态，没有 include=category 时去掉分类，未声明的响应因此与加入这些字段之前逐字节相同。
 func communitySkinItem(v CommunitySkin, fields map[string]bool, category bool) CommunitySkin {
 	v.Moderation = ownerModeration(fields, v.moderation)
+	v.Saved, v.Saves = communitySavedFields(fields, v.saved, v.saves)
 	if !category {
 		v.Category = ""
 	}
@@ -154,6 +160,75 @@ func communityFields(r *http.Request, allowed ...string) (fields map[string]bool
 	return fields, true
 }
 
+// communitySavedFields 在客户端带 `fields=saved` 时返回条目的收藏状态和收藏总数，否则返回两个 nil，字段因此省略，未声明的响应与加入收藏之前逐字节相同。
+func communitySavedFields(fields map[string]bool, saved bool, saves int) (*bool, *int) {
+	if !fields["saved"] {
+		return nil, nil
+	}
+	return &saved, &saves
+}
+
+// communitySavedScope 返回列表查询接在 FROM 之后的联接和 ORDER BY：`scope=saved` 时只留下当前用户（$1）收藏的条目，按收藏时间倒序；其他 scope 联接为空，仍按发布时间倒序。saves 是收藏表，column 是其中指向条目的列，alias 是条目表的别名。
+func communitySavedScope(scope, saves, column, alias string) (join, order string) {
+	if scope != "saved" {
+		return "", alias + ".created_at DESC," + alias + ".id"
+	}
+	return "JOIN " + saves + " sv ON sv." + column + "=" + alias + ".id AND sv.user_id=$1 ", "sv.created_at DESC," + alias + ".id"
+}
+
+// communitySaveTarget 描述一种社区条目的收藏：items 是条目表（查询里的别名为 s），saves 是收藏表，column 是收藏表里指向条目的列，visible 是条目对当前用户（$2）可见、可以收藏的条件，notFound 是不可见时的错误码，与该条目的详情接口一致。
+type communitySaveTarget struct {
+	items, saves, column, visible, notFound string
+}
+
+// communitySave 处理 `PUT …/{id}/save`：请求体 `{"saved":bool}`，重复提交结果相同，返回收藏后的状态和收藏总数。条目不存在或对当前用户不可见时返回 404，取消收藏也一样，这时事务回滚，什么都不改。
+func (a *Service) communitySave(w http.ResponseWriter, r *http.Request, t communitySaveTarget) {
+	p, ok := a.principal(w, r, false)
+	if !ok {
+		return
+	}
+	var input struct {
+		Saved bool `json:"saved"`
+	}
+	if !read(w, r, &input) {
+		return
+	}
+	id := r.PathValue("id")
+	tx, e := a.store.pool.Begin(r.Context())
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if input.Saved {
+		_, e = tx.Exec(r.Context(), `INSERT INTO `+t.saves+`(`+t.column+`,user_id) SELECT s.id,$2 FROM `+t.items+` s WHERE s.id=$1 AND `+t.visible+` ON CONFLICT DO NOTHING`, id, p.UserID)
+	} else {
+		_, e = tx.Exec(r.Context(), `DELETE FROM `+t.saves+` WHERE `+t.column+`=$1 AND user_id=$2`, id, p.UserID)
+	}
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	var visible bool
+	var saves int
+	if e = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM `+t.items+` s WHERE s.id=$1 AND `+t.visible+`),(SELECT count(*) FROM `+t.saves+` WHERE `+t.column+`=$1)`, id, p.UserID).Scan(&visible, &saves); e != nil {
+		a.error(w, e)
+		return
+	}
+	if !visible {
+		writeError(w, 404, t.notFound)
+		return
+	}
+	if e = tx.Commit(r.Context()); e != nil {
+		a.error(w, e)
+		return
+	}
+	write(w, 200, struct {
+		Saved bool `json:"saved"`
+		Saves int  `json:"saves"`
+	}{input.Saved, saves})
+}
+
 // ownerModeration 返回条目的 moderation 值：客户端请求了 `fields=moderation` 时为读给作者的状态，否则为空，字段因此省略。
 func ownerModeration(fields map[string]bool, state string) string {
 	if fields["moderation"] {
@@ -168,12 +243,13 @@ const communitySelect = `SELECT s.id,s.name,s.description,
  (SELECT count(*) FROM community_skin_ratings WHERE skin_id=s.id),
  COALESCE((SELECT avg(stars) FROM community_skin_ratings WHERE skin_id=s.id),0),
  s.owner_id=$1,COALESCE((SELECT stars FROM community_skin_ratings WHERE skin_id=s.id AND user_id=$1),0),
- CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END,s.category
+ CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END,s.category,
+ (SELECT count(*) FROM community_skin_saves WHERE skin_id=s.id),EXISTS(SELECT 1 FROM community_skin_saves WHERE skin_id=s.id AND user_id=$1)
  FROM community_skins s JOIN auth_users u ON u.id=s.owner_id `
 
 func scanSkin(row interface{ Scan(...any) error }) (CommunitySkin, error) {
 	var s CommunitySkin
-	err := row.Scan(&s.ID, &s.Name, &s.Description, &s.Author, &s.Design, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.moderation, &s.Category)
+	err := row.Scan(&s.ID, &s.Name, &s.Description, &s.Author, &s.Design, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.moderation, &s.Category, &s.saves, &s.saved)
 	return s, err
 }
 
@@ -201,11 +277,11 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := r.URL.Query().Get("scope")
-	if scope != "" && scope != "mine" {
+	if scope != "" && scope != "mine" && scope != "saved" {
 		writeError(w, 400, "invalid_scope")
 		return
 	}
-	fields, ok := communityFields(r, "moderation")
+	fields, ok := communityFields(r, "moderation", "saved")
 	if !ok {
 		writeError(w, 400, "invalid_fields")
 		return
@@ -221,11 +297,12 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	viewer := a.communityViewer(r)
-	if scope == "mine" && viewer == "" {
+	if scope != "" && viewer == "" {
 		writeError(w, 401, "user_session_required")
 		return
 	}
-	rows, e := a.store.pool.Query(r.Context(), communitySelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($4='' OR s.owner_id=$1) AND (s.moderation<>'removed' OR s.owner_id=$1) AND ($5='' OR s.category=$5) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $3`, viewer, search, offset, scope, category)
+	join, order := communitySavedScope(scope, "community_skin_saves", "skin_id", "s")
+	rows, e := a.store.pool.Query(r.Context(), communitySelect+join+`WHERE strpos(lower(s.name),lower($2))>0 AND ($4<>'mine' OR s.owner_id=$1) AND (s.moderation<>'removed' OR s.owner_id=$1) AND ($5='' OR s.category=$5) ORDER BY `+order+` LIMIT 21 OFFSET $3`, viewer, search, offset, scope, category)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -251,7 +328,7 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"skins": items, "has_more": more})
 }
 func (a *Service) communityDetail(w http.ResponseWriter, r *http.Request) {
-	fields, ok := communityFields(r, "moderation")
+	fields, ok := communityFields(r, "moderation", "saved")
 	if !ok {
 		writeError(w, 400, "invalid_fields")
 		return
@@ -281,6 +358,11 @@ func (a *Service) writeCommunitySkin(w http.ResponseWriter, r *http.Request, vie
 		return
 	}
 	write(w, 200, communitySkinItem(v, fields, withCategory))
+}
+
+// communitySaveSkin 收藏或取消收藏键盘皮肤。已下架的作品只有作者本人可以收藏。
+func (a *Service) communitySaveSkin(w http.ResponseWriter, r *http.Request) {
+	a.communitySave(w, r, communitySaveTarget{items: "community_skins", saves: "community_skin_saves", column: "skin_id", visible: "(s.moderation<>'removed' OR s.owner_id=$2)", notFound: "skin_not_found"})
 }
 func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.principal(w, r, false)

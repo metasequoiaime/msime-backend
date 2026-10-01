@@ -610,7 +610,7 @@ func TestCommunityCandidateSkinBoundaries(t *testing.T) {
 			}
 		}
 	}
-	for query, code := range map[string]string{"offset=-1": "invalid_offset", "offset=100001": "invalid_offset", "offset=bad": "invalid_offset", "q=" + strings.Repeat("x", 129): "invalid_search", "q=%ff": "invalid_search", "scope=saved": "invalid_scope"} {
+	for query, code := range map[string]string{"offset=-1": "invalid_offset", "offset=100001": "invalid_offset", "offset=bad": "invalid_offset", "q=" + strings.Repeat("x", 129): "invalid_search", "q=%ff": "invalid_search", "scope=all": "invalid_scope"} {
 		w := apiRequest(t, mux, "GET", "/v1/community/candidate-skins?"+query, "", "", 400)
 		if !strings.Contains(w.Body.String(), code) {
 			t.Fatal(query, w.Body.String())

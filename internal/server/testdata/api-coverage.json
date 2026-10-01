@@ -45,7 +45,8 @@
       "internal/account/http_contract_test.go::TestProviderDiscoveryAndMalformedAuthenticationBodies"
     ],
     "POST /v1/auth/refresh": [
-      "internal/account/http_contract_test.go::TestAccountHTTPProfileRefreshLogoutDelete"
+      "internal/account/http_contract_test.go::TestAccountHTTPProfileRefreshLogoutDelete",
+      "internal/account/account_test.go::TestRefreshSupersededGrace"
     ],
     "POST /v1/auth/logout": [
       "internal/account/http_contract_test.go::TestAccountHTTPProfileRefreshLogoutDelete"
@@ -252,7 +253,8 @@
     "GET /v1/community/skins": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart",
       "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked",
-      "internal/account/admin_moderation_test.go::TestSkinAndPluginScopeMine"
+      "internal/account/admin_moderation_test.go::TestSkinAndPluginScopeMine",
+      "internal/account/community_saves_test.go::TestCommunitySkinSaves"
     ],
     "POST /v1/community/skins": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart",
@@ -260,7 +262,8 @@
     ],
     "GET /v1/community/skins/{id}": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart",
-      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked",
+      "internal/account/community_saves_test.go::TestCommunitySkinSaves"
     ],
     "PATCH /v1/community/skins/{id}": [
       "internal/account/community_test.go::TestCommunitySkinCategory"
@@ -272,12 +275,17 @@
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
     ],
     "PUT /v1/community/skins/{id}/rating": [
-      "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
+      "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart",
+      "internal/account/community_saves_test.go::TestCommunitySkinSaves"
+    ],
+    "PUT /v1/community/skins/{id}/save": [
+      "internal/account/community_saves_test.go::TestCommunitySkinSaves"
     ],
     "GET /v1/community/candidate-skins": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinBoundaries",
-      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked",
+      "internal/account/community_saves_test.go::TestCommunityCandidateSkinSaves"
     ],
     "POST /v1/community/candidate-skins": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
@@ -285,7 +293,8 @@
     ],
     "GET /v1/community/candidate-skins/{id}": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
-      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked",
+      "internal/account/community_saves_test.go::TestCommunityCandidateSkinSaves"
     ],
     "GET /v1/community/candidate-skins/sync": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinSync"
@@ -306,12 +315,18 @@
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
     ],
     "PUT /v1/community/candidate-skins/{id}/rating": [
-      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
+      "internal/account/community_saves_test.go::TestCommunityCandidateSkinSaves"
+    ],
+    "PUT /v1/community/candidate-skins/{id}/save": [
+      "internal/account/community_saves_test.go::TestCommunityCandidateSkinSaves",
+      "internal/account/community_saves_test.go::TestCommunityCandidateSkinSavesPrivate"
     ],
     "GET /v1/community/plugins": [
       "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle",
       "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked",
-      "internal/account/admin_moderation_test.go::TestSkinAndPluginScopeMine"
+      "internal/account/admin_moderation_test.go::TestSkinAndPluginScopeMine",
+      "internal/account/community_saves_test.go::TestCommunityPluginSaves"
     ],
     "POST /v1/community/plugins": [
       "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle",
@@ -319,7 +334,8 @@
     ],
     "GET /v1/community/plugins/{id}": [
       "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle",
-      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked",
+      "internal/account/community_saves_test.go::TestCommunityPluginSaves"
     ],
     "DELETE /v1/community/plugins/{id}": [
       "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle"
@@ -328,7 +344,11 @@
       "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle"
     ],
     "PUT /v1/community/plugins/{id}/rating": [
-      "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle"
+      "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle",
+      "internal/account/community_saves_test.go::TestCommunityPluginSaves"
+    ],
+    "PUT /v1/community/plugins/{id}/save": [
+      "internal/account/community_saves_test.go::TestCommunityPluginSaves"
     ],
     "GET /v1/community/resources": [
       "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation",
@@ -351,7 +371,8 @@
       "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation"
     ],
     "PUT /v1/community/resources/{id}/rating": [
-      "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation"
+      "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation",
+      "internal/account/community_saves_test.go::TestResourceRatingWithoutSave"
     ],
     "POST /v1/telemetry/events": [
       "internal/account/admin_test.go::TestAdminDataAndActions",

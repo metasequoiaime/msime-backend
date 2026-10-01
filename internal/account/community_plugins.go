@@ -98,6 +98,11 @@ type CommunityPlugin struct {
 	// Moderation 是审核状态，只出现在作者自己的作品上，且只在带 `fields=moderation` 时出现（见 communityFields）。
 	Moderation string `json:"moderation,omitempty"`
 	moderation string
+	// Saved 和 Saves 是当前用户是否收藏（匿名为 false）和收藏总数，只在请求带 `fields=saved` 时出现（见 communitySavedFields）。
+	Saved *bool `json:"saved,omitempty"`
+	Saves *int  `json:"saves,omitempty"`
+	saved bool
+	saves int
 }
 
 const pluginSelect = `SELECT p.id,p.kind,p.plugin_id,p.name,p.description,
@@ -106,12 +111,13 @@ const pluginSelect = `SELECT p.id,p.kind,p.plugin_id,p.name,p.description,
  (SELECT count(*) FROM community_plugin_ratings WHERE pack_id=p.id),
  COALESCE((SELECT avg(stars) FROM community_plugin_ratings WHERE pack_id=p.id),0),
  p.owner_id=$1,COALESCE((SELECT stars FROM community_plugin_ratings WHERE pack_id=p.id AND user_id=$1),0),p.created_at,
- CASE WHEN p.owner_id=$1 THEN p.moderation ELSE '' END
+ CASE WHEN p.owner_id=$1 THEN p.moderation ELSE '' END,
+ (SELECT count(*) FROM community_plugin_saves WHERE pack_id=p.id),EXISTS(SELECT 1 FROM community_plugin_saves WHERE pack_id=p.id AND user_id=$1)
  FROM community_plugins p JOIN auth_users u ON u.id=p.owner_id `
 
 func scanCommunityPlugin(row interface{ Scan(...any) error }) (CommunityPlugin, error) {
 	var p CommunityPlugin
-	err := row.Scan(&p.ID, &p.Kind, &p.PluginID, &p.Name, &p.Description, &p.Author, &p.Version, &p.License, &p.Size, &p.SHA256, &p.Downloads, &p.RatingCount, &p.RatingAverage, &p.Owned, &p.MyRating, &p.CreatedAt, &p.moderation)
+	err := row.Scan(&p.ID, &p.Kind, &p.PluginID, &p.Name, &p.Description, &p.Author, &p.Version, &p.License, &p.Size, &p.SHA256, &p.Downloads, &p.RatingCount, &p.RatingAverage, &p.Owned, &p.MyRating, &p.CreatedAt, &p.moderation, &p.saves, &p.saved)
 	return p, err
 }
 
@@ -154,21 +160,22 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := r.URL.Query().Get("scope")
-	if scope != "" && scope != "mine" {
+	if scope != "" && scope != "mine" && scope != "saved" {
 		writeError(w, 400, "invalid_scope")
 		return
 	}
-	fields, ok := communityFields(r, "moderation")
+	fields, ok := communityFields(r, "moderation", "saved")
 	if !ok {
 		writeError(w, 400, "invalid_fields")
 		return
 	}
 	viewer := a.communityViewer(r)
-	if scope == "mine" && viewer == "" {
+	if scope != "" && viewer == "" {
 		writeError(w, 401, "user_session_required")
 		return
 	}
-	rows, e := a.store.pool.Query(r.Context(), pluginSelect+`WHERE strpos(lower(p.name),lower($2))>0 AND ($3='' OR p.kind=$3) AND ($5='' OR p.owner_id=$1) AND (p.moderation<>'removed' OR p.owner_id=$1) ORDER BY p.created_at DESC,p.id LIMIT 21 OFFSET $4`, viewer, search, kind, offset, scope)
+	join, order := communitySavedScope(scope, "community_plugin_saves", "pack_id", "p")
+	rows, e := a.store.pool.Query(r.Context(), pluginSelect+join+`WHERE strpos(lower(p.name),lower($2))>0 AND ($3='' OR p.kind=$3) AND ($5<>'mine' OR p.owner_id=$1) AND (p.moderation<>'removed' OR p.owner_id=$1) ORDER BY `+order+` LIMIT 21 OFFSET $4`, viewer, search, kind, offset, scope)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -182,6 +189,7 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.Moderation = ownerModeration(fields, v.moderation)
+		v.Saved, v.Saves = communitySavedFields(fields, v.saved, v.saves)
 		items = append(items, v)
 	}
 	if e = rows.Err(); e != nil {
@@ -196,7 +204,7 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Service) communityPluginDetail(w http.ResponseWriter, r *http.Request) {
-	fields, ok := communityFields(r, "moderation")
+	fields, ok := communityFields(r, "moderation", "saved")
 	if !ok {
 		writeError(w, 400, "invalid_fields")
 		return
@@ -211,7 +219,13 @@ func (a *Service) communityPluginDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	v.Moderation = ownerModeration(fields, v.moderation)
+	v.Saved, v.Saves = communitySavedFields(fields, v.saved, v.saves)
 	write(w, 200, v)
+}
+
+// communityPluginSave 收藏或取消收藏插件。已下架的作品只有作者本人可以收藏。
+func (a *Service) communityPluginSave(w http.ResponseWriter, r *http.Request) {
+	a.communitySave(w, r, communitySaveTarget{items: "community_plugins", saves: "community_plugin_saves", column: "pack_id", visible: "(s.moderation<>'removed' OR s.owner_id=$2)", notFound: "plugin_not_found"})
 }
 
 func (a *Service) communityPluginPublish(w http.ResponseWriter, r *http.Request) {

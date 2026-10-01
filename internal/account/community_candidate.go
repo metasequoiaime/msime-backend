@@ -102,6 +102,11 @@ type CommunityCandidateSkin struct {
 	moderation string
 	// Category 是图库分类，同样只在客户端用 include=category 声明支持时出现（见 candidateItem）。
 	Category string `json:"category,omitempty"`
+	// Saved 和 Saves 是当前用户是否收藏（匿名为 false）和收藏总数，只在请求带 `fields=saved` 时出现（见 communitySavedFields）。
+	Saved *bool `json:"saved,omitempty"`
+	Saves *int  `json:"saves,omitempty"`
+	saved bool
+	saves int
 }
 
 // candidateSkinCategories 是图库分类的全部取值，候选窗皮肤与社区键盘皮肤共用，与 community_candidate_skin_schema.sql 的 community_candidate_skins_category_check、community_schema.sql 的 community_skins_category_check 一致。分类只是发布元数据，不属于 skin.toml 或键盘皮肤的 design；缺省为 other。
@@ -141,9 +146,9 @@ func candidateLegacy(v CommunityCandidateSkin) CommunityCandidateSkin {
 	return v
 }
 
-// candidateFields 读取列表和详情的 `fields=` 开关：sync（同步字段和作者的私有作品）与 moderation，可单独使用，也可写成 `fields=sync,moderation`；出现其他名称时 ok 为 false。
+// candidateFields 读取列表和详情的 `fields=` 开关：sync（同步字段和作者的私有作品）、moderation 与 saved，可单独使用，也可逗号组合，例如 `fields=sync,moderation`；出现其他名称时 ok 为 false。
 func candidateFields(r *http.Request) (fields map[string]bool, ok bool) {
-	return communityFields(r, "sync", "moderation")
+	return communityFields(r, "sync", "moderation", "saved")
 }
 
 const candidateSelect = `SELECT s.id,s.package_id,s.name,s.description,
@@ -154,13 +159,14 @@ const candidateSelect = `SELECT s.id,s.package_id,s.name,s.description,
  COALESCE((SELECT avg(stars) FROM community_candidate_skin_ratings WHERE skin_id=s.id),0),
  s.owner_id=$1,COALESCE((SELECT stars FROM community_candidate_skin_ratings WHERE skin_id=s.id AND user_id=$1),0),s.created_at,
  s.visibility,s.updated_at,CASE WHEN s.owner_id=$1 THEN s.request_sha256 ELSE '' END,s.category,
- CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END
+ CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END,
+ (SELECT count(*) FROM community_candidate_skin_saves WHERE skin_id=s.id),EXISTS(SELECT 1 FROM community_candidate_skin_saves WHERE skin_id=s.id AND user_id=$1)
  FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id
  CROSS JOIN LATERAL (SELECT COALESCE(sum(size),0) AS size,count(*) AS files FROM community_candidate_skin_files WHERE skin_id=s.id) f `
 
 func scanCandidateSkin(row interface{ Scan(...any) error }) (CommunityCandidateSkin, error) {
 	var s CommunityCandidateSkin
-	err := row.Scan(&s.ID, &s.PackageID, &s.Name, &s.Description, &s.Author, &s.Version, &s.License.Code, &s.License.Assets, &s.License.Source, &s.Size, &s.FileCount, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.CreatedAt, &s.Visibility, &s.UpdatedAt, &s.RequestSHA256, &s.Category, &s.moderation)
+	err := row.Scan(&s.ID, &s.PackageID, &s.Name, &s.Description, &s.Author, &s.Version, &s.License.Code, &s.License.Assets, &s.License.Source, &s.Size, &s.FileCount, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.CreatedAt, &s.Visibility, &s.UpdatedAt, &s.RequestSHA256, &s.Category, &s.moderation, &s.saves, &s.saved)
 	return s, err
 }
 
@@ -396,7 +402,7 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	scope := r.URL.Query().Get("scope")
-	if scope != "" && scope != "mine" {
+	if scope != "" && scope != "mine" && scope != "saved" {
 		writeError(w, 400, "invalid_scope")
 		return
 	}
@@ -417,12 +423,13 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	viewer := a.communityViewer(r)
-	if scope == "mine" && viewer == "" {
+	if scope != "" && viewer == "" {
 		writeError(w, 401, "user_session_required")
 		return
 	}
-	// Private rows appear only in the author's own opted-in list: released clients reject an item whose license assets are empty, which a private row may have, and one such item would fail the whole page.
-	rows, e := a.store.pool.Query(r.Context(), candidateSelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($3='' OR s.owner_id=$1) AND (s.visibility='public' OR ($3<>'' AND $5)) AND (s.moderation<>'removed' OR s.owner_id=$1) AND ($6='' OR s.category=$6) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $4`, viewer, search, scope, offset, sync, category)
+	// 私有作品只出现在作者自己、且声明了 fields=sync 的 mine 或 saved 列表里：已发布的客户端拒绝 license assets 为空的条目，而私有作品可以为空，一条就会让整页解析失败。
+	join, order := communitySavedScope(scope, "community_candidate_skin_saves", "skin_id", "s")
+	rows, e := a.store.pool.Query(r.Context(), candidateSelect+join+`WHERE strpos(lower(s.name),lower($2))>0 AND ($3<>'mine' OR s.owner_id=$1) AND (s.visibility='public' OR ($3<>'' AND $5 AND s.owner_id=$1)) AND (s.moderation<>'removed' OR s.owner_id=$1) AND ($6='' OR s.category=$6) ORDER BY `+order+` LIMIT 21 OFFSET $4`, viewer, search, scope, offset, sync, category)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -437,6 +444,7 @@ func (a *Service) communityCandidateList(w http.ResponseWriter, r *http.Request)
 		}
 		v = candidateItem(v, sync, withCategory)
 		v.Moderation = ownerModeration(fields, v.moderation)
+		v.Saved, v.Saves = communitySavedFields(fields, v.saved, v.saves)
 		items = append(items, v)
 	}
 	if e = rows.Err(); e != nil {
@@ -473,7 +481,13 @@ func (a *Service) communityCandidateDetail(w http.ResponseWriter, r *http.Reques
 	}
 	v = candidateItem(v, sync, withCategory)
 	v.Moderation = ownerModeration(fields, v.moderation)
+	v.Saved, v.Saves = communitySavedFields(fields, v.saved, v.saves)
 	write(w, 200, v)
+}
+
+// communityCandidateSave 收藏或取消收藏候选窗皮肤。别人的私有作品和已下架的作品返回 404，作者本人的不受限制。
+func (a *Service) communityCandidateSave(w http.ResponseWriter, r *http.Request) {
+	a.communitySave(w, r, communitySaveTarget{items: "community_candidate_skins", saves: "community_candidate_skin_saves", column: "skin_id", visible: "(s.visibility='public' OR s.owner_id=$2) AND (s.moderation<>'removed' OR s.owner_id=$2)", notFound: "skin_not_found"})
 }
 func (a *Service) communityCandidatePreview(w http.ResponseWriter, r *http.Request) {
 	var path string

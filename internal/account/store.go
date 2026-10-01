@@ -198,6 +198,7 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_skins sk ON sk.owner_id=u.id
  LEFT JOIN community_skin_downloads sd ON sd.user_id=u.id
  LEFT JOIN community_skin_ratings sr ON sr.user_id=u.id
+ LEFT JOIN community_skin_saves ssv ON ssv.user_id=u.id AND ssv.created_at IS NULL
  LEFT JOIN translation_cache tc ON false
  LEFT JOIN candidate_skins ck ON false
  LEFT JOIN candidate_skin_resources ckr ON false
@@ -205,9 +206,11 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_candidate_skin_files ccf ON false
  LEFT JOIN community_candidate_skin_downloads ccd ON ccd.user_id=u.id
  LEFT JOIN community_candidate_skin_ratings ccr ON ccr.user_id=u.id
+ LEFT JOIN community_candidate_skin_saves ccv ON ccv.user_id=u.id AND ccv.created_at IS NULL
  LEFT JOIN community_plugins cpl ON cpl.owner_id=u.id
  LEFT JOIN community_plugin_downloads cpd ON cpd.user_id=u.id
  LEFT JOIN community_plugin_ratings cpr ON cpr.user_id=u.id
+ LEFT JOIN community_plugin_saves cpv ON cpv.user_id=u.id AND cpv.created_at IS NULL
  LEFT JOIN auth_used_refresh ur ON false AND ur.used_at IS NULL
  LEFT JOIN site_settings ss ON false
  LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture||u.avatar_key='' AND ai.updated_at IS NULL

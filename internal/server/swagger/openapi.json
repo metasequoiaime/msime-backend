@@ -1753,7 +1753,7 @@
             }
           },
           "409": {
-            "description": "请求无效、凭据失效、需要重新登录、身份冲突、格式错误、限流或功能不可用。",
+            "description": "refresh_superseded：该刷新令牌 30 秒内刚被轮换，会话仍有效。",
             "content": {
               "application/json": {
                 "schema": {
@@ -1793,7 +1793,7 @@
             }
           }
         },
-        "description": "JSON 请求最多 16 KiB。绑定身份需要在挑战创建和验证时携带同一用户的会话令牌；绑定和注销要求最近 10 分钟内登录。设备令牌不能用于用户管理。",
+        "description": "JSON 请求最多 16 KiB。绑定身份需要在挑战创建和验证时携带同一用户的会话令牌；绑定和注销要求最近 10 分钟内登录。设备令牌不能用于用户管理。 刷新令牌轮换后 30 秒内再次提交旧令牌（并发刷新输掉竞争）时返回 409 refresh_superseded，会话不撤销，调用方应改用并发请求拿到的新令牌；超过 30 秒的重放返回 401 并撤销整个会话。",
         "requestBody": {
           "required": true,
           "content": {
@@ -10607,11 +10607,12 @@
               "type": "string",
               "enum": [
                 "",
-                "mine"
+                "mine",
+                "saved"
               ],
               "default": ""
             },
-            "description": "mine 只列出自己的作品（含已下架），需要用户会话，否则 401 user_session_required。"
+            "description": "mine 只列出自己的作品（含已下架）；saved 只列出自己收藏的作品，按收藏时间倒序。两者都需要用户会话，否则 401 user_session_required；其他值返回 400 invalid_scope。"
           },
           {
             "name": "fields",
@@ -10620,11 +10621,13 @@
               "type": "string",
               "enum": [
                 "",
-                "moderation"
+                "moderation",
+                "saved",
+                "moderation,saved"
               ],
               "default": ""
             },
-            "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
+            "description": "逗号分隔：moderation 表示在自己的作品上接收 moderation 审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
           },
           {
             "name": "category",
@@ -10658,7 +10661,7 @@
             "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
-        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -10843,6 +10846,14 @@
                               "other"
                             ],
                             "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
+                          },
+                          "saved": {
+                            "type": "boolean",
+                            "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                          },
+                          "saves": {
+                            "type": "integer",
+                            "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                           }
                         }
                       }
@@ -10862,7 +10873,7 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "皮肤不存在或非作者"
@@ -10889,7 +10900,7 @@
           }
         ],
         "parameters": [],
-        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
         "responses": {
           "201": {
             "description": "成功",
@@ -10913,7 +10924,7 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "皮肤不存在或非作者"
@@ -11154,11 +11165,13 @@
               "type": "string",
               "enum": [
                 "",
-                "moderation"
+                "moderation",
+                "saved",
+                "moderation,saved"
               ],
               "default": ""
             },
-            "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
+            "description": "逗号分隔：moderation 表示在自己的作品上接收 moderation 审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
           },
           {
             "name": "include",
@@ -11174,7 +11187,7 @@
             "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
-        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11354,6 +11367,14 @@
                         "other"
                       ],
                       "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -11367,7 +11388,7 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "皮肤不存在或非作者"
@@ -11430,7 +11451,7 @@
             "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
-        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。仅作者可修改（他人或不存在返回 404 skin_not_found），请求体只有 category（缺省、null 或未知值返回 400 invalid_category），返回与详情相同的作品；不改变审核状态，设为当前值同样返回 200。详见 docs/skin-community.md。",
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。仅作者可修改（他人或不存在返回 404 skin_not_found），请求体只有 category（缺省、null 或未知值返回 400 invalid_category），返回与详情相同的作品；不改变审核状态，设为当前值同样返回 200。详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11610,6 +11631,14 @@
                         "other"
                       ],
                       "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -11623,7 +11652,7 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "皮肤不存在或非作者"
@@ -11690,7 +11719,7 @@
             }
           }
         ],
-        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11714,7 +11743,7 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "皮肤不存在或非作者"
@@ -11753,7 +11782,7 @@
             }
           }
         ],
-        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11896,7 +11925,7 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "皮肤不存在或非作者"
@@ -11935,7 +11964,7 @@
             }
           }
         ],
-        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -11959,7 +11988,7 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "皮肤不存在或非作者"
@@ -11989,6 +12018,96 @@
                 },
                 "required": [
                   "stars"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/community/skins/{id}/save": {
+      "put": {
+        "summary": "收藏或取消收藏皮肤",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "saved": {
+                      "type": "boolean"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数"
+                    }
+                  },
+                  "required": [
+                    "saved",
+                    "saves"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "saved": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "saved"
                 ],
                 "additionalProperties": false
               }
@@ -12030,10 +12149,12 @@
               "type": "string",
               "enum": [
                 "",
-                "mine"
+                "mine",
+                "saved"
               ],
               "default": ""
-            }
+            },
+            "description": "mine 只列出自己的作品（含已下架）；saved 只列出自己收藏的作品，按收藏时间倒序。两者都需要用户会话，否则 401 user_session_required；其他值返回 400 invalid_scope。"
           },
           {
             "name": "fields",
@@ -12044,11 +12165,15 @@
                 "",
                 "sync",
                 "moderation",
-                "sync,moderation"
+                "saved",
+                "sync,moderation",
+                "sync,saved",
+                "moderation,saved",
+                "sync,moderation,saved"
               ],
               "default": ""
             },
-            "description": "逗号分隔：sync 表示在响应中接收同步字段并可看到自己的私有作品；moderation 表示在自己的作品上接收审核状态。其他值返回 400 invalid_fields。"
+            "description": "逗号分隔：sync 表示在响应中接收同步字段并可看到自己的私有作品；moderation 表示在自己的作品上接收审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。"
           },
           {
             "name": "category",
@@ -12082,7 +12207,7 @@
             "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
-        "description": "公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，需要用户会话；只有 scope=mine 且 fields=sync 时才包含自己的私有作品。category 按图库分类筛选，未知分类返回 400 invalid_category。 详见 docs/skin-community.md。",
+        "description": "公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，scope=saved 只列出自己收藏的作品（按收藏时间倒序），都需要用户会话；只有 scope 非空且 fields 含 sync 时才包含自己的私有作品，别人的私有作品永远不出现。category 按图库分类筛选，未知分类返回 400 invalid_category。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -12203,6 +12328,14 @@
                               "removed"
                             ],
                             "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                          },
+                          "saved": {
+                            "type": "boolean",
+                            "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                          },
+                          "saves": {
+                            "type": "integer",
+                            "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                           }
                         }
                       }
@@ -12222,10 +12355,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -12381,6 +12514,14 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -12394,10 +12535,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -12532,6 +12673,14 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -12692,10 +12841,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -12738,11 +12887,15 @@
                 "",
                 "sync",
                 "moderation",
-                "sync,moderation"
+                "saved",
+                "sync,moderation",
+                "sync,saved",
+                "moderation,saved",
+                "sync,moderation,saved"
               ],
               "default": ""
             },
-            "description": "逗号分隔：sync 表示在响应中接收同步字段并可看到自己的私有作品；moderation 表示在自己的作品上接收审核状态。其他值返回 400 invalid_fields。"
+            "description": "逗号分隔：sync 表示在响应中接收同步字段并可看到自己的私有作品；moderation 表示在自己的作品上接收审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。"
           },
           {
             "name": "include",
@@ -12873,6 +13026,14 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -12886,10 +13047,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -13054,6 +13215,14 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -13067,10 +13236,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -13296,6 +13465,14 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -13309,10 +13486,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -13408,10 +13585,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -13481,10 +13658,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -13564,10 +13741,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -13606,7 +13783,7 @@
             }
           }
         ],
-        "description": "评分需先下载且不能自评，重复提交更新同一条评分；私有作品返回 404。 详见 docs/skin-community.md。",
+        "description": "登录即可评分，不需要先下载；不能给自己的作品评分（403 download_before_rating_or_own_skin），重复提交更新同一条评分；不存在、私有或已下架的作品返回 404。 详见 docs/skin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -13630,10 +13807,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "皮肤不存在、为他人的私有作品或非作者"
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
           },
           "409": {
             "description": "配额已满、UUID 冲突或替换包 id 不符"
@@ -13663,6 +13840,99 @@
                 },
                 "required": [
                   "stars"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/community/candidate-skins/{id}/save": {
+      "put": {
+        "summary": "收藏或取消收藏候选窗皮肤",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数。不存在、已下架（作者本人除外）或别人的私有作品返回 404 skin_not_found。 详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "saved": {
+                      "type": "boolean"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数"
+                    }
+                  },
+                  "required": [
+                    "saved",
+                    "saves"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或图片无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在、已下架、为他人的私有作品或非作者"
+          },
+          "409": {
+            "description": "配额已满、UUID 冲突或替换包 id 不符"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或图片处理繁忙"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "saved": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "saved"
                 ],
                 "additionalProperties": false
               }
@@ -13719,11 +13989,12 @@
               "type": "string",
               "enum": [
                 "",
-                "mine"
+                "mine",
+                "saved"
               ],
               "default": ""
             },
-            "description": "mine 只列出自己的作品（含已下架），需要用户会话，否则 401 user_session_required。"
+            "description": "mine 只列出自己的作品（含已下架）；saved 只列出自己收藏的作品，按收藏时间倒序。两者都需要用户会话，否则 401 user_session_required；其他值返回 400 invalid_scope。"
           },
           {
             "name": "fields",
@@ -13732,14 +14003,16 @@
               "type": "string",
               "enum": [
                 "",
-                "moderation"
+                "moderation",
+                "saved",
+                "moderation,saved"
               ],
               "default": ""
             },
-            "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
+            "description": "逗号分隔：moderation 表示在自己的作品上接收 moderation 审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
           }
         ],
-        "description": "按发布时间倒序每页 20 条，可按 kind 过滤、按名称搜索，不含 zip 包字节。scope=mine 只列出自己的作品（含已下架），需要用户会话。 详见 docs/plugin-community.md。",
+        "description": "按发布时间倒序每页 20 条，可按 kind 过滤、按名称搜索，不含 zip 包字节。scope=mine 只列出自己的作品（含已下架），scope=saved 只列出自己收藏的作品（按收藏时间倒序），都需要用户会话。 详见 docs/plugin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -13822,6 +14095,14 @@
                               "removed"
                             ],
                             "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                          },
+                          "saved": {
+                            "type": "boolean",
+                            "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                          },
+                          "saves": {
+                            "type": "integer",
+                            "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                           }
                         }
                       }
@@ -13841,10 +14122,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "插件不存在或非作者"
+            "description": "插件不存在、已下架或非作者"
           },
           "409": {
             "description": "配额已满或 UUID 冲突"
@@ -13948,6 +14229,14 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -13961,10 +14250,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "插件不存在或非作者"
+            "description": "插件不存在、已下架或非作者"
           },
           "409": {
             "description": "配额已满或 UUID 冲突"
@@ -14061,6 +14350,14 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -14162,11 +14459,13 @@
               "type": "string",
               "enum": [
                 "",
-                "moderation"
+                "moderation",
+                "saved",
+                "moderation,saved"
               ],
               "default": ""
             },
-            "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
+            "description": "逗号分隔：moderation 表示在自己的作品上接收 moderation 审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
           }
         ],
         "description": "公开详情；登录时额外返回自己的评分与是否为作者。 详见 docs/plugin-community.md。",
@@ -14246,6 +14545,14 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "saved": {
+                      "type": "boolean",
+                      "description": "当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数。仅在请求带 fields=saved 时出现。"
                     }
                   }
                 }
@@ -14259,10 +14566,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "插件不存在或非作者"
+            "description": "插件不存在、已下架或非作者"
           },
           "409": {
             "description": "配额已满或 UUID 冲突"
@@ -14323,10 +14630,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "插件不存在或非作者"
+            "description": "插件不存在、已下架或非作者"
           },
           "409": {
             "description": "配额已满或 UUID 冲突"
@@ -14417,10 +14724,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "插件不存在或非作者"
+            "description": "插件不存在、已下架或非作者"
           },
           "409": {
             "description": "配额已满或 UUID 冲突"
@@ -14459,7 +14766,7 @@
             }
           }
         ],
-        "description": "评分需先下载且不能自评，重复提交更新同一条评分。 详见 docs/plugin-community.md。",
+        "description": "登录即可评分，不需要先下载；不能给自己的作品评分（403 download_before_rating_or_own_plugin），重复提交更新同一条评分；不存在或已下架的插件返回 404。 详见 docs/plugin-community.md。",
         "responses": {
           "200": {
             "description": "成功",
@@ -14483,10 +14790,10 @@
             "description": "需要用户登录"
           },
           "403": {
-            "description": "尚未下载或正在评价自己的作品"
+            "description": "正在评价自己的作品"
           },
           "404": {
-            "description": "插件不存在或非作者"
+            "description": "插件不存在、已下架或非作者"
           },
           "409": {
             "description": "配额已满或 UUID 冲突"
@@ -14516,6 +14823,99 @@
                 },
                 "required": [
                   "stars"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/community/plugins/{id}/save": {
+      "put": {
+        "summary": "收藏或取消收藏插件",
+        "tags": [
+          "插件社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "请求体为 {\"saved\":bool}，重复提交结果相同，返回收藏状态与收藏总数。不存在或已下架（作者本人除外）的插件返回 404 plugin_not_found。 详见 docs/plugin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "saved": {
+                      "type": "boolean"
+                    },
+                    "saves": {
+                      "type": "integer",
+                      "description": "收藏总数"
+                    }
+                  },
+                  "required": [
+                    "saved",
+                    "saves"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或 zip 包无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "正在评价自己的作品"
+          },
+          "404": {
+            "description": "插件不存在、已下架或非作者"
+          },
+          "409": {
+            "description": "配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或校验繁忙"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "saved": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "saved"
                 ],
                 "additionalProperties": false
               }
@@ -14587,7 +14987,7 @@
             "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
           }
         ],
-        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重；收藏后可评分，不允许自评。查看版本不会自动覆盖个人词库。",
+        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重。登录即可评分，不需要先收藏；不能给自己的作品评分（403 save_before_rating_or_own_resource），不存在或已下架的作品返回 404 resource_not_found。查看版本不会自动覆盖个人词库。",
         "responses": {
           "200": {
             "description": "成功",
@@ -14718,7 +15118,7 @@
             "description": "需要登录"
           },
           "403": {
-            "description": "需先收藏且不能自评"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "作品不存在或非作者"
@@ -14745,7 +15145,7 @@
           }
         ],
         "parameters": [],
-        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重；收藏后可评分，不允许自评。查看版本不会自动覆盖个人词库。",
+        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重。登录即可评分，不需要先收藏；不能给自己的作品评分（403 save_before_rating_or_own_resource），不存在或已下架的作品返回 404 resource_not_found。查看版本不会自动覆盖个人词库。",
         "responses": {
           "200": {
             "description": "成功",
@@ -14772,7 +15172,7 @@
             "description": "需要登录"
           },
           "403": {
-            "description": "需先收藏且不能自评"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "作品不存在或非作者"
@@ -14950,7 +15350,7 @@
             "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
           }
         ],
-        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重；收藏后可评分，不允许自评。查看版本不会自动覆盖个人词库。",
+        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重。登录即可评分，不需要先收藏；不能给自己的作品评分（403 save_before_rating_or_own_resource），不存在或已下架的作品返回 404 resource_not_found。查看版本不会自动覆盖个人词库。",
         "responses": {
           "200": {
             "description": "成功",
@@ -15070,7 +15470,7 @@
             "description": "需要登录"
           },
           "403": {
-            "description": "需先收藏且不能自评"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "作品不存在或非作者"
@@ -15107,7 +15507,7 @@
             }
           }
         ],
-        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重；收藏后可评分，不允许自评。查看版本不会自动覆盖个人词库。",
+        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重。登录即可评分，不需要先收藏；不能给自己的作品评分（403 save_before_rating_or_own_resource），不存在或已下架的作品返回 404 resource_not_found。查看版本不会自动覆盖个人词库。",
         "responses": {
           "200": {
             "description": "成功",
@@ -15131,7 +15531,7 @@
             "description": "需要登录"
           },
           "403": {
-            "description": "需先收藏且不能自评"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "作品不存在或非作者"
@@ -15170,7 +15570,7 @@
             }
           }
         ],
-        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重；收藏后可评分，不允许自评。查看版本不会自动覆盖个人词库。",
+        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重。登录即可评分，不需要先收藏；不能给自己的作品评分（403 save_before_rating_or_own_resource），不存在或已下架的作品返回 404 resource_not_found。查看版本不会自动覆盖个人词库。",
         "responses": {
           "200": {
             "description": "成功",
@@ -15200,7 +15600,7 @@
             "description": "需要登录"
           },
           "403": {
-            "description": "需先收藏且不能自评"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "作品不存在或非作者"
@@ -15285,7 +15685,7 @@
             }
           }
         ],
-        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重；收藏后可评分，不允许自评。查看版本不会自动覆盖个人词库。",
+        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重。登录即可评分，不需要先收藏；不能给自己的作品评分（403 save_before_rating_or_own_resource），不存在或已下架的作品返回 404 resource_not_found。查看版本不会自动覆盖个人词库。",
         "responses": {
           "200": {
             "description": "成功",
@@ -15309,7 +15709,7 @@
             "description": "需要登录"
           },
           "403": {
-            "description": "需先收藏且不能自评"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "作品不存在或非作者"
@@ -15367,7 +15767,7 @@
             }
           }
         ],
-        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重；收藏后可评分，不允许自评。查看版本不会自动覆盖个人词库。",
+        "description": "发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重。登录即可评分，不需要先收藏；不能给自己的作品评分（403 save_before_rating_or_own_resource），不存在或已下架的作品返回 404 resource_not_found。查看版本不会自动覆盖个人词库。",
         "responses": {
           "200": {
             "description": "成功",
@@ -15391,7 +15791,7 @@
             "description": "需要登录"
           },
           "403": {
-            "description": "需先收藏且不能自评"
+            "description": "正在评价自己的作品"
           },
           "404": {
             "description": "作品不存在或非作者"
