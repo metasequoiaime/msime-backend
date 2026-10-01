@@ -339,3 +339,30 @@ func TestClientIPHeaderConfig(t *testing.T) {
 		}
 	}
 }
+
+// `auth.community.official_skin_publishers` 按完整路径严格解码，名单格式错误时无论用户体系是否启用都拒绝启动。
+func TestOfficialSkinPublishersConfig(t *testing.T) {
+	t.Setenv("CONFIG_TEST_TOKEN", strings.Repeat("a", 32))
+	id := strings.Repeat("0123456789abcdef", 4)
+	path := filepath.Join(t.TempDir(), "config.json")
+	for body, ok := range map[string]bool{
+		`["` + id + `"]`:                      true,
+		`[]`:                                  true,
+		`["` + strings.ToUpper(id) + `"]`:     false,
+		`["` + id + `","` + id + `"]`:         false,
+		`["` + id[:63] + `"]`:                 false,
+		`["` + strings.Repeat("g", 64) + `"]`: false,
+	} {
+		config := `{"clients":[{"id":"local","token_env":"CONFIG_TEST_TOKEN","requests_per_minute":1}],"auth":{"community":{"official_skin_publishers":` + body + `}}}`
+		if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadConfig(path)
+		if (err == nil) != ok {
+			t.Fatalf("%s: %v", body, err)
+		}
+		if ok && body != `[]` && (len(c.Auth.Community.OfficialSkinPublishers) != 1 || c.Auth.Community.OfficialSkinPublishers[0] != id) {
+			t.Fatalf("%s decoded as %v", body, c.Auth.Community.OfficialSkinPublishers)
+		}
+	}
+}

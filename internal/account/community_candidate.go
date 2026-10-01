@@ -42,6 +42,8 @@ const (
 	candidatePublishesPerHour = 10
 	// Private creates and replacements are background sync traffic, so they get their own hourly budget instead of the gallery's.
 	candidateLibraryWritesPerHour = 60
+	// 官方发布账号（auth.community.official_skin_publishers）不受公开 20 款的限制，公开作品只受每账号总数上限约束；两份每小时额度都换成这个更宽的值，足够在一小时内把整个库同步、替换并公开一遍，同时让配置失误或客户端死循环仍有上限。
+	candidateOfficialWritesPerHour = 200
 )
 
 // candidateImageSlots bounds concurrent image decoding per process, because /v1/community routes bypass the server's MaxConcurrent limit and a package can decode up to 8 MP.
@@ -627,7 +629,7 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 		writeError(w, 409, "candidate_skin_library_limit")
 		return
 	}
-	if visibility == "public" && public >= maxCandidateSkinsPerUser {
+	if visibility == "public" && public >= a.candidatePublicLimit(p.UserID) {
 		writeError(w, 409, "candidate_skin_publish_limit")
 		return
 	}
@@ -658,12 +660,24 @@ func (a *Service) communityCandidatePublish(w http.ResponseWriter, r *http.Reque
 	respond(201, v)
 }
 
-// candidateWriteRate charges one package write to its hourly budget: the gallery's for anything that becomes public, the library's for a private create or a replacement.
+// candidateWriteRate 把一次包写入计入对应的每小时额度：变为公开的计入图库额度，私有创建、替换和改分类计入私有库额度。官方发布账号的两份额度都是 candidateOfficialWritesPerHour。
 func (a *Service) candidateWriteRate(ctx context.Context, userID, visibility string) error {
+	scope, limit := "candidate-library", candidateLibraryWritesPerHour
 	if visibility == "public" {
-		return a.RateLimit(ctx, "candidate-publish", userID, candidatePublishesPerHour, time.Hour)
+		scope, limit = "candidate-publish", candidatePublishesPerHour
 	}
-	return a.RateLimit(ctx, "candidate-library", userID, candidateLibraryWritesPerHour, time.Hour)
+	if a.config.Community.officialSkinPublisher(userID) {
+		limit = candidateOfficialWritesPerHour
+	}
+	return a.RateLimit(ctx, scope, userID, limit, time.Hour)
+}
+
+// candidatePublicLimit 返回账号最多可以有几款公开作品：普通账号 maxCandidateSkinsPerUser，官方发布账号只受总数上限 maxCandidateLibraryRows 约束。
+func (a *Service) candidatePublicLimit(userID string) int {
+	if a.config.Community.officialSkinPublisher(userID) {
+		return maxCandidateLibraryRows
+	}
+	return maxCandidateSkinsPerUser
 }
 
 // insertCandidateFiles stores the re-encoded images of one package in path order.
@@ -1000,7 +1014,7 @@ func (a *Service) communityCandidateVisibility(w http.ResponseWriter, r *http.Re
 				a.error(w, e)
 				return
 			}
-			if public >= maxCandidateSkinsPerUser {
+			if public >= a.candidatePublicLimit(p.UserID) {
 				writeError(w, 409, "candidate_skin_publish_limit")
 				return
 			}
