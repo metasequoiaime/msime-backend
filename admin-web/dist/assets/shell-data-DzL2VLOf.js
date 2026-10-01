@@ -1,1 +1,0 @@
-import{S as e,t,y as n}from"./keys-CgG63PwM.js";import{o as r}from"./shell-CIdCefMV.js";function i(){let i=n();return e({queryKey:t.shell,queryFn:({signal:e})=>i.get(`shell`,r,{signal:e}),refetchInterval:6e4,staleTime:3e4})}export{i as t};
