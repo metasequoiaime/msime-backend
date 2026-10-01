@@ -1,0 +1,719 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/metasequoiaime/MSIME-Backend/internal/account"
+	"github.com/metasequoiaime/MSIME-Backend/internal/githubapp"
+)
+
+// fakeIssue is one issue (or pull request) in fakeIssuesGitHub.
+type fakeIssue struct {
+	number      int
+	title, body string
+	author      string
+	state       string
+	stateReason string
+	labels      []string
+	assignees   []string
+	created     time.Time
+	pull        bool
+	timeline    []map[string]any
+}
+
+type fakeIssueComment struct {
+	number      int
+	login, kind string
+	association string
+	created     time.Time
+}
+
+// fakeIssuesGitHub stands in for the GitHub REST API of the issue repositories: installation tokens, listing, reading, labelling, assigning, closing, reopening and commenting.
+type fakeIssuesGitHub struct {
+	t        *testing.T
+	mu       sync.Mutex
+	server   *httptest.Server
+	issues   map[string]map[int]*fakeIssue
+	comments map[string][]fakeIssueComment
+	// status overrides the answer to "METHOD path" with an error status.
+	status map[string]int
+	// writes lists every non-GET call except token minting, in order.
+	writes []string
+	bodies map[string]map[string]any
+	tokens map[string]int
+}
+
+func newFakeIssuesGitHub(t *testing.T) *fakeIssuesGitHub {
+	f := &fakeIssuesGitHub{t: t, issues: map[string]map[int]*fakeIssue{}, comments: map[string][]fakeIssueComment{}, status: map[string]int{}, bodies: map[string]map[string]any{}, tokens: map[string]int{}}
+	f.server = httptest.NewTLSServer(http.HandlerFunc(f.serve))
+	t.Cleanup(f.server.Close)
+	return f
+}
+
+func (f *fakeIssuesGitHub) add(repo string, issue *fakeIssue) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.issues[repo] == nil {
+		f.issues[repo] = map[int]*fakeIssue{}
+	}
+	f.issues[repo][issue.number] = issue
+}
+
+func (f *fakeIssuesGitHub) get(repo string, n int) fakeIssue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	issue := *f.issues[repo][n]
+	issue.labels = slices.Clone(issue.labels)
+	issue.assignees = slices.Clone(issue.assignees)
+	return issue
+}
+
+func (f *fakeIssuesGitHub) writeLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.writes)
+}
+
+func (f *fakeIssuesGitHub) client() *githubapp.Client {
+	return &githubapp.Client{AppID: 42, InstallationID: 77, Key: wordsKey(f.t), APIURL: f.server.URL, HTTP: f.server.Client(), Cache: &githubapp.Cache{}}
+}
+
+func (i *fakeIssue) json(repo string) map[string]any {
+	labels := []map[string]any{}
+	for _, l := range i.labels {
+		labels = append(labels, map[string]any{"name": l})
+	}
+	assignees := []map[string]any{}
+	for _, a := range i.assignees {
+		assignees = append(assignees, map[string]any{"login": a, "type": "User"})
+	}
+	v := map[string]any{
+		"number": i.number, "title": i.title, "body": i.body, "state": i.state, "state_reason": i.stateReason,
+		"html_url": "https://github.com/" + repo + "/issues/" + strconv.Itoa(i.number),
+		"user":     map[string]any{"login": i.author, "type": "User"}, "labels": labels, "assignees": assignees, "comments": 0,
+		"created_at": i.created.UTC().Format(time.RFC3339), "updated_at": i.created.UTC().Format(time.RFC3339), "closed_at": nil,
+	}
+	if i.pull {
+		v["pull_request"] = map[string]any{"url": "https://api.github.com/repos/" + repo + "/pulls/" + strconv.Itoa(i.number)}
+	}
+	return v
+}
+
+func (f *fakeIssuesGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := r.Method + " " + r.URL.Path
+	raw, _ := io.ReadAll(r.Body)
+	var body map[string]any
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &body); err != nil {
+			f.t.Errorf("%s: invalid JSON body", key)
+		}
+	}
+	reply := func(status int, v any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	if key == "POST /app/installations/77/access_tokens" {
+		repos, _ := body["repositories"].([]any)
+		perms, _ := body["permissions"].(map[string]any)
+		if len(repos) != 1 || perms["issues"] != "write" || perms["metadata"] != "read" || len(perms) != 2 {
+			f.t.Errorf("token scope: %v", body)
+		}
+		f.tokens[repos[0].(string)]++
+		reply(201, map[string]any{"token": "ghs_" + repos[0].(string), "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+		return
+	}
+	if r.Header.Get("X-GitHub-Api-Version") == "" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ghs_") {
+		f.t.Errorf("%s: missing GitHub headers or installation token", key)
+	}
+	if r.Method != "GET" {
+		f.writes = append(f.writes, key)
+		f.bodies[key] = body
+	}
+	if status, ok := f.status[key]; ok {
+		reply(status, map[string]string{"message": "override"})
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/"), "/")
+	if len(parts) < 3 || parts[2] != "issues" {
+		reply(404, map[string]string{"message": "Not Found"})
+		return
+	}
+	repo := parts[0] + "/" + parts[1]
+	issues, ok := f.issues[repo]
+	if !ok {
+		reply(404, map[string]string{"message": "Not Found"})
+		return
+	}
+	if len(parts) == 3 {
+		state := r.URL.Query().Get("state")
+		var numbers []int
+		for n, issue := range issues {
+			if issue.state == state {
+				numbers = append(numbers, n)
+			}
+		}
+		slices.Sort(numbers)
+		slices.Reverse(numbers)
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		page = max(page, 1)
+		start := min((page-1)*perPage, len(numbers))
+		out := []map[string]any{}
+		for _, n := range numbers[start:min(start+perPage, len(numbers))] {
+			out = append(out, issues[n].json(repo))
+		}
+		reply(200, out)
+		return
+	}
+	if parts[3] == "comments" {
+		out := []map[string]any{}
+		for _, c := range f.comments[repo] {
+			out = append(out, map[string]any{"issue_url": "https://api.github.com/repos/" + repo + "/issues/" + strconv.Itoa(c.number), "user": map[string]any{"login": c.login, "type": c.kind}, "author_association": c.association, "created_at": c.created.UTC().Format(time.RFC3339)})
+		}
+		reply(200, out)
+		return
+	}
+	n, _ := strconv.Atoi(parts[3])
+	issue, ok := issues[n]
+	if !ok {
+		reply(404, map[string]string{"message": "Not Found"})
+		return
+	}
+	sub := strings.Join(parts[4:], "/")
+	switch {
+	case r.Method == "GET" && sub == "":
+		reply(200, issue.json(repo))
+	case r.Method == "GET" && sub == "timeline":
+		reply(200, issue.timeline)
+	case r.Method == "PATCH" && sub == "":
+		issue.state, _ = body["state"].(string)
+		issue.stateReason, _ = body["state_reason"].(string)
+		reply(200, issue.json(repo))
+	case r.Method == "POST" && sub == "labels":
+		for _, l := range body["labels"].([]any) {
+			if !slices.Contains(issue.labels, l.(string)) {
+				issue.labels = append(issue.labels, l.(string))
+			}
+		}
+		reply(200, []any{})
+	case r.Method == "DELETE" && strings.HasPrefix(sub, "labels/"):
+		name := strings.TrimPrefix(sub, "labels/")
+		if !slices.Contains(issue.labels, name) {
+			reply(404, map[string]string{"message": "Label does not exist"})
+			return
+		}
+		issue.labels = slices.DeleteFunc(issue.labels, func(l string) bool { return l == name })
+		reply(200, []any{})
+	case sub == "assignees" && (r.Method == "POST" || r.Method == "DELETE"):
+		for _, a := range body["assignees"].([]any) {
+			issue.assignees = slices.DeleteFunc(issue.assignees, func(x string) bool { return x == a.(string) })
+			if r.Method == "POST" {
+				issue.assignees = append(issue.assignees, a.(string))
+			}
+		}
+		reply(201, issue.json(repo))
+	case r.Method == "POST" && sub == "comments":
+		reply(201, map[string]any{"id": 1, "body": body["body"]})
+	default:
+		reply(404, map[string]string{"message": "Not Found"})
+	}
+}
+
+const (
+	issuesTestAdminToken = "issues-admin-token-000000000000000000000000"
+	issuesWinRepo        = "metasequoiaime/msime-windows"
+	issuesCoreRepo       = "metasequoiaime/msime"
+)
+
+// issuesTestPlatforms maps Windows by repository and macOS and Linux by label.
+var issuesTestPlatforms = []AdminPlatformConfig{
+	{ID: "windows", Name: "Windows", Repo: issuesWinRepo, TagPrefix: "windows-v", Assignee: "houko", Label: "windows"},
+	{ID: "macos", Name: "macOS", Repo: issuesCoreRepo, TagPrefix: "macos-v", Assignee: "fanlusky", Label: "macos"},
+	{ID: "linux", Name: "Linux", Repo: issuesCoreRepo, TagPrefix: "linux-v", Label: "linux"},
+}
+
+// issuesFixture is a database-backed admin server whose GitHub is fake: msime-windows has issues 10 (new, bug), 11 (triaged) and pull request 12; msime has 20 (new, macOS idea), 21 (closed duplicate, Linux) and 22 (closed, no platform).
+func issuesFixture(t *testing.T) (*Server, *fakeIssuesGitHub, *pgx.Conn, string) {
+	t.Helper()
+	conn, schema := disposableSchema(t)
+	t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
+	t.Setenv("TEST_CLIENT_TOKEN", testToken)
+	t.Setenv("TEST_ADMIN_TOKEN", issuesTestAdminToken)
+	s, err := New(Config{
+		Auth:    account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
+		Admin:   AdminConfig{Enabled: true, Host: "admin.example.com", TokenEnv: "TEST_ADMIN_TOKEN"},
+		Clients: []Client{{ID: "device", TokenEnv: "TEST_CLIENT_TOKEN", RequestsPerMinute: 120}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		s.CloseAccounts()
+		s.Close()
+	})
+	f := newFakeIssuesGitHub(t)
+	now := time.Now()
+	f.add(issuesWinRepo, &fakeIssue{number: 10, title: "Win11 24H2 下 Word 中候选窗位置偏移", body: "候选窗出现在光标上方。", author: "alice", state: "open", labels: []string{"bug", "显示"}, created: now.Add(-3 * time.Hour),
+		timeline: []map[string]any{
+			{"event": "commented", "actor": map[string]any{"login": "houko"}, "body": "需要日志", "created_at": now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)},
+			{"event": "labeled", "actor": map[string]any{"login": "houko"}, "label": map[string]any{"name": "bug"}, "created_at": now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)},
+			{"event": "subscribed", "actor": map[string]any{"login": "houko"}, "created_at": now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)},
+		}})
+	f.add(issuesWinRepo, &fakeIssue{number: 11, title: "Win10 下 Word 候选窗位置偏移", author: "bob", state: "open", labels: []string{"bug", "triaged"}, assignees: []string{"houko"}, created: now.Add(-48 * time.Hour)})
+	f.add(issuesWinRepo, &fakeIssue{number: 12, title: "fix: candidate window", author: "carol", state: "open", created: now.Add(-time.Hour), pull: true})
+	f.add(issuesCoreRepo, &fakeIssue{number: 20, title: "希望支持按应用记住中英文状态", author: "dave", state: "open", labels: []string{"enhancement", "macos"}, created: now.Add(-10 * 24 * time.Hour)})
+	f.add(issuesCoreRepo, &fakeIssue{number: 21, title: "Fcitx5 下 Shift 切换偶尔失效", author: "erin", state: "closed", stateReason: "not_planned", labels: []string{"bug", "linux", "duplicate"}, created: now.Add(-20 * 24 * time.Hour)})
+	f.add(issuesCoreRepo, &fakeIssue{number: 22, title: "文档：Linux 安装步骤缺少依赖说明", author: "frank", state: "closed", stateReason: "completed", labels: []string{"documentation"}, created: now.Add(-40 * 24 * time.Hour)})
+	// First responses: #10 after 1h by a maintainer (the author's own comment and a bot's do not count), #20 after 3h; #22 is older than the window.
+	f.comments[issuesWinRepo] = []fakeIssueComment{
+		{10, "alice", "User", "NONE", now.Add(-150 * time.Minute)},
+		{10, "github-actions", "Bot", "NONE", now.Add(-170 * time.Minute)},
+		{10, "houko", "User", "OWNER", now.Add(-2 * time.Hour)},
+	}
+	f.comments[issuesCoreRepo] = []fakeIssueComment{
+		{20, "fanlusky", "User", "MEMBER", now.Add(-10*24*time.Hour + 3*time.Hour)},
+		{20, "stranger", "User", "NONE", now.Add(-10*24*time.Hour + time.Hour)},
+		{22, "fanlusky", "User", "MEMBER", now.Add(-39 * 24 * time.Hour)},
+	}
+	s.config.Admin.GitHub.IssueRepos = []string{issuesWinRepo, issuesCoreRepo}
+	s.config.Admin.GitHub.Platforms = issuesTestPlatforms
+	s.adminGitHub = f.client()
+	return s, f, conn, schema
+}
+
+func issuesRequest(t *testing.T, s *Server, method, path, body string) (int, map[string]any) {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	r := httptest.NewRequest(method, "https://admin.example.com"+path, reader)
+	r.Header.Set("Authorization", "Bearer "+issuesTestAdminToken)
+	if body != "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	var v map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatalf("%s %s: invalid JSON %q", method, path, w.Body.String())
+	}
+	return w.Code, v
+}
+
+func issueErrorCode(v map[string]any) string {
+	e, _ := v["error"].(map[string]any)
+	code, _ := e["code"].(string)
+	return code
+}
+
+type issueAuditRow struct {
+	action, target, actor string
+	detail                map[string]any
+}
+
+func issueAudits(t *testing.T, conn *pgx.Conn, schema string) []issueAuditRow {
+	t.Helper()
+	rows, err := conn.Query(context.Background(), `SELECT action,target,actor,detail FROM `+pgx.Identifier{schema, "admin_audit"}.Sanitize()+` WHERE action LIKE 'issue\_%' ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []issueAuditRow
+	for rows.Next() {
+		var row issueAuditRow
+		var raw []byte
+		if err := rows.Scan(&row.action, &row.target, &row.actor, &raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &row.detail); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func issueNumbers(v map[string]any) []int {
+	var out []int
+	items, _ := v["items"].([]any)
+	for _, item := range items {
+		out = append(out, int(item.(map[string]any)["number"].(float64)))
+	}
+	return out
+}
+
+// Without admin.github every issue endpoint answers 404 github_disabled, and wrong methods are refused first.
+func TestAdminIssuesGitHubDisabled(t *testing.T) {
+	s, _ := adminRBACFixture(t)
+	for _, tc := range []struct {
+		method, path string
+		status       int
+		code         string
+	}{
+		{"GET", "/api/issues", 404, "github_disabled"},
+		{"GET", "/api/issues/metasequoiaime/msime/1", 404, "github_disabled"},
+		{"POST", "/api/issues/actions", 404, "github_disabled"},
+		{"POST", "/api/issues", 405, "method_not_allowed"},
+		{"GET", "/api/issues/actions", 405, "method_not_allowed"},
+		{"DELETE", "/api/issues/metasequoiaime/msime/1", 405, "method_not_allowed"},
+	} {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, adminRequest(s, tc.method, tc.path, "", strings.Repeat("a", 40)))
+		if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.code) {
+			t.Errorf("%s %s: %d %s", tc.method, tc.path, w.Code, w.Body.String())
+		}
+	}
+	if s.searchIssues("x") != nil {
+		t.Fatal("search without a listing returned hits")
+	}
+	if n, err := s.pendingIssues(context.Background()); n != 0 || err != nil {
+		t.Fatal(n, err)
+	}
+}
+
+// A role without triage_issues cannot change issues, and nothing reaches GitHub.
+func TestAdminIssueActionsPermission(t *testing.T) {
+	s, _ := adminRBACFixture(t)
+	f := newFakeIssuesGitHub(t)
+	s.adminGitHub = f.client()
+	s.config.Admin.GitHub.IssueRepos = []string{issuesWinRepo}
+	r := adminRequest(s, "POST", "/api/issues/actions", "", account.AdminTokenPrefix+"readonly")
+	r.Body = io.NopCloser(strings.NewReader(`{"action":"close","items":[{"repo":"` + issuesWinRepo + `","n":1}]}`))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "permission_denied") || len(f.writeLog()) != 0 || len(f.tokens) != 0 {
+		t.Fatal(w.Code, w.Body.String(), f.writeLog())
+	}
+}
+
+func TestAdminIssuesList(t *testing.T) {
+	s, f, _, _ := issuesFixture(t)
+	status, v := issuesRequest(t, s, "GET", "/api/issues", "")
+	if status != 200 {
+		t.Fatal(status, v)
+	}
+	// The default filter is open issues, newest first, without the pull request.
+	if got := issueNumbers(v); !slices.Equal(got, []int{10, 11, 20}) {
+		t.Fatal("open issues", got)
+	}
+	items := v["items"].([]any)
+	first := items[0].(map[string]any)
+	if first["repo"] != issuesWinRepo || first["state"] != "new" || first["platform"] != "windows" || first["kind"] != "bug" || first["author"] != "alice" || first["url"] != "https://github.com/"+issuesWinRepo+"/issues/10" {
+		t.Fatal("row", first)
+	}
+	if third := items[2].(map[string]any); third["platform"] != "macos" || third["kind"] != "idea" || items[1].(map[string]any)["state"] != "triaged" {
+		t.Fatal("rows", items)
+	}
+	counts := v["platform_counts"].(map[string]any)
+	if counts["all"] != 3.0 || counts["windows"] != 2.0 || counts["macos"] != 1.0 || counts["linux"] != 0.0 || counts["other"] != 0.0 {
+		t.Fatal("platform counts", counts)
+	}
+	states := v["state_counts"].(map[string]any)
+	if states["new"] != 2.0 || states["triaged"] != 1.0 || states["done"] != 1.0 || states["dup"] != 1.0 {
+		t.Fatal("state counts", states)
+	}
+	stats := v["stats"].(map[string]any)
+	// (1h + 3h) / 2 samples.
+	if stats["pending"] != 2.0 || stats["triaged"] != 1.0 || stats["new_this_week"] != 2.0 || stats["first_response_samples"] != 2.0 || stats["first_response_hours"].(float64) < 1.99 || stats["first_response_hours"].(float64) > 2.01 {
+		t.Fatal("stats", stats)
+	}
+	if v["total"] != 3.0 || v["has_more"] != false || len(v["platforms"].([]any)) != 3 || len(v["unavailable"].([]any)) != 0 {
+		t.Fatal("page", v)
+	}
+
+	for _, tc := range []struct {
+		query string
+		want  []int
+	}{
+		{"?state=closed", []int{21, 22}}, {"?state=dup", []int{21}}, {"?state=done", []int{22}}, {"?state=all&platform=other", []int{22}},
+		{"?state=new&platform=windows", []int{10}}, {"?state=all&platform=linux", []int{21}}, {"?state=open&page=2", nil},
+	} {
+		status, v := issuesRequest(t, s, "GET", "/api/issues"+tc.query, "")
+		if status != 200 || !slices.Equal(issueNumbers(v), tc.want) {
+			t.Error(tc.query, status, issueNumbers(v))
+		}
+	}
+	for _, tc := range []struct{ query, code string }{
+		{"?platform=windows-phone", "invalid_platform"}, {"?state=closedx", "invalid_state"}, {"?page=0", "invalid_page"}, {"?page=01", "invalid_page"}, {"?page=x", "invalid_page"},
+	} {
+		if status, v := issuesRequest(t, s, "GET", "/api/issues"+tc.query, ""); status != 400 || issueErrorCode(v) != tc.code {
+			t.Error(tc.query, status, v)
+		}
+	}
+	// Reads are cached: one token per repository for all of the requests above.
+	if f.tokens[strings.Split(issuesWinRepo, "/")[1]] != 1 {
+		t.Fatal("tokens", f.tokens)
+	}
+
+	// The shell badge and the global search use the same listing.
+	if n, err := s.pendingIssues(context.Background()); n != 2 || err != nil {
+		t.Fatal(n, err)
+	}
+	hits := s.searchIssues("候选窗")
+	if len(hits) != 2 || hits[0].ID != issuesWinRepo+"#10" || hits[0].Title != "#10 Win11 24H2 下 Word 中候选窗位置偏移" || hits[0].Target != "issues" || hits[0].Kind != "issue" {
+		t.Fatal(hits)
+	}
+	if hits := s.searchIssues("#21"); len(hits) != 1 || hits[0].ID != issuesCoreRepo+"#21" {
+		t.Fatal(hits)
+	}
+}
+
+// One repository failing leaves the others listed and names it; all failing is an error.
+func TestAdminIssuesListUnavailable(t *testing.T) {
+	s, f, _, _ := issuesFixture(t)
+	f.status["GET /repos/"+issuesCoreRepo+"/issues"] = 500
+	status, v := issuesRequest(t, s, "GET", "/api/issues?state=all", "")
+	if status != 200 || !slices.Equal(issueNumbers(v), []int{10, 11}) || len(v["unavailable"].([]any)) != 1 || v["unavailable"].([]any)[0] != issuesCoreRepo {
+		t.Fatal(status, v)
+	}
+	f.status["GET /repos/"+issuesWinRepo+"/issues"] = 403
+	s.adminGitHub = f.client()
+	if status, v := issuesRequest(t, s, "GET", "/api/issues", ""); status != 502 || issueErrorCode(v) != "github_rejected" {
+		t.Fatal(status, v)
+	}
+	if _, err := s.pendingIssues(context.Background()); err == nil {
+		t.Fatal("pending count without any readable repository")
+	}
+}
+
+// Issues created after the first complete listing are announced once; the backlog never is.
+func TestAdminIssuesAnnounceNew(t *testing.T) {
+	s, f, _, _ := issuesFixture(t)
+	if _, err := s.pendingIssues(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m := s.issueMemory()
+	if m.baseline.IsZero() || len(m.seen) != 0 {
+		t.Fatal("first listing announced the backlog", m.seen)
+	}
+	f.add(issuesWinRepo, &fakeIssue{number: 13, title: "新问题", author: "gina", state: "open", created: time.Now().Add(time.Second)})
+	s.adminGitHub = f.client()
+	if n, err := s.pendingIssues(context.Background()); n != 3 || err != nil {
+		t.Fatal(n, err)
+	}
+	if !m.seen[issuesWinRepo+"#13"] || len(m.seen) != 1 {
+		t.Fatal(m.seen)
+	}
+}
+
+func TestAdminIssueDetail(t *testing.T) {
+	s, _, _, _ := issuesFixture(t)
+	status, v := issuesRequest(t, s, "GET", "/api/issues/"+issuesWinRepo+"/10", "")
+	if status != 200 {
+		t.Fatal(status, v)
+	}
+	issue := v["issue"].(map[string]any)
+	if issue["number"] != 10.0 || issue["body"] != "候选窗出现在光标上方。" || issue["platform"] != "windows" || v["platform_assignee"] != "houko" {
+		t.Fatal(v)
+	}
+	timeline := v["timeline"].([]any)
+	if len(timeline) != 3 || timeline[0].(map[string]any)["kind"] != "created" || timeline[0].(map[string]any)["actor"] != "alice" ||
+		timeline[1].(map[string]any)["kind"] != "commented" || timeline[1].(map[string]any)["text"] != "需要日志" || timeline[2].(map[string]any)["text"] != "bug" {
+		t.Fatal("timeline", timeline)
+	}
+	similar := v["similar"].([]any)
+	if len(similar) != 1 || similar[0].(map[string]any)["number"] != 11.0 || similar[0].(map[string]any)["state"] != "triaged" {
+		t.Fatal("similar", similar)
+	}
+	// Repository names are matched case-insensitively against the configured list.
+	if status, _ := issuesRequest(t, s, "GET", "/api/issues/MetasequoiaIME/msime/20", ""); status != 200 {
+		t.Fatal(status)
+	}
+	for _, tc := range []struct {
+		path   string
+		status int
+		code   string
+	}{
+		{"/api/issues/" + issuesWinRepo + "/12", 404, "not_found"},
+		{"/api/issues/" + issuesWinRepo + "/99", 404, "not_found"},
+		{"/api/issues/someone/else/1", 404, "not_found"},
+		{"/api/issues/" + issuesWinRepo, 404, "not_found"},
+		{"/api/issues/", 404, "not_found"},
+		{"/api/issues/" + issuesWinRepo + "/0", 400, "invalid_id"},
+		{"/api/issues/" + issuesWinRepo + "/010", 400, "invalid_id"},
+		{"/api/issues/" + issuesWinRepo + "/10/extra", 404, "not_found"},
+	} {
+		if status, v := issuesRequest(t, s, "GET", tc.path, ""); status != tc.status || issueErrorCode(v) != tc.code {
+			t.Error(tc.path, status, v)
+		}
+	}
+}
+
+func TestAdminIssueActions(t *testing.T) {
+	s, f, conn, schema := issuesFixture(t)
+	item := func(repo string, n int) string { return `{"repo":"` + repo + `","n":` + strconv.Itoa(n) + `}` }
+	act := func(action, items, body string) (int, map[string]any) {
+		payload := `{"action":"` + action + `","items":[` + items + `]`
+		if body != "" {
+			payload += `,"body":` + strconv.Quote(body)
+		}
+		return issuesRequest(t, s, "POST", "/api/issues/actions", payload+"}")
+	}
+
+	// List first so the cache is warm; a write must invalidate it.
+	issuesRequest(t, s, "GET", "/api/issues", "")
+	status, v := act("triage", item(issuesWinRepo, 10)+","+item("METASEQUOIAIME/msime", 20), "")
+	if status != 200 || v["affected"] != 2.0 || len(v["failed"].([]any)) != 0 {
+		t.Fatal(status, v)
+	}
+	if got := f.get(issuesWinRepo, 10); !slices.Contains(got.labels, "triaged") || !slices.Equal(got.assignees, []string{"houko"}) {
+		t.Fatal("triage", got)
+	}
+	if got := f.get(issuesCoreRepo, 20); !slices.Contains(got.labels, "triaged") || !slices.Equal(got.assignees, []string{"fanlusky"}) {
+		t.Fatal("triage macOS", got)
+	}
+	if _, v := issuesRequest(t, s, "GET", "/api/issues?state=new", ""); len(issueNumbers(v)) != 0 {
+		t.Fatal("listing still cached after triage", issueNumbers(v))
+	}
+	audits := issueAudits(t, conn, schema)
+	if len(audits) != 2 || audits[0].action != "issue_triage" || audits[0].target != issuesWinRepo+"#10" || audits[0].actor != "legacy-token" ||
+		audits[0].detail["from"] != "new" || audits[0].detail["to"] != "triaged" || audits[0].detail["assignee"] != "houko" || audits[0].detail["platform"] != "windows" || audits[1].target != issuesCoreRepo+"#20" {
+		t.Fatal("audit", audits)
+	}
+
+	// untriage is triage's undo: the label and the platform assignee go.
+	if status, v := act("untriage", item(issuesWinRepo, 10), ""); status != 200 || v["affected"] != 1.0 {
+		t.Fatal(status, v)
+	}
+	if got := f.get(issuesWinRepo, 10); slices.Contains(got.labels, "triaged") || len(got.assignees) != 0 {
+		t.Fatal("untriage", got)
+	}
+
+	// mark_dup closes with the duplicate label; reopen undoes it and keeps triaged.
+	if status, _ := act("mark_dup", item(issuesWinRepo, 11), ""); status != 200 {
+		t.Fatal(status)
+	}
+	if got := f.get(issuesWinRepo, 11); got.state != "closed" || got.stateReason != "not_planned" || !slices.Contains(got.labels, "duplicate") {
+		t.Fatal("mark_dup", got)
+	}
+	if status, _ := act("reopen", item(issuesWinRepo, 11), ""); status != 200 {
+		t.Fatal(status)
+	}
+	if got := f.get(issuesWinRepo, 11); got.state != "open" || got.stateReason != "reopened" || slices.Contains(got.labels, "duplicate") || !slices.Contains(got.labels, "triaged") {
+		t.Fatal("reopen", got)
+	}
+	if status, _ := act("close", item(issuesWinRepo, 10), ""); status != 200 {
+		t.Fatal(status)
+	}
+	if got := f.get(issuesWinRepo, 10); got.state != "closed" || got.stateReason != "completed" {
+		t.Fatal("close", got)
+	}
+	if status, _ := act("comment", item(issuesWinRepo, 10), "感谢反馈！"); status != 200 || f.bodies["POST /repos/"+issuesWinRepo+"/issues/10/comments"]["body"] != "感谢反馈！" {
+		t.Fatal(status, f.bodies)
+	}
+	audits = issueAudits(t, conn, schema)
+	var actions []string
+	for _, a := range audits {
+		actions = append(actions, a.action)
+	}
+	if !slices.Equal(actions, []string{"issue_triage", "issue_triage", "issue_untriage", "issue_mark_dup", "issue_reopen", "issue_close", "issue_comment"}) ||
+		audits[4].detail["from"] != "dup" || audits[4].detail["to"] != "triaged" || audits[6].detail["length"] != 5.0 {
+		t.Fatal("audit", audits)
+	}
+
+	// A partly failing batch reports the failures; a wholly failing one is an error without audit rows.
+	status, v = act("close", item(issuesWinRepo, 11)+","+item(issuesWinRepo, 99)+","+item(issuesWinRepo, 12), "")
+	failed, _ := v["failed"].([]any)
+	if status != 200 || v["affected"] != 1.0 || len(failed) != 2 || failed[0].(map[string]any)["code"] != "not_found" || failed[1].(map[string]any)["n"] != 12.0 {
+		t.Fatal(status, v)
+	}
+	before := len(issueAudits(t, conn, schema))
+	if status, v := act("reopen", item(issuesWinRepo, 99), ""); status != 404 || issueErrorCode(v) != "not_found" {
+		t.Fatal(status, v)
+	}
+	f.status["PATCH /repos/"+issuesWinRepo+"/issues/11"] = 500
+	if status, v := act("reopen", item(issuesWinRepo, 11), ""); status != 502 || issueErrorCode(v) != "github_unavailable" {
+		t.Fatal(status, v)
+	}
+	f.status["POST /repos/"+issuesWinRepo+"/issues/11/comments"] = 403
+	if status, v := act("comment", item(issuesWinRepo, 11), "hi"); status != 502 || issueErrorCode(v) != "github_rejected" {
+		t.Fatal(status, v)
+	}
+	if after := len(issueAudits(t, conn, schema)); after != before {
+		t.Fatal("failed actions were audited", before, after)
+	}
+
+	writes := len(f.writeLog())
+	for _, tc := range []struct{ body, code string }{
+		{`{"action":"delete","items":[` + item(issuesWinRepo, 10) + `]}`, "invalid_action"},
+		{`{"action":"close","items":[]}`, "invalid_items"},
+		{`{"action":"close"}`, "invalid_items"},
+		{`{"action":"close","items":[` + item("someone/else", 1) + `]}`, "invalid_items"},
+		{`{"action":"close","items":[` + item(issuesWinRepo, 0) + `]}`, "invalid_items"},
+		{`{"action":"close","items":[` + item(issuesWinRepo, 10) + `,` + item("MetasequoiaIME/msime-windows", 10) + `]}`, "invalid_items"},
+		{`{"action":"close","items":[` + item(issuesWinRepo, 10) + `],"body":"x"}`, "invalid_body"},
+		{`{"action":"comment","items":[` + item(issuesWinRepo, 10) + `],"body":"  "}`, "invalid_body"},
+		{`{"action":"comment","items":[` + item(issuesWinRepo, 10) + `]}`, "invalid_body"},
+		{`{"action":"close","items":[` + item(issuesWinRepo, 10) + `],"extra":1}`, "invalid_json"},
+	} {
+		if status, v := issuesRequest(t, s, "POST", "/api/issues/actions", tc.body); status != 400 || issueErrorCode(v) != tc.code {
+			t.Error(tc.body, status, v)
+		}
+	}
+	many := make([]string, issueMaxItems+1)
+	for i := range many {
+		many[i] = item(issuesWinRepo, i+1)
+	}
+	if status, v := act("close", strings.Join(many, ","), ""); status != 400 || issueErrorCode(v) != "invalid_items" {
+		t.Fatal(status, v)
+	}
+	if status, v := act("comment", item(issuesWinRepo, 10), strings.Repeat("x", 70000)); status != 400 || issueErrorCode(v) != "invalid_json" {
+		t.Fatal(status, v)
+	}
+	if len(f.writeLog()) != writes {
+		t.Fatal("an invalid request reached GitHub", f.writeLog()[writes:])
+	}
+}
+
+func TestIssueHelpers(t *testing.T) {
+	for _, tc := range []struct {
+		state, reason string
+		labels        []string
+		want          string
+	}{
+		{"open", "", nil, "new"}, {"open", "", []string{"Triaged"}, "triaged"}, {"closed", "completed", []string{"triaged"}, "done"},
+		{"closed", "duplicate", nil, "dup"}, {"closed", "not_planned", []string{"duplicate"}, "dup"},
+	} {
+		if got := issueState(tc.state, tc.reason, tc.labels); got != tc.want {
+			t.Error(tc, got)
+		}
+	}
+	if issueKind([]string{"Bug"}) != "bug" || issueKind([]string{"enhancement"}) != "idea" || issueKind([]string{"documentation"}) != "docs" || issueKind([]string{"显示"}) != "" {
+		t.Fatal("kind")
+	}
+	if a, b := titleBigrams("Win11 下 Word 候选窗偏移"), titleBigrams("Win10 下 Word 候选窗偏移"); bigramSimilarity(a, b) < 0.7 {
+		t.Fatal(bigramSimilarity(a, b))
+	}
+	if bigramSimilarity(titleBigrams("九宫格长按退格"), titleBigrams("Shift 切换失效")) != 0 || bigramSimilarity(titleBigrams(""), titleBigrams("x")) != 0 {
+		t.Fatal("unrelated titles are similar")
+	}
+	s := &Server{config: Config{Admin: AdminConfig{GitHub: AdminGitHubConfig{Platforms: issuesTestPlatforms}}}}
+	if p := s.issuePlatform(issuesWinRepo, nil); p == nil || p.ID != "windows" {
+		t.Fatal("repository fallback", p)
+	}
+	if p := s.issuePlatform(issuesCoreRepo, nil); p != nil {
+		t.Fatal("a repository shared by platforms picked one", p)
+	}
+	if p := s.issuePlatform(issuesCoreRepo, []string{"Linux"}); p == nil || p.ID != "linux" {
+		t.Fatal("label", p)
+	}
+}

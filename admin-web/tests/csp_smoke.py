@@ -40,6 +40,13 @@ FIXTURES = {
     "/api/auth/logout": {"ok": True},
 }
 
+# Issue triage (U3): one open issue on the list and its detail, shaped like internal/server/admin_issues.go.
+SMOKE_ISSUE = {"repo": "metasequoiaime/msime", "number": 12, "title": "Shift 切换偶尔失效", "author": "smoke-author", "url": "https://github.com/metasequoiaime/msime/issues/12", "state": "new", "platform": "linux", "kind": "bug", "labels": ["bug", "linux", "快捷键"], "assignees": [], "comments": 1, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z", "closed_at": None}
+FIXTURES.update({
+    "/api/issues": {"items": [SMOKE_ISSUE], "page": 1, "page_size": 50, "total": 1, "has_more": False, "repos": ["metasequoiaime/msime"], "platforms": [{"id": "linux", "name": "Linux", "label": "linux", "assignee": "houko"}], "unavailable": [], "platform_counts": {"all": 1, "other": 0, "linux": 1}, "state_counts": {"new": 1, "triaged": 0, "done": 0, "dup": 0}, "stats": {"pending": 1, "triaged": 0, "new_this_week": 1, "first_response_hours": 2.5, "first_response_samples": 1}},
+    "/api/issues/metasequoiaime/msime/12": {"issue": {**SMOKE_ISSUE, "body": "连按 Shift 偶尔没有反应。"}, "timeline": [{"kind": "created", "actor": "smoke-author", "text": "", "at": "2026-10-01T00:00:00Z"}, {"kind": "commented", "actor": "houko", "text": "需要日志", "at": "2026-10-01T01:00:00Z"}], "similar": [], "platform_assignee": "houko"},
+})
+
 
 def production_csp() -> str:
     match = re.search(r'Header\(\)\.Set\("Content-Security-Policy", "([^"]+)"\)', ADMIN_GO.read_text())
@@ -190,6 +197,21 @@ def main() -> int:
                 page.wait_for_url(base + "/status")
                 page.set_viewport_size({"width": 1280, "height": 860})
                 violations("mobile nav")
+
+                page.goto(base + "/issues")
+                expect(page.get_by_role("table", name="Issue 列表")).to_contain_text("Shift 切换偶尔失效")
+                expect(page.get_by_text("2.5 小时")).to_be_visible()
+                page.get_by_text("Shift 切换偶尔失效").click()
+                drawer = page.get_by_role("dialog", name=re.compile("#12 Shift 切换偶尔失效"))
+                expect(drawer).to_contain_text("@houko 回复：需要日志")
+                drawer.get_by_role("button", name="需要日志").click()
+                expect(drawer.get_by_placeholder("回复提交者…")).to_have_value(re.compile("导出诊断日志"))
+                page.keyboard.press("Escape")
+                expect(drawer).to_be_hidden()
+                page.goto(base + "/issues?focus=metasequoiaime%2Fmsime%2312")
+                expect(page.get_by_role("dialog", name=re.compile("#12"))).to_be_visible()
+                page.keyboard.press("Escape")
+                violations("issues")
 
                 page.goto(base + "/me")
                 page.get_by_role("button", name="退出登录").click()
