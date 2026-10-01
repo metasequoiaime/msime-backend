@@ -49,6 +49,10 @@ FIXTURES = {
             {"index": 1, "file": "custom/words.txt", "kind": "words", "word": "潜江", "pinyin": "qian'jiang", "flag": "dup", "reason": "词库中已有这个词条"},
         ]},
     "/api/dict-prs/9/trim": {"ok": True, "count": 1, "removed": 1, "head_sha": "head10"},
+    "/api/sensitive-words": {"items": [
+        {"id": 2, "pattern": "(微信|vx)[\\s:：]*[a-z0-9_-]{5,}", "is_regex": True, "category": "ad", "level": "block", "created_by": "owner@example.com", "created_at": "2026-09-02T08:00:00Z", "hits_7d": 41},
+        {"id": 1, "pattern": "代购", "is_regex": False, "category": "custom", "level": "review", "created_by": "legacy-token", "created_at": "2026-08-20T08:00:00Z", "hits_7d": 0},
+    ], "max_hits": 41},
 }
 
 # Issue triage (U3): one open issue on the list and its detail, shaped like internal/server/admin_issues.go.
@@ -207,6 +211,22 @@ def main() -> int:
                 page.keyboard.press("Escape")
                 expect(drawer).to_be_hidden()
                 violations("community drawer")
+
+                page.goto(base + "/words")
+                words = page.get_by_role("table", name="敏感词列表")
+                expect(words.get_by_text("/(微信|vx)[\\s:：]*[a-z0-9_-]{5,}/")).to_be_visible()
+                expect(words.get_by_text("@owner", exact=False)).to_be_visible()
+                # The fixture role lacks review_community, so the add bar and row actions are disabled.
+                expect(page.get_by_role("button", name="添加")).to_be_disabled()
+                page.get_by_role("radio", name=re.compile("^自定义")).click()
+                expect(words.get_by_text("代购")).to_be_visible()
+                expect(words.get_by_text("/(微信", exact=False)).to_be_hidden()
+                page.goto(base + "/words?focus=2")
+                expect(page.get_by_text("仅显示搜索定位的词条")).to_be_visible()
+                expect(words.get_by_text("代购")).to_be_hidden()
+                page.goto(base + "/words?focus=999")
+                expect(page.get_by_text("搜索定位的词条已不在名单中")).to_be_visible()
+                violations("/words")
 
                 page.goto(base + "/")
                 expect(page.locator("header")).to_contain_text("测试环境")
