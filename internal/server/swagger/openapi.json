@@ -12687,6 +12687,766 @@
         }
       }
     },
+    "/v1/community/plugins": {
+      "get": {
+        "summary": "浏览社区插件",
+        "tags": [
+          "插件社区"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "sound",
+                "music",
+                "effect",
+                "command_table"
+              ],
+              "default": ""
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            }
+          }
+        ],
+        "description": "按发布时间倒序每页 20 条，可按 kind 过滤、按名称搜索，不含 zip 包字节。 详见 docs/plugin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "plugins": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "sound",
+                              "music",
+                              "effect",
+                              "command_table"
+                            ]
+                          },
+                          "plugin_id": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "author": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "string"
+                          },
+                          "license": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer",
+                            "description": "zip 包字节数"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "zip 包的 SHA-256"
+                          },
+                          "downloads": {
+                            "type": "integer"
+                          },
+                          "rating_count": {
+                            "type": "integer"
+                          },
+                          "rating_average": {
+                            "type": "number"
+                          },
+                          "owned": {
+                            "type": "boolean"
+                          },
+                          "my_rating": {
+                            "type": "integer"
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      }
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或 zip 包无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "插件不存在或非作者"
+          },
+          "409": {
+            "description": "配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或校验繁忙"
+          }
+        }
+      },
+      "post": {
+        "summary": "发布插件包",
+        "tags": [
+          "插件社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [],
+        "description": "请求最多 11,300,000 字节。zip 包不超过 8 MiB、最多 64 个成员和 16 个文件，解压总量不超过 24 MiB 且不超过包体 100 倍加 1 MiB；拒绝绝对路径、..、反斜杠、符号链接、加密成员和嵌套压缩包。包内恰好一个 plugin.toml（schema_version = 1，严格解析，未知键拒绝），kind 与 plugin_id、version 须与请求一致，permissions 必须为空；引用的音频须存在且为 .wav/.ogg 并匹配文件头，其余文件只能是 .txt/.md 说明。id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 个插件、包体合计不超过 32 MiB，每小时最多发布 10 次。 详见 docs/plugin-community.md。",
+        "responses": {
+          "201": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "sound",
+                        "music",
+                        "effect",
+                        "command_table"
+                      ]
+                    },
+                    "plugin_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "integer",
+                      "description": "zip 包字节数"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "zip 包的 SHA-256"
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或 zip 包无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "插件不存在或非作者"
+          },
+          "409": {
+            "description": "配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或校验繁忙"
+          },
+          "200": {
+            "description": "同一发布请求的安全重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "sound",
+                        "music",
+                        "effect",
+                        "command_table"
+                      ]
+                    },
+                    "plugin_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "integer",
+                      "description": "zip 包字节数"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "zip 包的 SHA-256"
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 280
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "sound",
+                      "music",
+                      "effect",
+                      "command_table"
+                    ]
+                  },
+                  "plugin_id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  },
+                  "archive": {
+                    "type": "string",
+                    "format": "byte",
+                    "description": "zip 包的标准 base64，解码后不超过 8 MiB"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "description",
+                  "kind",
+                  "plugin_id",
+                  "version",
+                  "archive"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/community/plugins/{id}": {
+      "get": {
+        "summary": "插件详情",
+        "tags": [
+          "插件社区"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "公开详情；登录时额外返回自己的评分与是否为作者。 详见 docs/plugin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "sound",
+                        "music",
+                        "effect",
+                        "command_table"
+                      ]
+                    },
+                    "plugin_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "license": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "integer",
+                      "description": "zip 包字节数"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "zip 包的 SHA-256"
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或 zip 包无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "插件不存在或非作者"
+          },
+          "409": {
+            "description": "配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或校验繁忙"
+          }
+        }
+      },
+      "delete": {
+        "summary": "作者下架插件",
+        "tags": [
+          "插件社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "仅作者可下架，连带删除下载和评分记录。 详见 docs/plugin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或 zip 包无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "插件不存在或非作者"
+          },
+          "409": {
+            "description": "配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或校验繁忙"
+          }
+        }
+      }
+    },
+    "/v1/community/plugins/{id}/download": {
+      "post": {
+        "summary": "下载插件包并去重计数",
+        "tags": [
+          "插件社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "返回原样 zip 包（标准 base64）与 SHA-256，客户端安装前应校验摘要；下载人数按账号去重。 详见 docs/plugin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "sound",
+                        "music",
+                        "effect",
+                        "command_table"
+                      ]
+                    },
+                    "plugin_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "integer"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "archive": {
+                      "type": "string",
+                      "format": "byte"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或 zip 包无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "插件不存在或非作者"
+          },
+          "409": {
+            "description": "配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或校验繁忙"
+          }
+        }
+      }
+    },
+    "/v1/community/plugins/{id}/rating": {
+      "put": {
+        "summary": "为插件评分",
+        "tags": [
+          "插件社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "description": "评分需先下载且不能自评，重复提交更新同一条评分。 详见 docs/plugin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "stars": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数、清单或 zip 包无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "插件不存在或非作者"
+          },
+          "409": {
+            "description": "配额已满或 UUID 冲突"
+          },
+          "415": {
+            "description": "需要 application/json"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用或校验繁忙"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stars": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5
+                  }
+                },
+                "required": [
+                  "stars"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/community/resources": {
       "get": {
         "summary": "浏览词库和回复模板",
