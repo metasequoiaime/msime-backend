@@ -22,6 +22,19 @@ export const countsSchema = z.object({
 });
 export type Counts = z.infer<typeof countsSchema>;
 
+// 候选皮肤的图库分类，取值与服务端 candidateSkinCategories 一致。
+export const candidateCategories = ["nature", "guofeng", "acg", "cute", "food", "tech", "minimal", "other"] as const;
+export type CandidateCategory = (typeof candidateCategories)[number];
+export const candidateCategoryLabels: Record<CandidateCategory, string> = { nature: "自然", guofeng: "国风", acg: "二次元", cute: "可爱", food: "美食", tech: "科技夜色", minimal: "简约", other: "其他" };
+
+export function candidateCategoryLabel(value: string | null | undefined): string {
+  return candidateCategoryLabels[value as CandidateCategory] ?? value ?? "—";
+}
+
+export function isCandidateCategory(value: string): value is CandidateCategory {
+  return (candidateCategories as readonly string[]).includes(value);
+}
+
 const entrySchema = z.object({ kind: z.string(), code: z.string(), word: z.string(), weight: z.number() });
 export type Entry = z.infer<typeof entrySchema>;
 
@@ -49,6 +62,7 @@ export const itemSchema = z.object({
   size: z.number().optional(),
   file_count: z.number().optional(),
   visibility: z.enum(["public", "private"]).optional(),
+  category: z.string().optional(),
   kind: z.string().optional(),
   plugin_id: z.string().optional(),
   entries: z.number().nullish(),
@@ -86,6 +100,7 @@ export const detailSchema = z.object({
   revision: z.number().optional(),
   version: z.string().optional(),
   visibility: z.enum(["public", "private"]).optional(),
+  category: z.string().optional(),
   package_id: z.string().optional(),
   plugin_id: z.string().optional(),
   kind: z.string().optional(),

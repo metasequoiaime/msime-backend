@@ -212,6 +212,10 @@ func (s *Store) Ready(ctx context.Context) error {
 	if _, e := s.pool.Exec(ctx, `SELECT id,owner,state,reason,artwork,cancelled,created_at,heartbeat_at,expires_at FROM skin_jobs WHERE false`); e != nil {
 		return e
 	}
+	// 候选窗皮肤的分类列与它的命名 CHECK 约束、索引在同一次迁移中加上，所以只探测列；缺列时启动会走迁移。
+	if _, e := s.pool.Exec(ctx, `SELECT category FROM community_candidate_skins WHERE false`); e != nil {
+		return e
+	}
 	return s.consoleReady(ctx)
 }
 

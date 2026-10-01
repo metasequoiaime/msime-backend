@@ -155,8 +155,9 @@ func TestDownloadsSummary(t *testing.T) {
 	today := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
 	// Mirror x64: 2 today, 1 three days ago; one older than the week and one tomorrow are outside the window.
 	seed("summary-mirror-today-1", "download", "windows", "v0.5.4", "x64 安装包", "cn-mirror", today.Add(time.Hour))
-	seed("summary-mirror-today-2", "download", "windows", "v0.5.4", "x64 安装包", "cn-mirror", today.Add(14*time.Hour))
-	seed("summary-mirror-earlier", "download", "windows", "v0.5.4", "x64 安装包", "cn-mirror", today.AddDate(0, 0, -6))
+	// 用平台别名上报，仍然归为规范平台的同一行。
+	seed("summary-mirror-today-2", "download", "win", "v0.5.4", "x64 安装包", "cn-mirror", today.Add(14*time.Hour))
+	seed("summary-mirror-earlier", "download", "Windows", "v0.5.4", "x64 安装包", "cn-mirror", today.AddDate(0, 0, -6))
 	seed("summary-mirror-too-old", "download", "windows", "v0.5.4", "x64 安装包", "cn-mirror", today.AddDate(0, 0, -7).Add(23*time.Hour))
 	seed("summary-mirror-tomorrow", "download", "windows", "v0.5.4", "x64 安装包", "cn-mirror", today.AddDate(0, 0, 1))
 	// A legacy download without dimensions forms its own group.

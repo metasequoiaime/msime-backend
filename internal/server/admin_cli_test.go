@@ -159,4 +159,16 @@ func TestAdminCommandLineSignIn(t *testing.T) {
 	if w = call("POST", "/api/auth/cli/start", `{"redirect_uri":"`+redirect+`"}`, ""); w.Code != 429 || w.Header().Get("Retry-After") == "" {
 		t.Fatal("starts are not limited", w.Code)
 	}
+	// 在代理之后，额度属于 `client_ip_header` 报告的地址，而不是所有请求都经过的代理。
+	s.config.ClientIPHeader = "CF-Connecting-IP"
+	behindProxy := func(client string) int {
+		r := httptest.NewRequest("POST", "https://admin.msime.app/api/auth/cli/start", strings.NewReader(`{"redirect_uri":"`+redirect+`"}`))
+		r.Header.Set("CF-Connecting-IP", client)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := behindProxy("198.51.100.50"); code != 200 {
+		t.Fatal("another administrator behind the same proxy was limited", code)
+	}
 }

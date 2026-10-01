@@ -117,6 +117,12 @@ func TestNoticeDraftPublishArchiveLifecycle(t *testing.T) {
 	if items := publicNotices(t, a, "/v1/notices?platform=windows&channel=app"); len(items) != 1 || items[0]["id"] != id {
 		t.Fatal("app channel feed", items)
 	}
+	// 平台别名拿到的公告与规范 ID 相同。
+	for platform, want := range map[string]int{"win": 2, "Windows": 2, "darwin": 1, "mac": 1, "ipados": 1, "harmony": 1, "harmonyos": 1, "ohos": 1} {
+		if items := publicNotices(t, a, "/v1/notices?platform="+platform); len(items) != want {
+			t.Fatal("platform alias", platform, items)
+		}
+	}
 
 	r := jsonRequest("GET", "/api/notices", "", "")
 	w := httptest.NewRecorder()

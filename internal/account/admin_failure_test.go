@@ -110,6 +110,9 @@ func TestConsoleEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 		{"restore", "POST", "/api/actions", func(consoleFailureFixture) string {
 			return `{"action":"restore_content","section":"replies","id":"fail-reply"}`
 		}},
+		{"candidate category", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"set_candidate_skin_category","id":"fa334455-1234-4234-8234-123456789abc","value":{"category":"food"}}`
+		}},
 		{"restore to", "POST", "/api/actions", func(consoleFailureFixture) string {
 			return `{"action":"restore_content","section":"skins","id":"fail-skin","value":{"to":"approved"}}`
 		}},
@@ -217,6 +220,7 @@ func TestConsolePublicEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 		{"candidate skin", "GET", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc", "", true},
 		{"candidate preview", "GET", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc/preview", "", true},
 		{"candidate visibility", "PATCH", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc", `{"visibility":"private"}`, true},
+		{"candidate category", "PATCH", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc", `{"category":"food"}`, true},
 		{"delete candidate", "DELETE", "/v1/community/candidate-skins/fa334455-1234-4234-8234-123456789abc", "", true},
 		{"plugins", "GET", "/v1/community/plugins", "", true},
 		{"plugin", "GET", "/v1/community/plugins/fa334455-1234-4234-8234-000000000001", "", true},

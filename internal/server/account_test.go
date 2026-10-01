@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,5 +128,62 @@ func TestUserSessionAuthorizesAPIAndDeviceCannotManageUsers(t *testing.T) {
 	s.ServeHTTP(w, r)
 	if w.Code != 401 {
 		t.Fatal("已退出会话仍可调用 API")
+	}
+}
+
+// 遥测不带凭据穿过整个服务端：中间件让它绕过 Bearer 认证，官网的跨域请求和预检都能得到响应，按地址的额度按代理报告的地址计。
+func TestAnonymousTelemetryThroughServer(t *testing.T) {
+	disposableSchema(t)
+	t.Setenv("TEST_AUTH_PEPPER", strings.Repeat("p", 64))
+	s, err := New(Config{
+		Auth:           account.Config{Enabled: true, DatabaseEnv: "MSIME_TEST_DATABASE_URL", PepperEnv: "TEST_AUTH_PEPPER"},
+		AllowedOrigins: []string{"https://msime.app"},
+		ClientIPHeader: "CF-Connecting-IP",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	defer s.CloseAccounts()
+	send := func(method, origin, client, auth, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "https://api.example.com"+account.TelemetryPath, strings.NewReader(body))
+		r.RemoteAddr = "10.0.0.2:443"
+		r.Header.Set("CF-Connecting-IP", client)
+		r.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if auth != "" {
+			r.Header.Set("Authorization", auth)
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
+	event := func(i int) string {
+		return `{"id":"server-telemetry-` + strconv.Itoa(10000+i) + `","kind":"download","platform":"windows","version":"0.9.3","artifact":"msime-setup.exe","channel":"cn-mirror"}`
+	}
+	if w := send("OPTIONS", "https://msime.app", "198.51.100.40", "", ""); w.Code != 204 || w.Header().Get("Access-Control-Allow-Origin") != "https://msime.app" {
+		t.Fatal("preflight", w.Code, w.Header())
+	}
+	if w := send("POST", "https://msime.app", "198.51.100.40", "", event(0)); w.Code != 202 || w.Header().Get("Access-Control-Allow-Origin") != "https://msime.app" {
+		t.Fatal("website report", w.Code, w.Body.String())
+	}
+	if w := send("POST", "", "198.51.100.40", "Bearer stale-or-forged", event(1)); w.Code != 202 {
+		t.Fatal("a token must be ignored, not checked", w.Code, w.Body.String())
+	}
+	if w := send("POST", "https://evil.example", "198.51.100.40", "", event(2)); w.Code != 403 {
+		t.Fatal("unlisted origin", w.Code)
+	}
+	for i := 3; i <= 60; i++ {
+		if w := send("POST", "", "198.51.100.40", "", event(i)); w.Code != 202 {
+			t.Fatal(i, w.Code, w.Body.String())
+		}
+	}
+	if w := send("POST", "", "198.51.100.40", "", event(61)); w.Code != 429 || w.Header().Get("Retry-After") == "" {
+		t.Fatal("per-address limit", w.Code)
+	}
+	if w := send("POST", "", "198.51.100.41", "", event(62)); w.Code != 202 {
+		t.Fatal("another client behind the same proxy was limited", w.Code)
 	}
 }

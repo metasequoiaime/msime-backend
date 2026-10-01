@@ -250,13 +250,17 @@
       "internal/account/site_settings_test.go::TestSiteDownloadMirrorAdminEditAndPublicRead"
     ],
     "GET /v1/community/skins": [
-      "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
+      "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart",
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked",
+      "internal/account/admin_moderation_test.go::TestSkinAndPluginScopeMine"
     ],
     "POST /v1/community/skins": [
-      "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
+      "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart",
+      "internal/account/admin_moderation_test.go::TestScreenUploadReportsScreeningOutage"
     ],
     "GET /v1/community/skins/{id}": [
-      "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
+      "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart",
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
     ],
     "DELETE /v1/community/skins/{id}": [
       "internal/account/community_test.go::TestCommunityPublishDownloadRatingOwnershipAndRestart"
@@ -269,14 +273,16 @@
     ],
     "GET /v1/community/candidate-skins": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
-      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinBoundaries"
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinBoundaries",
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
     ],
     "POST /v1/community/candidate-skins": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinBoundaries"
     ],
     "GET /v1/community/candidate-skins/{id}": [
-      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
+      "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle",
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
     ],
     "GET /v1/community/candidate-skins/sync": [
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinSync"
@@ -300,14 +306,17 @@
       "internal/account/community_candidate_test.go::TestCommunityCandidateSkinLifecycle"
     ],
     "GET /v1/community/plugins": [
-      "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle"
+      "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle",
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked",
+      "internal/account/admin_moderation_test.go::TestSkinAndPluginScopeMine"
     ],
     "POST /v1/community/plugins": [
       "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle",
       "internal/account/community_plugins_test.go::TestCommunityPluginPublishBoundaries"
     ],
     "GET /v1/community/plugins/{id}": [
-      "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle"
+      "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle",
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
     ],
     "DELETE /v1/community/plugins/{id}": [
       "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle"
@@ -319,13 +328,15 @@
       "internal/account/community_plugins_test.go::TestCommunityPluginLifecycle"
     ],
     "GET /v1/community/resources": [
-      "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation"
+      "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation",
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
     ],
     "POST /v1/community/resources": [
       "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation"
     ],
     "GET /v1/community/resources/{id}": [
-      "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation"
+      "internal/account/community_resources_test.go::TestResourcePublishVersionSaveRatingIsolation",
+      "internal/account/admin_moderation_test.go::TestAuthorSeesModerationStateOnlyWhenAsked"
     ],
     "DELETE /v1/community/resources/{id}": [
       "internal/account/http_contract_test.go::TestClipboardClearAndCommunityResourceDeleteHTTP"
@@ -342,7 +353,10 @@
     "POST /v1/telemetry/events": [
       "internal/account/admin_test.go::TestAdminDataAndActions",
       "internal/account/admin_contract_test.go::TestTelemetryHTTPValidationAndIdempotency",
-      "internal/account/admin_downloads_test.go::TestTelemetryDeviceActivityAndDownloadDimensions"
+      "internal/account/admin_downloads_test.go::TestTelemetryDeviceActivityAndDownloadDimensions",
+      "internal/account/admin_contract_test.go::TestTelemetryCrashTextNormalization",
+      "internal/account/admin_contract_test.go::TestTelemetryAnonymousRouteLimits",
+      "internal/server/account_test.go::TestAnonymousTelemetryThroughServer"
     ],
     "POST /v1/skins/generate": [
       "internal/server/skin_generation_test.go::TestSkinArtworkUsesFixedModelAndReturnsValidatedImage",

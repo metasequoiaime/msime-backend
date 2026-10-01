@@ -2,13 +2,37 @@ package account
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 // overviewPlatform maps a client-reported platform name in column to one canonical key, so that platform_active_7d and the daily platform groups agree: windows (also win), macos (also mac, darwin), linux, android, ios (also ipados), harmonyos (also harmony, ohos); any other name is kept lowercased.
 func overviewPlatform(column string) string {
 	return `(CASE lower(` + column + `) WHEN 'win' THEN 'windows' WHEN 'mac' THEN 'macos' WHEN 'darwin' THEN 'macos' WHEN 'ipados' THEN 'ios' WHEN 'harmony' THEN 'harmonyos' WHEN 'ohos' THEN 'harmonyos' ELSE lower(` + column + `) END)`
+}
+
+// platformAliases 把客户端对平台的其他叫法映射到规范的客户端平台 ID（windows、macos、linux、android、ios、harmony），公告投放和下载分组都用这套 ID。
+var platformAliases = map[string]string{"win": "windows", "mac": "macos", "darwin": "macos", "ipados": "ios", "harmonyos": "harmony", "ohos": "harmony"}
+
+// canonicalPlatform 把客户端上报的平台名转为小写，已知别名映射到规范 ID；其他名称原样以小写返回。
+func canonicalPlatform(platform string) string {
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	if canonical, ok := platformAliases[platform]; ok {
+		return canonical
+	}
+	return platform
+}
+
+// canonicalPlatformSQL 是 canonicalPlatform 对 column 的 SQL 表达式版本，让以别名上报的行与规范名称归为一组。
+func canonicalPlatformSQL(column string) string {
+	var cases strings.Builder
+	for _, alias := range slices.Sorted(maps.Keys(platformAliases)) {
+		cases.WriteString(" WHEN '" + alias + "' THEN '" + platformAliases[alias] + "'")
+	}
+	return `(CASE lower(btrim(` + column + `))` + cases.String() + ` ELSE lower(btrim(` + column + `)) END)`
 }
 
 // adminOverview serves GET /api/overview?days=7|30 (default 30): totals plus a daily series ending today in UTC, and the console overview additions: active devices (from anonymous `active` telemetry), the crash-free session rate (from `session`/`session_crash` telemetry), pending work kept in the database, and the monitored services' state.

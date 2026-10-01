@@ -2,8 +2,8 @@ import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { errorMessage, isAPIError, useAPI } from "../../api/client";
 import { keys } from "../../api/keys";
-import type { Moderation, Section } from "../../api/community";
-import { removeReasons } from "../../api/community";
+import type { CandidateCategory, Moderation, Section } from "../../api/community";
+import { candidateCategoryLabels, removeReasons } from "../../api/community";
 import { useConfirm } from "../../ui/confirm";
 import { useToast } from "../../ui/toast";
 
@@ -20,7 +20,7 @@ function approveValue(target: Target) {
   return { from: target.moderation, ...(target.created_at ? { created_at: target.created_at } : {}), ...(target.updated_at ? { updated_at: target.updated_at } : {}) };
 }
 
-// useModeration wraps approve_content, remove_content and restore_content with the confirm dialog, toasts and the 撤销 that calls the reverse action.
+// useModeration wraps approve_content, remove_content and restore_content with the confirm dialog, toasts and the 撤销 that calls the reverse action. setCategory 修改候选皮肤的图库分类，撤销即改回原分类。
 export function useModeration() {
   const api = useAPI();
   const client = useQueryClient();
@@ -89,5 +89,17 @@ export function useModeration() {
     toast({ text: `「${target.name}」已恢复`, undo: () => undoTo(target) });
   }, [run, toast, undoTo]);
 
-  return { approve, remove, restore };
+  const setCategory = useCallback(async (target: Target, from: CandidateCategory, to: CandidateCategory) => {
+    if (from === to) return;
+    const change = (category: CandidateCategory) => run({ action: "set_candidate_skin_category", section: "candidate-skins", id: target.id, value: { category } });
+    try {
+      await change(to);
+    } catch (error) {
+      toast(`操作失败：${errorMessage(error)}`);
+      return;
+    }
+    toast({ text: `「${target.name}」的分类已改为「${candidateCategoryLabels[to]}」`, undo: () => change(from) });
+  }, [run, toast]);
+
+  return { approve, remove, restore, setCategory };
 }

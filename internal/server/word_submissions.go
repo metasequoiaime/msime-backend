@@ -13,9 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -102,7 +100,7 @@ type WordsGitHubConfig struct {
 
 // WordSubmissionsConfig enables the anonymous website word form. An empty turnstile.site_key keeps the feature off; once it is set every other field is required and the server refuses to start with a partial configuration.
 type WordSubmissionsConfig struct {
-	// ClientIPHeader names a header set by the trusted reverse proxy that carries the visitor address (for example CF-Connecting-IP or X-Real-IP; for X-Forwarded-For the last entry is used). Empty trusts only the TCP peer, which behind a proxy makes every visitor share one quota. Set it only when the proxy overwrites the header, because clients can send it themselves.
+	// ClientIPHeader 是顶层 `client_ip_header` 的旧写法，仍然接受；Config.Validate 把设置了的那个同时写入两处，让词条表单和账号接口对访客身份的判断一致。
 	ClientIPHeader string            `json:"client_ip_header"`
 	Turnstile      TurnstileConfig   `json:"turnstile"`
 	GitHub         WordsGitHubConfig `json:"github"`
@@ -523,33 +521,9 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Behind a proxy the TCP peer is the proxy, so the configured header (set by that proxy) wins when it holds an address. IPv6 visitors are limited per /64, the smallest block a single subscriber usually controls.
+// clientAddress 是按确定后的 `client_ip_header` 计算的访客地址（见 account.ClientAddress）。
 func (ws *wordSubmitter) clientAddress(r *http.Request) string {
-	candidate := ""
-	if name := ws.config.ClientIPHeader; name != "" {
-		if values := r.Header.Values(name); len(values) > 0 {
-			candidate = values[len(values)-1]
-			if i := strings.LastIndexByte(candidate, ','); i >= 0 {
-				candidate = candidate[i+1:]
-			}
-		}
-	}
-	address, err := netip.ParseAddr(strings.TrimSpace(candidate))
-	if err != nil {
-		host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
-		if splitErr != nil {
-			host = r.RemoteAddr
-		}
-		if address, err = netip.ParseAddr(host); err != nil {
-			return host
-		}
-	}
-	address = address.Unmap()
-	if address.Is6() {
-		prefix, _ := address.Prefix(64)
-		return prefix.String()
-	}
-	return address.String()
+	return account.ClientAddress(r, ws.config.ClientIPHeader)
 }
 
 func wordCharacter(r rune) bool { return unicode.Is(unicode.Unified_Ideograph, r) || r == '〇' }
