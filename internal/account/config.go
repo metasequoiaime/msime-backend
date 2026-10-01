@@ -27,6 +27,15 @@ type WechatConfig struct {
 	SecretEnv   string `json:"secret_env"`
 	RedirectURI string `json:"redirect_uri"`
 }
+
+// AvatarConfig is the Cloudflare R2 bucket uploaded avatars are stored in. The bucket is public behind PublicBaseURL; the server only writes and deletes. The account ID and the access key pair are read from the named environment variables. An empty Bucket turns uploads off, and users keep their Google picture or the nickname initial.
+type AvatarConfig struct {
+	Bucket             string `json:"bucket"`
+	PublicBaseURL      string `json:"public_base_url"`
+	AccountIDEnv       string `json:"account_id_env"`
+	AccessKeyIDEnv     string `json:"access_key_id_env"`
+	SecretAccessKeyEnv string `json:"secret_access_key_env"`
+}
 type MailConfig struct {
 	Host        string `json:"host"`
 	Port        int    `json:"port"`
@@ -69,6 +78,7 @@ type Config struct {
 	Wechat    WechatConfig    `json:"wechat"`
 	SMS       SMSConfig       `json:"sms"`
 	Email     MailConfig      `json:"email"`
+	Avatars   AvatarConfig    `json:"avatars"`
 }
 
 func (c Config) Validate() error {
@@ -113,6 +123,12 @@ func (c Config) Validate() error {
 		a, e := mail.ParseAddress(c.Email.From)
 		if e != nil || a.Address != c.Email.From || c.Email.Host == "" || strings.ContainsAny(c.Email.Host, "/:\r\n ") || (c.Email.Port != 465 && c.Email.Port != 587) || c.Email.Username == "" || os.Getenv(c.Email.PasswordEnv) == "" {
 			return errors.New("Lark SMTP 配置无效：仅支持 TLS 465 或 STARTTLS 587")
+		}
+	}
+	if a := c.Avatars; a.Bucket != "" {
+		u, e := url.Parse(a.PublicBaseURL)
+		if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" || os.Getenv(a.AccountIDEnv) == "" || os.Getenv(a.AccessKeyIDEnv) == "" || os.Getenv(a.SecretAccessKeyEnv) == "" {
+			return errors.New("头像存储配置无效：public_base_url 须为 https 域名根地址，账号 ID 与访问密钥环境变量不能为空")
 		}
 	}
 	if c.SMS.TemplateCode != "" && (c.SMS.Region == "" || c.SMS.SignName == "" || os.Getenv(c.SMS.AccessKeyIDEnv) == "" || os.Getenv(c.SMS.AccessKeySecretEnv) == "") {

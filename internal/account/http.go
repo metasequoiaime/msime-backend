@@ -42,6 +42,8 @@ type Service struct {
 	tokenKey []byte
 	// googleTokenURL overrides the Google token endpoint in tests; empty means the production endpoint.
 	googleTokenURL string
+	// avatars stores uploaded avatars; nil when no bucket is configured, which turns uploads off.
+	avatars avatarStorage
 
 	// Admin console state: the deployment settings, the sensitive word matcher and the notice broadcaster.
 	admin       AdminSettings
@@ -89,6 +91,9 @@ func New(ctx context.Context, c Config) (*Service, error) {
 		a.tokenKey, _ = c.providerTokenKey()
 	}
 	a.sender = delivery{config: c}
+	if c.Avatars.Bucket != "" {
+		a.avatars = newR2Storage(c.Avatars)
+	}
 	go func() {
 		defer close(a.done)
 		a.maintain(lifetime)
@@ -240,6 +245,8 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"POST /v1/auth/refresh":                             (*Service).refresh,
 		"POST /v1/auth/logout":                              (*Service).logout,
 		"GET /v1/users/me":                                  (*Service).me,
+		"PUT /v1/users/me/avatar":                           (*Service).putAvatar,
+		"DELETE /v1/users/me/avatar":                        (*Service).deleteAvatar,
 		"PATCH /v1/users/me":                                (*Service).update,
 		"DELETE /v1/users/me":                               (*Service).delete,
 	} {
@@ -551,6 +558,7 @@ func (a *Service) login(w http.ResponseWriter, r *http.Request) {
 		a.error(w, e)
 		return
 	}
+	t.User = a.present(t.User)
 	write(w, 200, t)
 }
 func (a *Service) refresh(w http.ResponseWriter, r *http.Request) {
@@ -565,6 +573,7 @@ func (a *Service) refresh(w http.ResponseWriter, r *http.Request) {
 		a.error(w, e)
 		return
 	}
+	t.User = a.present(t.User)
 	write(w, 200, t)
 }
 func (a *Service) logout(w http.ResponseWriter, r *http.Request) {
@@ -589,12 +598,17 @@ func (a *Service) me(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	u, ids, e := a.store.Me(r.Context(), p.UserID)
+	a.writeMe(w, r, p.UserID)
+}
+
+// writeMe answers with the user and their identities, as GET /v1/users/me does; an avatar upload answers the same way so the client gets the new avatar_url without asking again.
+func (a *Service) writeMe(w http.ResponseWriter, r *http.Request, uid string) {
+	u, ids, e := a.store.Me(r.Context(), uid)
 	if e != nil {
 		a.error(w, e)
 		return
 	}
-	write(w, 200, map[string]any{"user": u, "identities": ids})
+	write(w, 200, map[string]any{"user": a.present(u), "identities": ids})
 }
 func (a *Service) update(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.principal(w, r, false)
@@ -623,9 +637,16 @@ func (a *Service) delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if e := a.store.DeleteUser(r.Context(), p.UserID); e != nil {
+	avatar, e := a.store.AvatarKey(r.Context(), p.UserID)
+	if e != nil {
 		a.error(w, e)
 		return
 	}
+	if e = a.store.DeleteUser(r.Context(), p.UserID); e != nil {
+		a.error(w, e)
+		return
+	}
+	// The public avatar goes with the account; it is only read for deletion once the account itself is gone.
+	a.deleteAvatarObject(avatar)
 	w.WriteHeader(204)
 }

@@ -1,0 +1,152 @@
+package account
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
+	_ "image/png"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	xdraw "golang.org/x/image/draw"
+)
+
+const (
+	// maxAvatarUploadBytes bounds an uploaded avatar before it is decoded.
+	maxAvatarUploadBytes = 1 << 20
+	// maxAvatarSourceSide bounds the decoded image, so a small file that declares an enormous canvas is refused before its pixels are allocated.
+	maxAvatarSourceSide = 4096
+	// avatarSide is the stored avatar: one square size, re-encoded, whatever was uploaded.
+	avatarSide = 256
+)
+
+var errInvalidAvatar = errors.New("invalid_avatar")
+
+// googleAvatarHost reports whether a stored Google picture URL may be handed to clients: only HTTPS on Google's own image host, so a client fetching it never reaches anywhere else.
+func googleAvatarHost(picture string) bool {
+	u, e := url.Parse(picture)
+	if e != nil || u.Scheme != "https" || u.User != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "googleusercontent.com" || strings.HasSuffix(host, ".googleusercontent.com")
+}
+
+// present fills the fields of a user that depend on this server's configuration. A custom avatar wins over the Google picture; a user with neither has no avatar_url, and clients draw the first character of the nickname instead.
+func (a *Service) present(u User) User {
+	switch {
+	case u.avatarKey != "" && a.config.Avatars.PublicBaseURL != "":
+		u.AvatarURL = strings.TrimSuffix(a.config.Avatars.PublicBaseURL, "/") + "/" + u.avatarKey
+	case googleAvatarHost(u.googlePicture):
+		u.AvatarURL = u.googlePicture
+	}
+	return u
+}
+
+// normalizeAvatar decodes an uploaded PNG or JPEG, crops it to its centred square and re-encodes it as a 256×256 JPEG on white, so what is stored carries no metadata and has one size and type however it was uploaded.
+func normalizeAvatar(data []byte) ([]byte, error) {
+	config, format, e := image.DecodeConfig(bytes.NewReader(data))
+	if e != nil || (format != "png" && format != "jpeg") || config.Width < 1 || config.Height < 1 || config.Width > maxAvatarSourceSide || config.Height > maxAvatarSourceSide {
+		return nil, errInvalidAvatar
+	}
+	source, _, e := image.Decode(bytes.NewReader(data))
+	if e != nil {
+		return nil, errInvalidAvatar
+	}
+	bounds := source.Bounds()
+	side := min(bounds.Dx(), bounds.Dy())
+	crop := image.Rect(0, 0, side, side).Add(bounds.Min).Add(image.Pt((bounds.Dx()-side)/2, (bounds.Dy()-side)/2))
+	out := image.NewRGBA(image.Rect(0, 0, avatarSide, avatarSide))
+	// JPEG has no alpha, so a transparent PNG is flattened onto white rather than onto black.
+	draw.Draw(out, out.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	xdraw.CatmullRom.Scale(out, out.Bounds(), source, crop, xdraw.Over, nil)
+	var encoded bytes.Buffer
+	if e = jpeg.Encode(&encoded, out, &jpeg.Options{Quality: 88}); e != nil {
+		return nil, e
+	}
+	return encoded.Bytes(), nil
+}
+
+// putAvatar replaces the user's custom avatar with an uploaded PNG or JPEG.
+func (a *Service) putAvatar(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.principal(w, r, false)
+	if !ok {
+		return
+	}
+	if a.avatars == nil {
+		writeError(w, 503, "avatar_upload_disabled")
+		return
+	}
+	if mediaType := strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]); mediaType != "image/png" && mediaType != "image/jpeg" {
+		writeError(w, 415, "unsupported_media_type")
+		return
+	}
+	if e := a.store.Rate(r.Context(), "avatar:"+p.UserID, 20, time.Hour); e != nil {
+		a.error(w, e)
+		return
+	}
+	data, e := io.ReadAll(io.LimitReader(r.Body, maxAvatarUploadBytes+1))
+	if e != nil {
+		writeError(w, 400, "invalid_avatar")
+		return
+	}
+	if len(data) > maxAvatarUploadBytes {
+		writeError(w, 413, "avatar_too_large")
+		return
+	}
+	normalized, e := normalizeAvatar(data)
+	if e != nil {
+		writeError(w, 400, "invalid_avatar")
+		return
+	}
+	// A fresh random key per upload is what lets the public URL be cached forever, and it says nothing about whose avatar it is.
+	key := "avatars/" + randomToken() + ".jpg"
+	if e = a.avatars.Put(r.Context(), key, normalized, "image/jpeg"); e != nil {
+		slog.Error("头像上传失败", "error", e)
+		writeError(w, 502, "avatar_storage_unavailable")
+		return
+	}
+	previous, e := a.store.SetAvatarKey(r.Context(), p.UserID, key)
+	if e != nil {
+		a.deleteAvatarObject(key)
+		a.error(w, e)
+		return
+	}
+	a.deleteAvatarObject(previous)
+	a.writeMe(w, r, p.UserID)
+}
+
+// deleteAvatar removes the user's custom avatar; the Google picture, if any, shows again.
+func (a *Service) deleteAvatar(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.principal(w, r, false)
+	if !ok {
+		return
+	}
+	previous, e := a.store.SetAvatarKey(r.Context(), p.UserID, "")
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	a.deleteAvatarObject(previous)
+	w.WriteHeader(204)
+}
+
+// deleteAvatarObject removes an object that no user points at any more. Best-effort: the user's change has already been committed, and an orphaned object costs storage, not correctness.
+func (a *Service) deleteAvatarObject(key string) {
+	if key == "" || a.avatars == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if e := a.avatars.Delete(ctx, key); e != nil {
+		slog.Warn("旧头像删除失败", "error", e)
+	}
+}

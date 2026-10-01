@@ -61,6 +61,12 @@
     "DELETE /v1/users/me": [
       "internal/account/http_contract_test.go::TestAccountHTTPProfileRefreshLogoutDelete"
     ],
+    "PUT /v1/users/me/avatar": [
+      "internal/account/avatar_test.go::TestGoogleProfileAndAvatarUpload"
+    ],
+    "DELETE /v1/users/me/avatar": [
+      "internal/account/avatar_test.go::TestGoogleProfileAndAvatarUpload"
+    ],
     "GET /v1/users/me/preferences": [
       "internal/account/preferences_test.go::TestPreferencesRevisionIsolationAndDeletion"
     ],

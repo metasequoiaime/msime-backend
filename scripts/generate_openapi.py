@@ -49,7 +49,7 @@ for key,op in spec['websocket_operations'].items():
     paths[op['path']]={'get':{'operationId':key,'summary':'实时语音 WebSocket（仅文档）','tags':['实时语音'],'description':op['protocol']+'\n\nSwagger UI 不支持 WebSocket 二进制会话。使用 WSS 客户端携带设备 Bearer 令牌建立连接。'+op['close_policy']+f' 单消息最多 {limits["stream_message_bytes"]} 字节，每方向每会话最多 {limits["stream_session_bytes"]} 字节。','x-websocket':True,'responses':{'101':{'description':'WebSocket 升级成功；后续为豆包 ASR v1 二进制消息'},'400':{'description':'需要 WebSocket Upgrade'},'401':{'description':'设备令牌无效'},'503':{'description':'功能未启用或服务繁忙'}}}}
 result={'openapi':'3.0.3','info':{'title':'水杉输入法后端 API','version':spec['version'],'description':'水杉输入法共通后端。点击 Authorize 填写设备令牌（不含 Bearer 前缀）。功能是否启用请查询 capabilities。JSON 请求最多 64 KiB，multipart 总体最多 16 MiB。服务不保存输入和音频。'},'servers':[{'url':'/'}],'security':[{'deviceToken':[]}],'paths':paths,'components':{'securitySchemes':{'deviceToken':{'type':'http','scheme':'bearer','description':'管理员发放的设备令牌；不是供应商密钥。'}},'schemas':{'Error':infer(spec['error_response'])}}}
 # 用户体系独立于 Engine 输入协议，避免修改客户端共通契约。
-user=obj({'id':string(),'display_name':string(),'created_at':string(format='date-time')})
+user=obj({'id':string(),'display_name':string(),'created_at':string(format='date-time'),'email':string(format='email',description='已绑定 Google 身份的已验证邮箱，仅返回给用户本人；没有时省略。'),'avatar_url':string(format='uri',description='头像地址：上传的自定义头像优先，其次是 Google 头像；都没有时省略，客户端显示昵称首字。')},['id','display_name','created_at'])
 tokens=obj({'access_token':string(),'refresh_token':string(),'token_type':string(enum=['Bearer']),'expires_in':{'type':'integer'},'user':user})
 provider=string(enum=['apple','google','wechat','phone','email'])
 auth_operations=[
@@ -61,6 +61,7 @@ auth_operations=[
  ('/v1/users/me','get','查询当前用户和已绑定身份',None,obj({'user':user,'identities':{'type':'array','items':obj({'provider':provider,'subject':string()})}}),True,200),
  ('/v1/users/me','patch','修改当前用户昵称',obj({'display_name':string(maxLength=64)},['display_name'],True),None,True,204),
  ('/v1/users/me','delete','注销当前用户',None,None,True,204),
+ ('/v1/users/me/avatar','delete','删除自定义头像',None,None,True,204),
 ]
 for path,method,title,body,response,protected,status in auth_operations:
     responses={str(status):{'description':'成功'}}
@@ -70,6 +71,7 @@ for path,method,title,body,response,protected,status in auth_operations:
     op={'summary':title,'tags':['用户体系'],'security':[{'userSession':[]}] if protected else [],'responses':responses,'description':'JSON 请求最多 16 KiB。绑定身份需要在挑战创建和验证时携带同一用户的会话令牌；绑定和注销要求最近 10 分钟内登录。设备令牌不能用于用户管理。'}
     if body: op['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     paths.setdefault(path,{})[method]=op
+paths['/v1/users/me/avatar']['put']={'summary':'上传自定义头像','tags':['用户体系'],'security':[{'userSession':[]}],'description':'请求体为 PNG 或 JPEG 原始字节，最多 1 MiB，边长不超过 4096。服务端裁成居中正方形并重新编码为 256×256 JPEG，存入公开存储并替换原有自定义头像；每用户每小时最多 20 次。未配置头像存储时返回 503。','requestBody':{'required':True,'content':{'image/png':{'schema':string(format='binary')},'image/jpeg':{'schema':string(format='binary')}}},'responses':{'200':{'description':'成功，返回更新后的用户和身份','content':{'application/json':{'schema':obj({'user':user,'identities':{'type':'array','items':obj({'provider':provider,'subject':string()})}})}}},'400':{'description':'不是有效的 PNG/JPEG 图片'},'401':{'description':'需要登录'},'413':{'description':'超过 1 MiB'},'415':{'description':'不是 image/png 或 image/jpeg'},'429':{'description':'限流'},'502':{'description':'头像存储不可用'},'503':{'description':'未配置头像存储'}}}
 result['security']=[{'deviceToken':[]},{'userSession':[]}]
 result['components']['securitySchemes']['userSession']={'type':'http','scheme':'bearer','description':'登录返回的 access_token，不是 refresh_token 或供应商密钥。'}
 result['info']['description']+=' 用户接口详见用户体系标签；登录成功后也可使用用户 access_token 调用在线输入接口。'
