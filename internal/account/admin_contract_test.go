@@ -62,7 +62,7 @@ func TestTelemetryHTTPValidationAndIdempotency(t *testing.T) {
 	valid := `{"id":"telemetry-contract-01","kind":"download","platform":"ios","version":"1"}`
 	apiRequest(t, handler, "POST", "/v1/telemetry/events", valid, "", 202)
 	apiRequest(t, handler, "POST", "/v1/telemetry/events", strings.Replace(valid, `"ios"`, `"windows"`, 1), "", 202)
-	for _, body := range []string{`{`, valid + `{}`, strings.Replace(valid, `"download"`, `"other"`, 1), strings.Replace(valid, `"ios"`, `""`, 1), strings.Replace(valid, `"version":"1"`, `"version":"1","stack":"forbidden"`, 1), strings.Replace(valid, `"download"`, `"crash"`, 1), strings.Replace(valid, `"version":"1"`, `"version":"`+strings.Repeat("x", 65)+`"`, 1)} {
+	for _, body := range []string{`{`, valid + `{}`, strings.Replace(valid, `"download"`, `"other"`, 1), strings.Replace(valid, `"ios"`, `""`, 1), strings.Replace(valid, `"version":"1"`, `"version":"1","stack":"forbidden"`, 1), strings.Replace(valid, `"download"`, `"crash"`, 1), strings.Replace(valid, `"version":"1"`, `"version":"`+strings.Repeat("x", 65)+`"`, 1), strings.Replace(valid, `"version":"1"`, `"version":"1","unknown":"x"`, 1), strings.Replace(valid, `"version":"1"`, `"version":"1","channel":"GitHub"`, 1), strings.Replace(valid, `"version":"1"`, `"version":"1","artifact":"`+strings.Repeat("x", 65)+`"`, 1), strings.Replace(valid, `"version":"1"`, `"version":"1","install_id":"short"`, 1), strings.Replace(valid, `"download"`, `"active"`, 1)} {
 		apiRequest(t, handler, "POST", "/v1/telemetry/events", body, "", 400)
 	}
 	var count int

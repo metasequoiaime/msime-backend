@@ -64,6 +64,11 @@ FIXTURES = {
                       "sessions": [{"id": "s1", "created_at": "2026-09-30T00:00:00Z", "expires_at": "2026-10-30T00:00:00Z", "last_active": "2026-10-01T00:00:00Z", "user_agent": "MSIME/0.5.4 (Windows 11)", "status": "active"}],
                       "works": [{"section": "skins", "id": "k1", "name": "水杉秋色", "moderation": "approved", "moderation_reason": "", "created_at": "2026-09-15T00:00:00Z", "downloads": 3880, "saves": 0}],
                       "history": [{"id": 1, "action": "revoke_session", "actor": "owner@example.com", "detail": {}, "created_at": "2026-09-20T00:00:00Z"}]},
+    "/api/downloads/summary": {"day": "2026-10-01", "rows": [
+        {"source": "github_release", "platform": "windows", "version": "v0.5.4", "artifact": "msime-windows-x64-setup.exe", "channel": "github", "repo": "metasequoiaime/msime-windows", "tag": "windows-v0.5.4", "today": 812, "week": 5120},
+        {"source": "telemetry", "platform": "windows", "version": "v0.5.4", "artifact": "x64 安装包", "channel": "cn-mirror", "today": 388, "week": 2410},
+        {"source": "telemetry", "platform": "android", "version": "0.1.0", "artifact": None, "channel": None, "today": 0, "week": 3},
+    ], "totals": {"today": 1200, "week": 7533, "github_today": 812, "github_week": 5120, "mirror_week": 2410}, "mirror_share": 0.32, "channel_reported": True, "snapshot_day": "2026-10-01", "truncated": False},
 }
 
 # Issue triage (U3): one open issue on the list and its detail, shaped like internal/server/admin_issues.go.
@@ -181,6 +186,16 @@ def main() -> int:
                     expect(page.get_by_role("complementary", name="后台导航")).to_be_visible()
                     expect(page.locator("header h1")).to_have_text(title)
                     violations(path)
+
+                page.goto(base + "/downloads")
+                expect(page.get_by_role("table", name="下载记录")).to_contain_text("官网镜像（国内）")
+                expect(page.get_by_text("32%", exact=True)).to_be_visible()
+                page.get_by_role("radio", name=re.compile("^Android")).click()
+                page.wait_for_url(re.compile(r"/downloads\?platform=android$"))
+                expect(page.get_by_role("table", name="下载记录")).not_to_contain_text("GitHub Release")
+                page.goto(base + "/downloads?platform=bogus")
+                expect(page.get_by_role("table", name="下载记录")).to_contain_text("GitHub Release")
+                violations("downloads")
 
                 for old, new in REDIRECTS.items():
                     page.goto(base + old)
