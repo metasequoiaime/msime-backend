@@ -251,6 +251,14 @@ func TestAdminReleasesRead(t *testing.T) {
 	if withdrawn := history.Releases[3]; withdrawn.Body != "### 说明\n- 缺少 vc_redist" || !jsonEqual(withdrawn.Notes, []releaseNote{{"说明", "缺少 vc_redist"}}) {
 		t.Fatalf("withdrawal block leaked into the notes: %+v", withdrawn)
 	}
+	// Reads never ask for Actions access, so an installation without it still lists releases.
+	f.mu.Lock()
+	for _, body := range f.bodies["POST /app/installations/77/access_tokens"] {
+		if perms, _ := body["permissions"].(map[string]any); perms["actions"] != nil {
+			t.Errorf("a read requested %v", perms)
+		}
+	}
+	f.mu.Unlock()
 	// Reads are cached: the history reused the list's release read of the repository.
 	if n := f.count("GET /repos/metasequoiaime/msime-windows/releases"); n != 1 {
 		t.Fatal("release list read", n, "times")
@@ -315,6 +323,21 @@ func TestReleaseNoteParsing(t *testing.T) {
 	}
 	if releaseUserBody(withdrawnBody("正文")) != "正文" || releaseUserBody(withdrawnBody("")) != "" || !releaseWithdrawn("\r\n"+withdrawnBody("x")) || releaseWithdrawn("正文 "+releaseWithdrawnMarker) {
 		t.Fatal("withdrawal block round trip")
+	}
+	for _, tc := range []struct {
+		status int
+		header http.Header
+		code   string
+	}{
+		{401, nil, "github_rejected"},
+		{403, nil, "github_rejected"},
+		{403, http.Header{"X-Ratelimit-Remaining": {"0"}}, "github_unavailable"},
+		{403, http.Header{"Retry-After": {"60"}}, "github_unavailable"},
+		{500, nil, "github_unavailable"},
+	} {
+		if code := releaseErrorCode(releaseStatusError(githubapp.Response{Status: tc.status, Header: tc.header})); code != tc.code {
+			t.Fatal(tc, code)
+		}
 	}
 	p := AdminPlatformConfig{TagPrefix: "ios-"}
 	if releaseVersion(p, "ios-1.0.0") != "v1.0.0" || releaseVersion(p, "ios-v2") != "v2" || releaseVersion(p, "ios-beta") != "beta" {
@@ -428,6 +451,13 @@ func TestAdminReleaseWrites(t *testing.T) {
 	if code := errorCode(t, s, releaseWrite("/api/releases/windows/trigger", `{"version":"v0.5.6"}`), 409); code != "workflow_rejected" {
 		t.Fatal(code)
 	}
+	// A 403 is the App lacking Actions access, which no retry fixes.
+	f.mu.Lock()
+	f.status[dispatch] = 403
+	f.mu.Unlock()
+	if code := errorCode(t, s, releaseWrite("/api/releases/windows/trigger", `{"version":"v0.5.6"}`), 502); code != "github_rejected" {
+		t.Fatal(code)
+	}
 	f.mu.Lock()
 	f.status["PATCH /repos/metasequoiaime/msime-windows/releases/3"] = 500
 	f.mu.Unlock()
@@ -454,7 +484,7 @@ func TestAdminReleaseWrites(t *testing.T) {
 	// Withdrawing the repository's latest release turns it into a marked prerelease and makes the previous published release latest again.
 	var result map[string]any
 	serveAdminJSON(t, s, releaseWrite("/api/releases/windows/windows-v0.5.4/withdraw", ``), 200, &result)
-	if !jsonEqual(result, map[string]any{"latest_restored": true, "ok": true, "previous": "windows-v0.5.3"}) {
+	if !jsonEqual(result, map[string]any{"latest_restored": true, "ok": true, "previous": "windows-v0.5.3", "was_latest": true}) {
 		t.Fatalf("%+v", result)
 	}
 	if body := f.lastBody("PATCH /repos/metasequoiaime/msime-windows/releases/3"); body["prerelease"] != true || body["body"] != withdrawnBody("### 修复\n- 新说明") {
@@ -473,9 +503,24 @@ func TestAdminReleaseWrites(t *testing.T) {
 	if history.Releases[1].Status != "withdrawn" || history.Releases[1].Body != "### 修复\n- 新说明" {
 		t.Fatalf("%+v", history.Releases[1])
 	}
-	// Withdrawing a release that is not the repository's latest leaves latest alone.
+	// GitHub refusing to make the previous release latest again does not undo the withdrawal; the result says the restore failed.
+	f.mu.Lock()
+	f.releases["metasequoiaime/msime-windows"][2]["prerelease"] = false
+	f.releases["metasequoiaime/msime-windows"][2]["body"] = "### 修复\n- 新说明"
+	f.latest["metasequoiaime/msime-windows"] = 3
+	f.status["PATCH /repos/metasequoiaime/msime-windows/releases/2"] = 500
+	f.mu.Unlock()
+	serveAdminJSON(t, s, releaseWrite("/api/releases/windows/windows-v0.5.4/withdraw", ``), 200, &result)
+	if !jsonEqual(result, map[string]any{"latest_restored": false, "ok": true, "previous": "windows-v0.5.3", "was_latest": true}) {
+		t.Fatalf("%+v", result)
+	}
+	f.mu.Lock()
+	delete(f.status, "PATCH /repos/metasequoiaime/msime-windows/releases/2")
+	f.latest["metasequoiaime/msime-windows"] = 9
+	f.mu.Unlock()
+	// Withdrawing a release that is not the repository's latest leaves latest alone: the only PATCH is the withdrawal itself.
 	serveAdminJSON(t, s, releaseWrite("/api/releases/windows/windows-v0.5.3/withdraw", ``), 200, &result)
-	if !jsonEqual(result, map[string]any{"latest_restored": false, "ok": true, "previous": nil}) || f.count("PATCH /repos/metasequoiaime/msime-windows/releases/2") != 2 {
+	if !jsonEqual(result, map[string]any{"latest_restored": false, "ok": true, "previous": nil, "was_latest": false}) || f.count("PATCH /repos/metasequoiaime/msime-windows/releases/2") != 3 || f.latest["metasequoiaime/msime-windows"] != 9 {
 		t.Fatalf("%+v", result)
 	}
 
@@ -484,11 +529,14 @@ func TestAdminReleaseWrites(t *testing.T) {
 	for _, a := range audits {
 		actions = append(actions, a.Action+":"+a.Target)
 	}
-	if strings.Join(actions, ",") != "release_trigger:windows,release_notes:windows-v0.5.4,release_notes:windows-v0.5.2,release_withdraw:windows-v0.5.4,release_withdraw:windows-v0.5.3" {
+	if strings.Join(actions, ",") != "release_trigger:windows,release_notes:windows-v0.5.4,release_notes:windows-v0.5.2,release_withdraw:windows-v0.5.4,release_withdraw:windows-v0.5.4,release_withdraw:windows-v0.5.3" {
 		t.Fatal(actions)
 	}
-	if !jsonEqual(audits[3].Detail, map[string]any{"latest_restored": true, "platform": "Windows", "previous": "windows-v0.5.3", "version": "v0.5.4"}) {
+	if !jsonEqual(audits[3].Detail, map[string]any{"latest_restored": true, "platform": "Windows", "previous": "windows-v0.5.3", "version": "v0.5.4", "was_latest": true}) {
 		t.Fatalf("%+v", audits[3].Detail)
+	}
+	if !jsonEqual(audits[4].Detail, map[string]any{"latest_restored": false, "platform": "Windows", "previous": "windows-v0.5.3", "version": "v0.5.4", "was_latest": true}) {
+		t.Fatalf("%+v", audits[4].Detail)
 	}
 }
 

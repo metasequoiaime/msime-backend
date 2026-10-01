@@ -50,8 +50,8 @@ export type ReleaseHistory = z.infer<typeof releaseHistorySchema>;
 // POST /api/releases/{platform}/trigger {version} and POST /api/releases/{platform}/{tag}/notes {body}.
 export const releaseOkSchema = z.object({ ok: z.literal(true) });
 
-// POST /api/releases/{platform}/{tag}/withdraw: previous is the platform's earlier published release, latest_restored whether it became the repository's latest again.
-export const withdrawResultSchema = z.object({ ok: z.literal(true), previous: z.string().nullable(), latest_restored: z.boolean() });
+// POST /api/releases/{platform}/{tag}/withdraw: previous is the platform's earlier published release, was_latest whether the withdrawn release was the repository's latest, latest_restored whether previous became latest again.
+export const withdrawResultSchema = z.object({ ok: z.literal(true), previous: z.string().nullable(), was_latest: z.boolean(), latest_restored: z.boolean() });
 
 export function releasePath(platform: string, tag?: string, action?: "trigger" | "notes" | "withdraw"): string {
   const parts = ["releases", encodeURIComponent(platform)];

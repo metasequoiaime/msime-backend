@@ -1,5 +1,5 @@
 import { format } from "date-fns";
-import { errorMessage, isAPIError } from "../../api/client";
+import { APIError, errorMessage, isAPIError } from "../../api/client";
 import type { Release, ReleaseStatus } from "../../api/release";
 import type { Tone } from "../../ui/pill";
 
@@ -35,6 +35,11 @@ export function releaseErrorText(error: unknown): string {
     if (isAPIError(error, code)) return text;
   }
   return errorMessage(error);
+}
+
+// releaseDisplayError gives ErrorState the release wording for the codes above, so a 502 from GitHub reads as a GitHub problem rather than a server or database failure; other errors (github_disabled among them) pass through unchanged.
+export function releaseDisplayError(error: unknown): unknown {
+  return error instanceof APIError && Object.hasOwn(releaseErrors, error.code) ? new Error(releaseErrors[error.code]) : error;
 }
 
 export function platformErrorText(code: string): string {

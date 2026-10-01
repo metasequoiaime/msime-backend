@@ -22,8 +22,12 @@ import (
 
 // Release management (unit U7): admin.github.platforms and their GitHub releases.
 
-// releasePerms is the one token scope every release call uses, so reads and writes share a cached installation token per repository.
-var releasePerms = map[string]string{"contents": "write", "actions": "write", "checks": "read", "metadata": "read"}
+// Each kind of release call asks for its own token scope, so an installation without, say, Actions access still lists releases and edits notes. Listing releases needs contents:write because GitHub only shows draft releases to callers with push access.
+var (
+	releasePerms         = map[string]string{"contents": "write", "metadata": "read"}
+	releaseChecksPerms   = map[string]string{"checks": "read", "metadata": "read"}
+	releaseWorkflowPerms = map[string]string{"actions": "write", "metadata": "read"}
+)
 
 // releaseWithdrawnMarker opens the body of a withdrawn release. It is an HTML comment so GitHub does not render it; the quote line after it is what readers of the release page see.
 const (
@@ -286,7 +290,7 @@ func fetchPlatformReleases(ctx context.Context, gh *githubapp.Client, p AdminPla
 		return nil, errReleaseRepo
 	}
 	if !resp.OK() {
-		return nil, githubapp.ErrUnavailable
+		return nil, releaseStatusError(resp)
 	}
 	var all []ghRelease
 	if resp.Decode(&all) != nil {
@@ -314,6 +318,15 @@ func releaseErrorCode(err error) string {
 	default:
 		return "github_unavailable"
 	}
+}
+
+// releaseStatusError classifies a failed GitHub answer: 401 and 403 mean the App's token lacks access (github_rejected), except a 403 that is GitHub's rate limit, which like every other failure is github_unavailable.
+func releaseStatusError(resp githubapp.Response) error {
+	rateLimited := resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-RateLimit-Remaining") == "0"
+	if resp.Status == http.StatusUnauthorized || (resp.Status == http.StatusForbidden && !rateLimited) {
+		return githubapp.ErrRejected
+	}
+	return githubapp.ErrUnavailable
 }
 
 func failRelease(w http.ResponseWriter, err error) {
@@ -476,7 +489,7 @@ func releaseCheckRuns(ctx context.Context, gh *githubapp.Client, repo, ref strin
 	if ref == "" {
 		return runs, false
 	}
-	token, err := gh.Token(ctx, repo, releasePerms)
+	token, err := gh.Token(ctx, repo, releaseChecksPerms)
 	if err != nil {
 		return runs, false
 	}
@@ -532,7 +545,7 @@ func (s *Server) triggerRelease(w http.ResponseWriter, r *http.Request, gh *gith
 		return
 	}
 	ctx := r.Context()
-	token, err := gh.Token(ctx, p.Repo, releasePerms)
+	token, err := gh.Token(ctx, p.Repo, releaseWorkflowPerms)
 	if err != nil {
 		failRelease(w, err)
 		return
@@ -548,7 +561,10 @@ func (s *Server) triggerRelease(w http.ResponseWriter, r *http.Request, gh *gith
 	case repo.Status == 404:
 		failRelease(w, errReleaseRepo)
 		return
-	case !repo.OK() || repo.Decode(&info) != nil || info.DefaultBranch == "":
+	case !repo.OK():
+		failRelease(w, releaseStatusError(repo))
+		return
+	case repo.Decode(&info) != nil || info.DefaultBranch == "":
 		failRelease(w, githubapp.ErrUnavailable)
 		return
 	}
@@ -568,7 +584,7 @@ func (s *Server) triggerRelease(w http.ResponseWriter, r *http.Request, gh *gith
 		fail(w, 409, "workflow_rejected")
 		return
 	case !resp.OK():
-		failRelease(w, githubapp.ErrUnavailable)
+		failRelease(w, releaseStatusError(resp))
 		return
 	}
 	gh.Invalidate("/repos/" + p.Repo + "/actions/")
@@ -663,11 +679,13 @@ func (s *Server) withdrawRelease(w http.ResponseWriter, r *http.Request, gh *git
 			break
 		}
 	}
-	detail := map[string]any{"platform": p.Name, "version": releaseVersion(p, tag), "previous": nil, "latest_restored": false}
-	result := map[string]any{"ok": true, "previous": nil, "latest_restored": false}
+	// was_latest tells the console whether latest_restored false means "nothing to restore" or "GitHub refused to restore it".
+	wasLatest := current.ID == release.ID
+	detail := map[string]any{"platform": p.Name, "version": releaseVersion(p, tag), "previous": nil, "was_latest": wasLatest, "latest_restored": false}
+	result := map[string]any{"ok": true, "previous": nil, "was_latest": wasLatest, "latest_restored": false}
 	if previous != nil {
 		detail["previous"], result["previous"] = previous.TagName, previous.TagName
-		if current.ID == release.ID {
+		if wasLatest {
 			// The withdrawal itself already succeeded, so a failure here is reported in the result rather than as an error.
 			resp, err := gh.Do(ctx, token, "PATCH", "/repos/"+p.Repo+"/releases/"+strconv.FormatInt(previous.ID, 10), map[string]any{"make_latest": "true"})
 			restored := err == nil && resp.OK()
@@ -701,7 +719,7 @@ func (s *Server) patchRelease(w http.ResponseWriter, ctx context.Context, gh *gi
 		fail(w, 409, "release_rejected")
 		return false
 	case !resp.OK():
-		failRelease(w, githubapp.ErrUnavailable)
+		failRelease(w, releaseStatusError(resp))
 		return false
 	}
 	return true

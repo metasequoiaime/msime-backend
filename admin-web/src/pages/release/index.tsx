@@ -15,7 +15,7 @@ import { DetailBody, DetailHeader } from "./detail";
 import type { DetailHandlers } from "./detail";
 import { NotesDialog, TriggerDialog } from "./dialogs";
 import { PlatformCard } from "./list";
-import { releaseErrorText } from "./shared";
+import { releaseDisplayError, releaseErrorText } from "./shared";
 
 type DialogState =
   | { kind: "trigger"; platform: ReleasePlatform; version: string }
@@ -62,9 +62,12 @@ export default function ReleasePage() {
   });
   const withdraw = useMutation({
     mutationFn: (v: { platform: ReleasePlatform; release: Release }) => api.post(releasePath(v.platform.id, v.release.tag, "withdraw"), withdrawResultSchema),
-    onSuccess: (result, v) => toast(result.previous
-      ? `${v.platform.name} ${v.release.version} 已撤回，下载页回退到上一个版本`
-      : `${v.platform.name} ${v.release.version} 已撤回，没有可回退的正式版本`),
+    onSuccess: (result, v) => {
+      const name = `${v.platform.name} ${v.release.version}`;
+      if (!result.previous) toast(`${name} 已撤回，没有可回退的正式版本`);
+      else if (result.was_latest && !result.latest_restored) toast(`${name} 已撤回，但未能把 ${result.previous} 设为最新版本，请在 GitHub 上手动设置`);
+      else toast(`${name} 已撤回，下载页回退到上一个版本`);
+    },
     onError: fail,
     onSettled: refresh,
   });
@@ -93,14 +96,14 @@ export default function ReleasePage() {
         : <Skeleton className="h-[34px] w-64" />}
       {selected ? <DetailBody key={selected.id} platform={selected} history={history.data} loading={history.isPending} error={history.error} onRetry={() => history.refetch()}
         focusTag={focusPlatform === selected.id && focusTag ? focusTag : undefined} handlers={handlers} />
-        : history.isError ? <ErrorState error={history.error} onRetry={() => history.refetch()} /> : <Skeleton className="h-64" />}
+        : history.isError ? <ErrorState error={releaseDisplayError(history.error)} onRetry={() => history.refetch()} /> : <Skeleton className="h-64" />}
     </div>;
   } else if (list.isPending) {
     content = <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3.5 max-[759px]:grid-cols-1" role="status" aria-label="正在加载">
       {[0, 1, 2].map(i => <Skeleton key={i} className="h-[300px] rounded-[18px]" />)}
     </div>;
   } else if (list.isError) {
-    content = <ErrorState error={list.error} onRetry={() => list.refetch()} />;
+    content = <ErrorState error={releaseDisplayError(list.error)} onRetry={() => list.refetch()} />;
   } else if (platforms.length === 0) {
     content = <NotConfigured title="未配置发布平台">在 config.json 的 admin.github.platforms 中配置平台名称、仓库、tag 前缀和发布流水线后，这里会显示各平台的 GitHub Release。</NotConfigured>;
   } else {

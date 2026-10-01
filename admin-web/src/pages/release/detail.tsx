@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
 import type { Release, ReleaseHistory, ReleasePlatform } from "../../api/release";
 import { noPermissionHint } from "../../shell/permissions";
@@ -9,7 +9,7 @@ import { Pill } from "../../ui/pill";
 import { Segmented } from "../../ui/segmented";
 import { StatGrid, StatTile } from "../../ui/stat-tile";
 import { Empty, ErrorState, SkeletonRows } from "../../ui/states";
-import { formatCount, formatSize, noteKindClass, releaseDate, statusLabel, statusTone } from "./shared";
+import { formatCount, formatSize, noteKindClass, releaseDate, releaseDisplayError, statusLabel, statusTone } from "./shared";
 
 export type DetailHandlers = {
   canTrigger: boolean;
@@ -60,19 +60,24 @@ export function DetailBody({ platform, history, loading, error, onRetry, focusTa
         <Button size="sm" variant="primary" disabled={!handlers.canTrigger || !platform.workflow} title={triggerTitle}
           onClick={() => handlers.onTrigger(platform, current && current.status !== "released" ? current.version : "")}>触发发布</Button>
       </div>
-      {loading ? <SkeletonRows rows={4} /> : error ? <ErrorState className="m-4" error={error} onRetry={onRetry} /> : releases.length === 0
+      {loading ? <SkeletonRows rows={4} /> : error ? <ErrorState className="m-4" error={releaseDisplayError(error)} onRetry={onRetry} /> : releases.length === 0
         ? <Empty title="还没有发布">{`仓库 ${platform.repo} 中没有以 ${platform.tag_prefix} 开头的 Release。`}</Empty>
         : <ul className="m-0 list-none p-0">
-          {releases.map(release => <HistoryRow key={release.tag} release={release} open={openTag === release.tag} onToggle={() => setOpen(openTag === release.tag ? null : release.tag)}
+          {releases.map(release => <HistoryRow key={release.tag} release={release} focused={focusTag === release.tag} open={openTag === release.tag} onToggle={() => setOpen(openTag === release.tag ? null : release.tag)}
             canTrigger={handlers.canTrigger} onEditNotes={() => handlers.onEditNotes(platform, release)} onWithdraw={() => handlers.onWithdraw(platform, release)} />)}
         </ul>}
     </Card>
   </>;
 }
 
-function HistoryRow({ release, open, onToggle, canTrigger, onEditNotes, onWithdraw }: { release: Release; open: boolean; onToggle: () => void; canTrigger: boolean; onEditNotes: () => void; onWithdraw: () => void }) {
+function HistoryRow({ release, focused, open, onToggle, canTrigger, onEditNotes, onWithdraw }: { release: Release; focused: boolean; open: boolean; onToggle: () => void; canTrigger: boolean; onEditNotes: () => void; onWithdraw: () => void }) {
   const bodyID = `release-${release.id}`;
-  return <li className="border-b border-hair last:border-b-0">
+  const rowRef = useRef<HTMLLIElement>(null);
+  // A release opened from the global search may sit far down the history; bring it into view once.
+  useEffect(() => {
+    if (focused) rowRef.current?.scrollIntoView({ block: "center" });
+  }, [focused]);
+  return <li ref={rowRef} className="border-b border-hair last:border-b-0">
     <button type="button" onClick={onToggle} aria-expanded={open} aria-controls={bodyID}
       className="grid w-full grid-cols-[minmax(0,1fr)] items-center gap-x-3 gap-y-1 px-5 py-3.5 text-left transition hover:bg-panel-2 min-[820px]:grid-cols-[minmax(220px,1.6fr)_110px_100px_110px]">
       <span className="flex min-w-0 items-center gap-2.5">
