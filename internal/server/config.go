@@ -107,6 +107,10 @@ func LoadConfig(path string) (Config, error) {
 	return c, err
 }
 func (c *Config) Validate() error {
+	// word_submissions rows are keyed by pull request number alone, so the console reviews the repository the website submits to: a blank dictionary_repo follows it, and a different one is refused below.
+	if c.Admin.GitHub.DictionaryRepo == "" && c.WordSubmissions.enabled() {
+		c.Admin.GitHub.DictionaryRepo = c.WordSubmissions.GitHub.Repository
+	}
 	if err := c.Admin.validate(c.Auth.Enabled, c.Clients); err != nil {
 		return err
 	}
@@ -239,7 +243,13 @@ func (c *Config) Validate() error {
 			return errors.New("allowed_origins must contain HTTPS origins")
 		}
 	}
-	return c.WordSubmissions.validate(c.Auth.Enabled, c.AllowedOrigins)
+	if err := c.WordSubmissions.validate(c.Auth.Enabled, c.AllowedOrigins); err != nil {
+		return err
+	}
+	if c.Admin.Enabled && c.Admin.GitHub.enabled() && c.WordSubmissions.enabled() && !strings.EqualFold(c.Admin.GitHub.DictionaryRepo, c.WordSubmissions.GitHub.Repository) {
+		return errors.New("admin github dictionary_repo must be the word_submissions github repository: submission notes are matched to pull requests by number")
+	}
+	return nil
 }
 
 func validateTranslationEndpoint(e *TranslationEndpoint, requireProvider bool) error {
