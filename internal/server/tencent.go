@@ -75,6 +75,8 @@ func (s *Server) translateTencentUpstream(w http.ResponseWriter, r *http.Request
 		return nil, false
 	}
 	signTencent(req, payload, e, time.Now())
+	// Only the cache misses sent here are metered; translate settles the call from the response it writes.
+	meterUsage(r, textChars(texts))
 	body, err := s.doUpstream(req)
 	var result struct {
 		Response struct {

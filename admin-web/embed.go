@@ -13,9 +13,14 @@ import (
 //go:embed dist
 var assets embed.FS
 
+// pagePaths are the SPA routes served with index.html; keep in sync with src/routes/router.tsx.
 var pagePaths = map[string]bool{
-	"/admins": true, "/": true, "/users": true, "/downloads": true, "/crashes": true,
-	"/skins": true, "/dictionaries": true, "/replies": true, "/audit": true, "/system": true, "/site-settings": true,
+	"/": true, "/dictpr": true, "/community": true, "/issues": true, "/words": true,
+	"/users": true, "/downloads": true, "/notice": true, "/release": true, "/cloud": true,
+	"/crash": true, "/status": true, "/perm": true, "/me": true,
+	// Pre-console paths that the client router redirects to their replacements.
+	"/admins": true, "/audit": true, "/system": true, "/crashes": true,
+	"/skins": true, "/dictionaries": true, "/replies": true, "/site-settings": true,
 }
 
 func IsPath(path string) bool { return pagePaths[path] || strings.HasPrefix(path, "/assets/") }

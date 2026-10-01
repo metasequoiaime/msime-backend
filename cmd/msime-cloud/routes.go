@@ -7,17 +7,21 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/metasequoiaime/MSIME-Backend/docs"
+	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 	"github.com/metasequoiaime/MSIME-Backend/internal/server"
 )
 
-// operation is one method on one path: from the published OpenAPI document for /v1, or from adminRoutes for /api.
+// operation is one method on one path: from the published OpenAPI document for /v1, or from the admin site's route tables for /api, where Method "*" is a route taking more than one method.
 type operation struct {
 	Method  string `json:"method"`
 	Path    string `json:"path"`
 	Auth    string `json:"auth"`
 	Summary string `json:"summary"`
-	// The OpenAPI operation object, or the admin route's notes.
+	// The OpenAPI operation object.
 	Detail json.RawMessage `json:"detail,omitempty"`
+	// For an admin route, what docs/admin.md says about it.
+	Guide []string `json:"guide,omitempty"`
 }
 
 const (
@@ -28,35 +32,7 @@ const (
 	adminPrefix = "/api/"
 )
 
-// The admin site's routes. They are dispatched by path inside the admin handler rather than registered on the mux, so the OpenAPI document does not describe them; admin_routes_test.go checks this table against that handler.
-var adminRoutes = []struct {
-	method, path, summary, notes string
-}{
-	{"GET", "/api/system", "服务版本与已配置的功能", ""},
-	{"GET", "/api/overview", "用户、下载、崩溃与社区内容的概览统计", "query: days=7|30（默认 30）"},
-	{"GET", "/api/users", "用户列表", "query: page（每页 50）、q（全文搜索）"},
-	{"GET", "/api/users/{id}", "用户详情：登录方式、会话与发布数量", ""},
-	{"GET", "/api/skins", "社区键盘皮肤列表", "query: page、q"},
-	{"GET", "/api/skins/{id}", "社区键盘皮肤详情", ""},
-	{"GET", "/api/candidate-skins", "社区候选窗皮肤列表，含公开与私有", "query: page、q、visibility=public|private"},
-	{"GET", "/api/candidate-skins/{id}", "候选窗皮肤详情", ""},
-	{"GET", "/api/plugins", "社区插件包列表", "query: page、q"},
-	{"GET", "/api/plugins/{id}", "插件包详情", ""},
-	{"GET", "/api/dictionaries", "社区词库列表", "query: page、q"},
-	{"GET", "/api/dictionaries/{id}", "社区词库详情", ""},
-	{"GET", "/api/replies", "社区回复模板列表", "query: page、q"},
-	{"GET", "/api/replies/{id}", "回复模板详情", ""},
-	{"GET", "/api/downloads", "下载记录", "query: page、q、platform、version"},
-	{"GET", "/api/crashes", "崩溃报告", "query: page、q、platform、version、status=open|resolved"},
-	{"GET", "/api/audit", "管理操作审计", "query: page、q、action、actor"},
-	{"POST", "/api/actions", "执行一项管理操作（删除内容、撤销会话、处理崩溃），写入审计", `body: {"action": "revoke_session"|"revoke_sessions"|"delete_skin"|"delete_candidate_skin"|"delete_plugin"|"delete_dictionary"|"delete_reply"|"resolve_crash"|"reopen_crash", "id": "目标 ID（revoke_sessions 为用户 ID）", "user_id": "revoke_session 时会话所属用户"}。删除不可恢复。`},
-	{"GET", "/api/site-settings", "官网设置：蓝奏云下载镜像链接", ""},
-	{"POST", "/api/site-settings", "修改官网蓝奏云下载镜像链接", `body: {"lanzou_url": "https://... 或空字符串表示关闭"}`},
-	{"GET", "/api/admins", "管理员成员（仅部署白名单中的超级管理员）", "管理员密钥没有邮箱，调用返回 403 owner_required。"},
-	{"POST", "/api/admins", "添加、启用、停用或撤销管理员（仅超级管理员）", `body: {"email": "...", "action": "add"|"enable"|"disable"|"revoke"}`},
-}
-
-// catalog is every operation the CLI knows, /v1 from the OpenAPI document and /api from adminRoutes.
+// catalog is every operation the CLI knows: /v1 from the OpenAPI document, /api from the tables the admin site dispatches with.
 func catalog() ([]operation, error) {
 	var spec struct {
 		Security json.RawMessage                       `json:"security"`
@@ -87,9 +63,8 @@ func catalog() ([]operation, error) {
 			operations = append(operations, operation{Method: strings.ToUpper(method), Path: path, Auth: authOf(security), Summary: detail.Summary, Detail: raw})
 		}
 	}
-	for _, route := range adminRoutes {
-		notes, _ := json.Marshal(map[string]string{"summary": route.summary, "notes": route.notes})
-		operations = append(operations, operation{Method: route.method, Path: route.path, Auth: authAdmin, Summary: route.summary, Detail: notes})
+	for _, route := range server.AdminRouteList() {
+		operations = append(operations, operation{Method: route.Method, Path: route.Path, Auth: authAdmin, Summary: adminSummary(route)})
 	}
 	sort.Slice(operations, func(i, j int) bool {
 		if operations[i].Path != operations[j].Path {
@@ -120,7 +95,7 @@ func find(operations []operation, method, path string) (operation, bool) {
 	path, _, _ = strings.Cut(path, "?")
 	best, bestScore := operation{}, -1
 	for _, candidate := range operations {
-		if candidate.Method != method {
+		if candidate.Method != method && candidate.Method != "*" {
 			continue
 		}
 		if score, ok := match(candidate.Path, path); ok && score > bestScore {
@@ -176,8 +151,54 @@ func describe(out io.Writer, method, path string) error {
 	if !ok {
 		return usageError{fmt.Sprintf("no operation %s %s; `msime-cloud routes` lists them", strings.ToUpper(method), path)}
 	}
+	if op.Auth == authAdmin {
+		op.Guide = adminGuide(op.Path)
+	}
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(op)
+}
+
+// adminSummary describes an admin route from its table entry; the request bodies are in the guide describe prints.
+func adminSummary(route account.AdminRoute) string {
+	parts := []string{"admin API"}
+	if route.Method == "*" {
+		parts = append(parts, "methods per docs/admin.md")
+	}
+	if len(route.Filters) > 0 {
+		filters := append([]string{"page", "q"}, route.Filters...)
+		parts = append(parts, "filters: "+strings.Join(filters, ", "))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// adminGuide is every line of docs/admin.md naming the route, by its path up to the first parameter, so describe shows the request bodies and permissions the tables do not carry.
+func adminGuide(path string) []string {
+	base, _, _ := strings.Cut(path, "{")
+	base = strings.TrimSuffix(base, "/")
+	var lines []string
+	for _, line := range strings.Split(docs.Admin, "\n") {
+		if mentions(line, base) {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+	}
+	if len(lines) == 0 {
+		lines = []string{"docs/admin.md does not name " + base + "; see the admin-web client in admin-web/src/api"}
+	}
+	return lines
+}
+
+// mentions reports whether line names path itself rather than a longer path that starts with it: /api/users is in "GET /api/users?page=" and "/api/users/{id}" but not in "/api/users-archive".
+func mentions(line, path string) bool {
+	for rest := line; ; {
+		i := strings.Index(rest, path)
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+len(path):]
+		if rest == "" || !strings.ContainsAny(rest[:1], "abcdefghijklmnopqrstuvwxyz-_") {
+			return true
+		}
+	}
 }

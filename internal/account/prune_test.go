@@ -1,6 +1,7 @@
 package account
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -9,7 +10,17 @@ func TestPruneRemovesOnlyExpiredAuthenticationData(t *testing.T) {
 	db := testStore(t)
 	a := &Service{store: db}
 	ctx := t.Context()
-	if _, err := db.pool.Exec(ctx, `TRUNCATE admin_login_flows,admin_sessions`); err != nil {
+	if _, err := db.pool.Exec(ctx, `TRUNCATE admin_login_flows,admin_sessions,admin_events`); err != nil {
+		t.Fatal(err)
+	}
+	// Old activity heartbeats and session ends go; downloads and crashes of any age and recent activity stay.
+	if _, err := db.pool.Exec(ctx, `INSERT INTO admin_events(id,kind,platform,version,install_id,message,created_at) VALUES
+ ('old-active','active','windows','1','device-windows-0001','',now()-interval '91 days'),
+ ('old-session','session','ios','1',NULL,'',now()-interval '91 days'),
+ ('old-session-crash','session_crash','ios','1',NULL,'',now()-interval '91 days'),
+ ('new-active','active','windows','1','device-windows-0001','',now()-interval '89 days'),
+ ('old-download','download','windows','1',NULL,'',now()-interval '400 days'),
+ ('old-crash','crash','windows','1',NULL,'boom',now()-interval '400 days')`); err != nil {
 		t.Fatal(err)
 	}
 	active := complete(t, db, Identity{"email", "active@example.test"})
@@ -65,6 +76,21 @@ func TestPruneRemovesOnlyExpiredAuthenticationData(t *testing.T) {
 	}
 	if _, err := a.ConsumeAdminFlow(ctx, "active"); err != nil {
 		t.Fatal("active flow pruned", err)
+	}
+	var events []string
+	rows, err := db.pool.Query(ctx, `SELECT id FROM admin_events ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, id)
+	}
+	if err = rows.Err(); err != nil || strings.Join(events, ",") != "new-active,old-crash,old-download" {
+		t.Fatal("telemetry retention", events, err)
 	}
 	if _, _, err := db.Me(ctx, expired.User.ID); err != nil {
 		t.Fatal("prune removed account", err)

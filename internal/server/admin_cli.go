@@ -98,6 +98,7 @@ func (s *Server) adminCLIFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, err := s.adminCLIIdentity(r.Context(), flow, v.Code, v.RedirectURI)
+	identity.UserAgent = r.UserAgent()
 	if err != nil {
 		s.adminAuthError(w, err)
 		return
@@ -129,6 +130,7 @@ func (s *Server) adminCLIIdentity(ctx context.Context, flow account.AdminLoginFl
 	var claims struct {
 		Email    string `json:"email"`
 		Verified bool   `json:"email_verified"`
+		Name     string `json:"name"`
 	}
 	if token.Claims(&claims) != nil || !claims.Verified {
 		return account.AdminIdentity{}, account.ErrInvalid
@@ -140,5 +142,5 @@ func (s *Server) adminCLIIdentity(ctx context.Context, flow account.AdminLoginFl
 	if !allowed {
 		return account.AdminIdentity{}, account.ErrInvalid
 	}
-	return account.AdminIdentity{Subject: token.Subject, Email: strings.ToLower(claims.Email)}, nil
+	return account.AdminIdentity{Subject: token.Subject, Email: strings.ToLower(claims.Email), Name: claims.Name}, nil
 }

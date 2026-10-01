@@ -13,10 +13,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	msimebackend "github.com/metasequoiaime/MSIME-Backend"
+	"github.com/metasequoiaime/MSIME-Backend/internal/contract"
 )
 
 const usage = `usage: msime-cloud <command> [arguments]
@@ -31,17 +33,19 @@ const usage = `usage: msime-cloud <command> [arguments]
                                          sign in with the code the user received and keep the session
   login google [--browser false]         sign in with Google in the browser, or print the address to open
                                          with --browser false; waits up to 5 minutes for the browser
-  whoami                                 print the signed-in user
-  logout [--all]                         end this session, or every session of the user, and forget it
+  login admin [--browser false]          sign in to the admin site with an administrator's Google account
+                                         the same way; the session lasts 8 hours
+  whoami [--admin]                       print the signed-in user, or the signed-in administrator
+  logout [--all | --admin]               end this session, every session of the user, or the admin session
   version                                print the version
 
-PATH may be a template from routes or a concrete path. /v1 paths go to the API with the kept session (or MSIME_CLOUD_TOKEN) when the operation needs one; /api paths go to the admin site with MSIME_ADMIN_TOKEN. A request body is a JSON object given inline, or read from stdin with -; -F sends multipart form fields instead, @ reading a file. A response that is not JSON or text needs -o.
+PATH may be a template from routes or a concrete path. /v1 paths go to the API with the kept session (or MSIME_CLOUD_TOKEN) when the operation needs one; /api paths go to the admin site with MSIME_ADMIN_TOKEN when set, otherwise with the session "login admin" kept; describe shows what docs/admin.md says about an /api route. A request body is a JSON object given inline, or read from stdin with -; -F sends multipart form fields instead, @ reading a file. A response that is not JSON or text needs -o. A 429 that asks to wait at most a minute is waited out and retried once.
 
 Environment:
   MSIME_CLOUD_URL         API base URL (default https://api.msime.app)
   MSIME_CLOUD_TOKEN       a device token or access token to send instead of the kept session
   MSIME_ADMIN_URL         admin site base URL (default https://admin.msime.app)
-  MSIME_ADMIN_TOKEN       the admin key for /api paths
+  MSIME_ADMIN_TOKEN       the admin key or a personal access token, used instead of "login admin"
   MSIME_CLOUD_CONFIG_DIR  where the session is kept (default <user config dir>/msime-cloud)
 
 Exit status: 0 for a 2xx response, 1 when the call fails or the server answers with an error (its body is still printed), 2 for a usage error.`
@@ -50,6 +54,8 @@ const (
 	defaultServer      = "https://api.msime.app"
 	defaultAdminServer = "https://admin.msime.app"
 	requestTimeout     = 5 * time.Minute
+	// The longest Retry-After the command waits out by itself; a longer one is reported.
+	maxRetryWait = time.Minute
 )
 
 type usageError struct{ message string }
@@ -119,10 +125,13 @@ func (c cli) dispatch(args []string) error {
 	case "login":
 		return c.login(args)
 	case "whoami":
-		if len(args) != 0 {
-			return usageError{"whoami takes no arguments"}
+		switch {
+		case len(args) == 0:
+			return c.call([]string{"GET", "/v1/users/me"})
+		case len(args) == 1 && args[0] == "--admin":
+			return c.call([]string{"GET", "/api/me"})
 		}
-		return c.call([]string{"GET", "/v1/users/me"})
+		return usageError{"whoami takes only --admin"}
 	case "logout":
 		return c.logout(args)
 	}
@@ -239,11 +248,10 @@ func (c cli) call(args []string) error {
 // send makes the request with the credentials its operation takes, refreshing a kept session that has expired or that the server no longer accepts, once.
 func (c cli) send(r request) (*http.Response, error) {
 	if strings.HasPrefix(r.path, adminPrefix) {
-		token := c.env("MSIME_ADMIN_TOKEN")
-		if token == "" {
-			return nil, errors.New("/api paths are the admin site's and need MSIME_ADMIN_TOKEN")
-		}
-		return c.do(c.adminServer(), r, token)
+		return c.sendAdmin(r)
+	}
+	if path, _, _ := strings.Cut(r.path, "?"); path == contract.StreamingTranscriptionPath {
+		return nil, errors.New(path + " is a WebSocket for live audio; this command speaks HTTP only")
 	}
 	auth := authAny
 	if operations, err := catalog(); err == nil {
@@ -288,6 +296,36 @@ func (c cli) send(r request) (*http.Response, error) {
 		return nil, err
 	}
 	return c.do(server, r, current.AccessToken)
+}
+
+// sendAdmin sends an /api request to the admin site with MSIME_ADMIN_TOKEN (the admin key or a personal access token) when set, otherwise with the session `login admin` kept. That session lasts eight hours and is not refreshed; one the site no longer accepts is forgotten.
+func (c cli) sendAdmin(r request) (*http.Response, error) {
+	admin := c.adminServer()
+	if token := c.env("MSIME_ADMIN_TOKEN"); token != "" {
+		return c.do(admin, r, token)
+	}
+	sessions := c.store()
+	kept, ok, err := sessions.get(adminKey(admin))
+	if err != nil {
+		return nil, err
+	}
+	if !ok || !c.now().Before(kept.ExpiresAt) {
+		if ok {
+			if err = sessions.put(adminKey(admin), nil); err != nil {
+				return nil, err
+			}
+		}
+		return nil, errors.New("not signed in to the admin site; run `msime-cloud login admin`, or set MSIME_ADMIN_TOKEN to the admin key or a personal access token")
+	}
+	response, err := c.do(admin, r, kept.AccessToken)
+	if err == nil && response.StatusCode == http.StatusUnauthorized {
+		if err = sessions.put(adminKey(admin), nil); err != nil {
+			response.Body.Close()
+			return nil, err
+		}
+		fmt.Fprintln(c.stderr, "msime-cloud: the admin session has ended; run `msime-cloud login admin` again")
+	}
+	return response, err
 }
 
 // refresh trades used's refresh token for a new pair, unless another process already did while this one waited for the lock.
@@ -338,7 +376,24 @@ func (c cli) refresh(server string, used session) (session, error) {
 	return next, sessions.put(server, &next)
 }
 
+// do sends r, and once more after the wait a 429 asks for when that is at most maxRetryWait: the body is in memory, so the retry is the same request.
 func (c cli) do(server string, r request, token string) (*http.Response, error) {
+	response, err := c.doOnce(server, r, token)
+	if err != nil || response.StatusCode != http.StatusTooManyRequests {
+		return response, err
+	}
+	seconds, parseErr := strconv.Atoi(strings.TrimSpace(response.Header.Get("Retry-After")))
+	wait := time.Duration(seconds) * time.Second
+	if parseErr != nil || seconds < 0 || wait > maxRetryWait {
+		return response, nil
+	}
+	response.Body.Close()
+	fmt.Fprintf(c.stderr, "msime-cloud: rate limited; retrying in %s\n", wait)
+	time.Sleep(wait)
+	return c.doOnce(server, r, token)
+}
+
+func (c cli) doOnce(server string, r request, token string) (*http.Response, error) {
 	target := strings.TrimRight(server, "/") + r.path
 	if len(r.query) > 0 {
 		separator := "?"
@@ -355,7 +410,7 @@ func (c cli) do(server string, r request, token string) (*http.Response, error) 
 		req.Header.Set("Content-Type", r.contentType)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "msime-cloud")
+	req.Header.Set("User-Agent", "msime-cloud/"+msimebackend.Version())
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -410,7 +465,7 @@ func (c cli) print(response *http.Response, output string) error {
 
 func (c cli) login(args []string) error {
 	if len(args) == 0 {
-		return usageError{"login needs start, finish or google"}
+		return usageError{"login needs start, finish, google or admin"}
 	}
 	step, flags := args[0], map[string]string{}
 	for i := 1; i < len(args); i += 2 {
@@ -445,18 +500,21 @@ func (c cli) login(args []string) error {
 			return usageError{"login finish takes --challenge ID --code CODE"}
 		}
 		return c.signIn(server, challenge, code)
-	case "google":
+	case "google", "admin":
 		open := true
 		switch {
 		case len(flags) == 0:
 		case len(flags) == 1 && flags["browser"] == "false":
 			open = false
 		default:
-			return usageError{"login google takes only --browser false"}
+			return usageError{"login " + step + " takes only --browser false"}
+		}
+		if step == "admin" {
+			return c.adminSignIn(open)
 		}
 		return c.googleSignIn(server, open)
 	}
-	return usageError{"login needs start, finish or google"}
+	return usageError{"login needs start, finish, google or admin"}
 }
 
 // signIn completes a challenge with credential, keeps the session and prints the user.
@@ -492,10 +550,12 @@ func (c cli) signIn(server, challenge, credential string) error {
 func (c cli) logout(args []string) error {
 	all := false
 	switch {
+	case len(args) == 1 && args[0] == "--admin":
+		return c.adminLogout()
 	case len(args) == 1 && args[0] == "--all":
 		all = true
 	case len(args) != 0:
-		return usageError{"logout takes only --all"}
+		return usageError{"logout takes only --all or --admin"}
 	}
 	server := c.server()
 	sessions := c.store()
@@ -519,6 +579,32 @@ func (c cli) logout(args []string) error {
 		return err
 	}
 	fmt.Fprintln(c.stderr, "msime-cloud: signed out of "+server)
+	return nil
+}
+
+// adminLogout ends the session `login admin` kept, on the site and here. MSIME_ADMIN_TOKEN is left alone: keys and personal access tokens are revoked in the admin console.
+func (c cli) adminLogout() error {
+	admin := c.adminServer()
+	sessions := c.store()
+	kept, ok, err := sessions.get(adminKey(admin))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("not signed in to " + admin)
+	}
+	response, err := c.do(admin, request{method: "POST", path: "/api/auth/logout"}, kept.AccessToken)
+	if err != nil {
+		return err
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusUnauthorized {
+		return statusError{response.Status}
+	}
+	if err = sessions.put(adminKey(admin), nil); err != nil {
+		return err
+	}
+	fmt.Fprintln(c.stderr, "msime-cloud: signed out of "+admin)
 	return nil
 }
 

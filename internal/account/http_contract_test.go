@@ -87,6 +87,9 @@ func TestEveryAccountRouteAuthenticationAndDisabledService(t *testing.T) {
 	Mount(mux, a)
 	disabled := http.NewServeMux()
 	Mount(disabled, nil)
+	// The server package registers the report route with Route instead of Mount; register it the same way so it meets the same contract.
+	mux.HandleFunc("POST /v1/community/reports", Route(a, "POST /v1/community/reports", (*Service).CommunityReport))
+	disabled.HandleFunc("POST /v1/community/reports", Route(nil, "POST /v1/community/reports", (*Service).CommunityReport))
 	n := 0
 	for path, methods := range spec.Paths {
 		// The website word form is mounted by the server package and covered by its word submission tests.
@@ -222,6 +225,7 @@ func TestEveryAccountJSONBodyRejectsMalformedInput(t *testing.T) {
 	user := complete(t, db, Identity{"email", "body-contract@example.test"})
 	mux := http.NewServeMux()
 	Mount(mux, &Service{store: db})
+	mux.HandleFunc("POST /v1/community/reports", Route(&Service{store: db}, "POST /v1/community/reports", (*Service).CommunityReport))
 	count := 0
 	for path, methods := range spec.Paths {
 		// The website word form is mounted by the server package; its malformed-body cases are in TestWordSubmissionValidation there.

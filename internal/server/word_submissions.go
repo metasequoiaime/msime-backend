@@ -29,6 +29,7 @@ import (
 
 	"github.com/metasequoiaime/MSIME-Backend/internal/account"
 	"github.com/metasequoiaime/MSIME-Backend/internal/engine"
+	"github.com/metasequoiaime/MSIME-Backend/internal/githubapp"
 )
 
 // Anonymous dictionary submissions from the website (msime-web#213). A visitor proposes words with their quanpin reading, English words with the form to show, or candidate-window translations; after Cloudflare Turnstile and a per-address PostgreSQL rate limit, the server appends them to custom/words.txt, custom/english.txt or custom/translations.txt in metasequoiaime/msime-dictionary on one rolling pull request that maintainers review. Nothing about the visitor is stored, and entries, notes and tokens are never logged.
@@ -51,7 +52,7 @@ const (
 	wordSubmissionBranches  = "community-words/"
 	wordSubmissionTimeout   = 45 * time.Second
 	defaultTurnstileURL     = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-	defaultGitHubAPIURL     = "https://api.github.com"
+	defaultGitHubAPIURL     = githubapp.DefaultAPIURL
 )
 
 // Conservative per-address limits. They count requests that passed Turnstile, so an automated client cannot use up a visitor's quota without solving a challenge. The shorter window is checked first so a burst does not also consume the daily allowance.
@@ -208,10 +209,9 @@ type wordSubmitter struct {
 	client    *http.Client
 	now       func() time.Time
 	// Serialises the read-modify-write on GitHub within this process so two local requests never race for the same blob SHA. Replicas can still race; GitHub's SHA check turns that into a 409.
-	writes      sync.Mutex
-	tokenMu     sync.Mutex
-	token       string
-	tokenExpiry time.Time
+	writes sync.Mutex
+	// Installation tokens minted for the dictionary repository, shared by every call through app().
+	github githubapp.Cache
 	// The base dictionary's median word weights, once the Engine has computed them.
 	mediansMu     sync.Mutex
 	medians       map[int]int
@@ -304,6 +304,8 @@ type submission struct {
 	kind  submissionKind
 	lines []submissionLine
 	note  string
+	// flagged lists what the sensitive word list sent to review, for the commit message: entry labels with the matched category, or the note.
+	flagged []string
 }
 
 // decodeEntries decodes the entries of one kind; an unknown field (for example a weight, or a field of another kind) is invalid JSON.
@@ -441,6 +443,23 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sub := submission{kind: kind, note: note}
+	if s.accounts != nil {
+		var blocked []wordRejection
+		blocked, sub.flagged, err = screenSubmission(ctx, s.accounts.Sensitive(), entryTexts(words, english, translations), note)
+		switch {
+		case errors.Is(err, errNoteBlocked):
+			wordsFail(w, 400, "blocked_word", "备注包含不允许提交的内容，请修改后再提交。")
+			return
+		case err != nil:
+			slog.Error("word submissions: sensitive word list unavailable", "reason", err.Error())
+			w.Header().Set("Retry-After", "30")
+			wordsFail(w, 503, "screening_unavailable", "词条提交暂时不可用，请稍后再试。")
+			return
+		case len(blocked) > 0:
+			respond(w, 400, map[string]any{"error": "部分词条包含不允许提交的内容，请修改后再提交。", "code": "invalid_entries", "rejected": blocked})
+			return
+		}
+	}
 	switch kind {
 	case kindWords:
 		if err = s.shippedWords(ctx, words); err == nil {
@@ -460,6 +479,7 @@ func (s *Server) submitWords(w http.ResponseWriter, r *http.Request) {
 	var listed alreadyListedError
 	switch {
 	case err == nil:
+		s.recordSubmission(ctx, number, kind, words, english, translations, note)
 		respond(w, 201, map[string]string{"pull_request_url": "https://github.com/" + ws.config.GitHub.Repository + "/pull/" + strconv.Itoa(number)})
 	case errors.As(err, &listed):
 		rejected := make([]wordRejection, 0, len(listed))
@@ -730,6 +750,9 @@ func submissionCommitMessage(sub submission) string {
 	for _, line := range sub.lines {
 		b.WriteString("- " + line.label + "\n")
 	}
+	if len(sub.flagged) > 0 {
+		b.WriteString("\nFlagged for review by the sensitive word list: " + strings.Join(sub.flagged, "; ") + "\n")
+	}
 	b.WriteString("\nSubmitted anonymously through the MSIME website form.\n")
 	if sub.note != "" {
 		b.WriteString("\nNote: " + sub.note + "\n")
@@ -917,4 +940,96 @@ func listedLines(content string, lines []submissionLine) alreadyListedError {
 		}
 	}
 	return listed
+}
+
+// errNoteBlocked is a submission whose note hits a block-level sensitive word.
+var errNoteBlocked = errors.New("note hits a blocked sensitive word")
+
+// entryTexts is the text of each entry the sensitive word list screens: the word, or both columns of an English word or translation. Each column is matched on its own, so a match never spans two columns.
+func entryTexts(words []wordSubmissionEntry, english []englishSubmissionEntry, translations []translationSubmissionEntry) [][]string {
+	var texts [][]string
+	for _, e := range words {
+		texts = append(texts, []string{e.Word})
+	}
+	for _, e := range english {
+		texts = append(texts, []string{e.Word, e.Display})
+	}
+	for _, e := range translations {
+		texts = append(texts, []string{e.Source, e.Gloss})
+	}
+	return texts
+}
+
+// screenSubmission matches every column of every entry and the note against the sensitive word list. Entries with a block hit come back as blocked_word rejections, a note with one as errNoteBlocked, and review hits as the flags the commit message carries (the entry's position and the matched categories, never the configured patterns, which stay private).
+func screenSubmission(ctx context.Context, matcher account.SensitiveMatcher, texts [][]string, note string) ([]wordRejection, []string, error) {
+	var blocked []wordRejection
+	var flagged []string
+	// screen matches the columns of one entry; it reports whether any hit blocks, and the categories of the hits otherwise.
+	screen := func(columns []string) (bool, []string, error) {
+		var categories []string
+		for _, column := range columns {
+			if strings.TrimSpace(column) == "" {
+				continue
+			}
+			hits, err := matcher.Match(ctx, column)
+			if err != nil {
+				return false, nil, err
+			}
+			for _, h := range hits {
+				if h.Level == account.SensitiveBlock {
+					return true, nil, nil
+				}
+				if !slices.Contains(categories, h.Category) {
+					categories = append(categories, h.Category)
+				}
+			}
+		}
+		return false, categories, nil
+	}
+	for i, columns := range texts {
+		block, categories, err := screen(columns)
+		switch {
+		case err != nil:
+			return nil, nil, err
+		case block:
+			blocked = append(blocked, wordRejection{i, "blocked_word", "包含不允许提交的内容"})
+		case len(categories) > 0:
+			flagged = append(flagged, "entry "+strconv.Itoa(i+1)+" ("+strings.Join(categories, ", ")+")")
+		}
+	}
+	block, categories, err := screen([]string{note})
+	switch {
+	case err != nil:
+		return nil, nil, err
+	case block:
+		return nil, nil, errNoteBlocked
+	case len(categories) > 0:
+		flagged = append(flagged, "note ("+strings.Join(categories, ", ")+")")
+	}
+	return blocked, flagged, nil
+}
+
+// recordSubmission stores a submission GitHub accepted, for the dictionary review page. The entries are already public on the pull request, so a failed write is only logged: answering with an error would make the visitor submit them again. It runs detached from the request so a visitor leaving does not cancel it.
+func (s *Server) recordSubmission(ctx context.Context, number int, kind submissionKind, words []wordSubmissionEntry, english []englishSubmissionEntry, translations []translationSubmissionEntry, note string) {
+	if s.accounts == nil {
+		return
+	}
+	var entries any
+	switch kind {
+	case kindWords:
+		entries = words
+	case kindEnglish:
+		entries = english
+	default:
+		entries = translations
+	}
+	raw, err := json.Marshal(entries)
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		err = s.accounts.RecordWordSubmission(ctx, account.WordSubmission{PRNumber: number, Kind: kind.name, Entries: raw, Note: note})
+	}
+	if err != nil {
+		slog.Error("word submissions: submission not recorded", "pull", number, "reason", err.Error())
+	}
 }

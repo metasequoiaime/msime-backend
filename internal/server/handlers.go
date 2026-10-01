@@ -99,14 +99,18 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	if v.MaxTokens == 0 {
 		v.MaxTokens = contract.ChatDefaultTokens
 	}
-	s.proxyJSON(w, r, s.config.Chat, v, func(b []byte) bool {
+	mr, call := metered(r, "chat", 0)
+	accepted := false
+	s.proxyJSON(w, mr, s.config.Chat, v, func(b []byte) bool {
 		var result struct {
 			Choices []struct {
 				Message message `json:"message"`
 			} `json:"choices"`
 		}
-		return json.Unmarshal(b, &result) == nil && len(result.Choices) > 0 && bounded(result.Choices[0].Message.Content, contract.OutputTextBytes)
+		accepted = json.Unmarshal(b, &result) == nil && len(result.Choices) > 0 && bounded(result.Choices[0].Message.Content, contract.OutputTextBytes)
+		return accepted
 	})
+	s.settleMeter(call, accepted)
 }
 
 type translationRequest struct {
@@ -186,7 +190,10 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		rr := httptest.NewRecorder()
-		s.translateEndpoint(rr, r, v, e)
+		// Every provider answers 502/504 through upstreamError when it rejects the upstream response, so the recorder's status settles the call.
+		mr, call := metered(r, "translation", textChars(v.list()))
+		s.translateEndpoint(rr, mr, v, e)
+		s.settleMeter(call, rr.Code < 500)
 		last = rr
 		if rr.Code < 500 {
 			copyResponse(w, rr)
@@ -271,12 +278,14 @@ func (s *Server) cloud(w http.ResponseWriter, r *http.Request) {
 	q.Set("oe", "utf-8")
 	u.RawQuery = q.Encode()
 	e.URL = u.String()
-	b, err := s.upstream(r, e, "GET", "", nil)
+	mr, call := metered(r, "cloud", 0)
+	b, err := s.upstream(mr, e, "GET", "", nil)
 	var root []json.RawMessage
 	var status string
 	var groups [][]json.RawMessage
 	var candidates []string
 	if err != nil || json.Unmarshal(b, &root) != nil || len(root) < 2 || json.Unmarshal(root[0], &status) != nil || status != "SUCCESS" || json.Unmarshal(root[1], &groups) != nil || len(groups) == 0 || len(groups[0]) < 2 || json.Unmarshal(groups[0][1], &candidates) != nil {
+		s.settleMeter(call, false)
 		upstreamError(w, r, err)
 		return
 	}
@@ -285,10 +294,12 @@ func (s *Server) cloud(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(groups[0]) > 3 {
 		if json.Unmarshal(groups[0][3], &metadata) != nil || (metadata.MatchedLength != nil && len(metadata.MatchedLength) != len(candidates)) {
+			s.settleMeter(call, false)
 			upstreamError(w, r, nil)
 			return
 		}
 	}
+	s.settleMeter(call, true)
 	// Google 可能返回仅覆盖输入前缀的候选。
 	// 拼音响应没有替换范围字段，因此只保留覆盖完整输入的候选。
 	// 日语 matched_length 统计转换后的假名长度，而非输入罗马字长度。
@@ -396,7 +407,8 @@ func (s *Server) transcribe(w http.ResponseWriter, r *http.Request) {
 		_ = writer.WriteField("language", languageValue)
 	}
 	_ = writer.Close()
-	b, err := s.upstream(r, s.config.Transcription, "POST", writer.FormDataContentType(), &body)
+	mr, call := metered(r, "transcription", wavSeconds(audio))
+	b, err := s.upstream(mr, s.config.Transcription, "POST", writer.FormDataContentType(), &body)
 	var result struct {
 		Text          string `json:"text"`
 		Transcription string `json:"transcription"`
@@ -405,6 +417,7 @@ func (s *Server) transcribe(w http.ResponseWriter, r *http.Request) {
 		} `json:"result"`
 	}
 	if err != nil || json.Unmarshal(b, &result) != nil {
+		s.settleMeter(call, false)
 		upstreamError(w, r, err)
 		return
 	}
@@ -415,7 +428,9 @@ func (s *Server) transcribe(w http.ResponseWriter, r *http.Request) {
 	if text == "" {
 		text = result.Result.Text
 	}
-	if !bounded(text, contract.OutputTextBytes) {
+	accepted := bounded(text, contract.OutputTextBytes)
+	s.settleMeter(call, accepted)
+	if !accepted {
 		upstreamError(w, r, err)
 		return
 	}

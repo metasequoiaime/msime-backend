@@ -60,13 +60,16 @@ func TestSiteDownloadMirrorAdminEditAndPublicRead(t *testing.T) {
 	mux := http.NewServeMux()
 	Mount(mux, a)
 	admin := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.AdminHTTP(w, r.WithContext(WithAdminActor(r.Context(), "google:sub admin@example.test")))
+		a.AdminHTTP(w, r.WithContext(WithAdminAccess(r.Context(), AdminAccess{Actor: "google:sub admin@example.test", Email: "admin@example.test", Role: "operator", Permissions: []string{PermPublishNotices}})))
+	})
+	readonly := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.AdminHTTP(w, r.WithContext(WithAdminAccess(r.Context(), AdminAccess{Actor: "pat:ro@example.test", Email: "ro@example.test", Role: "readonly", Permissions: []string{PermViewCloudUsage}})))
 	})
 	public := func() SiteDownloadMirrors {
 		t.Helper()
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest("GET", "/v1/site/download-mirrors", nil))
-		if w.Code != 200 || w.Header().Get("Cache-Control") != "public, max-age=60" || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		if w.Code != 200 || w.Header().Get("Cache-Control") != "public, max-age=60" || w.Header().Get("Vary") != "Origin" || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
 			t.Fatal(w.Code, w.Header(), w.Body.String())
 		}
 		var v SiteDownloadMirrors
@@ -105,6 +108,9 @@ func TestSiteDownloadMirrorAdminEditAndPublicRead(t *testing.T) {
 	for _, body := range []string{`{`, `{}`, `{"lanzou_url":null}`, `{"lanzou_url":"http://example.com"}`, `{"lanzou_url":"https://u:p@example.com/a"}`, `{"lanzou_url":"https://example.com","extra":1}`, `{"lanzou_url":"https://` + strings.Repeat("a", maxMirrorURLBytes) + `"}`} {
 		apiRequest(t, admin, "POST", "/api/site-settings", body, "", 400)
 	}
+	// Every role reads the setting; only publish_notices may change it.
+	apiRequest(t, readonly, "GET", "/api/site-settings", "", "", 200)
+	apiRequest(t, readonly, "POST", "/api/site-settings", `{"lanzou_url":"https://example.com/a"}`, "", 403)
 	apiRequest(t, admin, "PUT", "/api/site-settings", `{"lanzou_url":""}`, "", 405)
 	apiRequest(t, admin, "DELETE", "/api/site-settings", "", "", 405)
 	if n := audits(); n != 0 {

@@ -59,6 +59,7 @@ func TestAdminCommandLineSignIn(t *testing.T) {
 		if bearer != "" {
 			r.Header.Set("Authorization", "Bearer "+bearer)
 		}
+		r.Header.Set("User-Agent", "msime-cloud/test")
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, r)
 		return w
@@ -68,7 +69,7 @@ func TestAdminCommandLineSignIn(t *testing.T) {
 	if w := call("POST", "/api/auth/cli/start", `{"redirect_uri":"`+redirect+`"}`, ""); w.Code != 404 || !strings.Contains(w.Body.String(), "cli_login_disabled") {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	s.adminCLI = &adminGoogleAuth{oauth: oauth2.Config{ClientID: "desktop-client", ClientSecret: "desktop-secret", Scopes: []string{"openid", "email"}, Endpoint: endpoint}, verifier: oidc.NewVerifier("https://accounts.google.com", keys, &oidc.Config{ClientID: "desktop-client", SupportedSigningAlgs: []string{"RS256"}})}
+	s.adminCLI = &adminGoogleAuth{oauth: oauth2.Config{ClientID: "desktop-client", ClientSecret: "desktop-secret", Scopes: adminGoogleScopes, Endpoint: endpoint}, verifier: oidc.NewVerifier("https://accounts.google.com", keys, &oidc.Config{ClientID: "desktop-client", SupportedSigningAlgs: []string{"RS256"}})}
 	if w := call("GET", "/api/auth/session", "", ""); !strings.Contains(w.Body.String(), `"cli_enabled":true`) {
 		t.Fatal(w.Body.String())
 	}
@@ -96,10 +97,10 @@ func TestAdminCommandLineSignIn(t *testing.T) {
 		u, _ := url.Parse(started.AuthorizationURL)
 		params := u.Query()
 		challenge = params.Get("code_challenge")
-		if u.Host != "accounts.google.com" || params.Get("client_id") != "desktop-client" || params.Get("redirect_uri") != redirect || params.Get("state") != started.State || params.Get("code_challenge_method") != "S256" || params.Get("scope") != "openid email" || params.Get("nonce") == "" {
+		if u.Host != "accounts.google.com" || params.Get("client_id") != "desktop-client" || params.Get("redirect_uri") != redirect || params.Get("state") != started.State || params.Get("code_challenge_method") != "S256" || params.Get("scope") != "openid email profile" || params.Get("nonce") == "" {
 			t.Fatal(started.AuthorizationURL)
 		}
-		claims = map[string]any{"iss": "https://accounts.google.com", "aud": "desktop-client", "sub": "google-admin", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "nonce": params.Get("nonce"), "email": "Admin@example.test", "email_verified": true}
+		claims = map[string]any{"iss": "https://accounts.google.com", "aud": "desktop-client", "sub": "google-admin", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "nonce": params.Get("nonce"), "email": "Admin@example.test", "email_verified": true, "name": "管理员"}
 		return started.State, `{"state":"` + started.State + `","code":"code","redirect_uri":"` + redirect + `"}`
 	}
 	for _, tc := range []struct {
@@ -124,6 +125,9 @@ func TestAdminCommandLineSignIn(t *testing.T) {
 	}
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &finished) != nil || len(finished.Token) != 64 || finished.Email != "admin@example.test" || finished.ExpiresIn != 28800 {
 		t.Fatal(w.Code, w.Body.String())
+	}
+	if kept := store.sessions[finished.Token]; kept.Name != "管理员" || kept.UserAgent != "msime-cloud/test" {
+		t.Fatalf("the session should record the name and client like the web sign-in: %+v", kept)
 	}
 	if w = call("POST", "/api/auth/cli/finish", body, ""); w.Code != 401 || len(store.sessions) != 1 {
 		t.Fatal("replay accepted", w.Code)

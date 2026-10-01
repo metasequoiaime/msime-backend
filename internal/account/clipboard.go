@@ -22,15 +22,20 @@ type ClipboardItem struct {
 }
 
 // 所有写入锁定同一用户行，保证并发去重和每用户五十条的上限。
+// The ban check reads banned_at under the same row lock that ban_user takes, so a write whose session was checked before a ban either commits before the ban (which then hides what it wrote) or sees the ban and fails with ErrBanned; it can no longer publish after the ban has committed.
 func (s *Store) userDataTransaction(ctx context.Context, user string) (pgx.Tx, error) {
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
 		return nil, e
 	}
-	var id string
-	if e = tx.QueryRow(ctx, "SELECT id FROM auth_users WHERE id=$1 FOR UPDATE", user).Scan(&id); e != nil {
+	var banned bool
+	if e = tx.QueryRow(ctx, "SELECT banned_at IS NOT NULL FROM auth_users WHERE id=$1 FOR UPDATE", user).Scan(&banned); e != nil {
 		tx.Rollback(ctx)
 		return nil, e
+	}
+	if banned {
+		tx.Rollback(ctx)
+		return nil, ErrBanned
 	}
 	return tx, nil
 }

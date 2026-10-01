@@ -11,6 +11,7 @@ import (
 	"errors"
 	"github.com/metasequoiaime/MSIME-Backend/internal/engine"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -43,6 +44,11 @@ type Service struct {
 	googleTokenURL string
 	// avatars stores uploaded avatars; nil when no bucket is configured, which turns uploads off.
 	avatars avatarStorage
+
+	// Admin console state: the deployment settings, the sensitive word matcher and the notice broadcaster.
+	admin       AdminSettings
+	sensitive   sensitiveWords
+	broadcaster NoticeBroadcaster
 }
 
 func New(ctx context.Context, c Config) (*Service, error) {
@@ -90,20 +96,37 @@ func New(ctx context.Context, c Config) (*Service, error) {
 	}
 	go func() {
 		defer close(a.done)
-		timer := time.NewTicker(time.Hour)
-		defer timer.Stop()
-		for {
-			select {
-			case <-lifetime.Done():
-				return
-			case <-timer.C:
-				cleanup, cancel := context.WithTimeout(lifetime, 30*time.Second)
-				a.store.Prune(cleanup)
-				cancel()
-			}
-		}
+		a.maintain(lifetime)
 	}()
 	return a, nil
+}
+
+// maintain runs until lifetime ends: it prunes expired rows every hour and writes pending sensitive-word hit counts every sensitiveRefresh, so a count waits at most that long even when no further hit arrives, and writes them once more on the way out.
+func (a *Service) maintain(lifetime context.Context) {
+	prune := time.NewTicker(time.Hour)
+	defer prune.Stop()
+	hits := time.NewTicker(sensitiveRefresh)
+	defer hits.Stop()
+	flushHits := func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+		defer cancel()
+		if err := a.sensitive.flush(ctx, a.store, time.Now()); err != nil {
+			slog.Warn("sensitive words: hit counts not written yet", "reason", err.Error())
+		}
+	}
+	for {
+		select {
+		case <-lifetime.Done():
+			flushHits(context.Background())
+			return
+		case <-hits.C:
+			flushHits(lifetime)
+		case <-prune.C:
+			cleanup, cancel := context.WithTimeout(lifetime, 30*time.Second)
+			a.store.Prune(cleanup)
+			cancel()
+		}
+	}
 }
 
 // ConfigureEngine is called once during server construction, before serving requests.
@@ -144,6 +167,16 @@ func accountRouteTimeout(pattern string) time.Duration {
 		return pluginTransferTimeout
 	default:
 		return 15 * time.Second
+	}
+}
+
+// accountRouteRate returns the per-address bucket and its per-minute limit for pattern. The public cacheable feeds that every app and website visitor polls get their own, larger bucket so that polling behind a shared proxy cannot use up the quota that login, refresh and the community endpoints draw from.
+func accountRouteRate(pattern string) (string, int) {
+	switch pattern {
+	case "GET " + NoticesPath, "GET " + siteDownloadMirrorsPath:
+		return "feed-ip:", publicFeedRateLimit
+	default:
+		return "ip:", 120
 	}
 }
 func Mount(mux *http.ServeMux, a *Service) {
@@ -217,25 +250,31 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"PATCH /v1/users/me":                                (*Service).update,
 		"DELETE /v1/users/me":                               (*Service).delete,
 	} {
-		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			if a == nil {
-				writeError(w, 503, "user_auth_disabled")
-				return
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), accountRouteTimeout(pattern))
-			defer cancel()
-			r = r.WithContext(ctx)
-			host, _, e := net.SplitHostPort(r.RemoteAddr)
-			if e != nil {
-				host = r.RemoteAddr
-			}
-			// 默认只信任 TCP 对端，不使用可伪造的转发头。代理配置见部署文档。
-			if e = a.store.Rate(ctx, "ip:"+hash(host), 120, time.Minute); e != nil {
-				a.error(w, e)
-				return
-			}
-			method(a, w, r)
-		})
+		mux.HandleFunc(pattern, Route(a, pattern, method))
+	}
+}
+
+// Route wraps an account handler with the nil check, per-address rate limit and timeout every Mount route gets. The server uses it for account handlers it registers itself.
+func Route(a *Service, pattern string, method func(*Service, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if a == nil {
+			writeError(w, 503, "user_auth_disabled")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), accountRouteTimeout(pattern))
+		defer cancel()
+		r = r.WithContext(ctx)
+		host, _, e := net.SplitHostPort(r.RemoteAddr)
+		if e != nil {
+			host = r.RemoteAddr
+		}
+		// 默认只信任 TCP 对端，不使用可伪造的转发头。代理配置见部署文档。
+		scope, limit := accountRouteRate(pattern)
+		if e = a.store.Rate(ctx, scope+hash(host), limit, time.Minute); e != nil {
+			a.error(w, e)
+			return
+		}
+		method(a, w, r)
 	}
 }
 func write(w http.ResponseWriter, status int, value any) {
@@ -250,6 +289,9 @@ func writeError(w http.ResponseWriter, status int, code string) {
 }
 func (a *Service) error(w http.ResponseWriter, e error) {
 	switch {
+	// ErrBanned wraps ErrInvalid, so it must be matched first: a banned account learns why instead of being sent back to a login that fails the same way.
+	case errors.Is(e, ErrBanned):
+		writeError(w, 403, "account_banned")
 	case errors.Is(e, ErrInvalid):
 		writeError(w, 401, "invalid_credentials")
 	case errors.Is(e, ErrLimited):
@@ -511,7 +553,7 @@ func (a *Service) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	t, e := a.store.completeWith(r.Context(), c, identity, grant)
+	t, e := a.store.completeWith(withSessionUserAgent(r.Context(), r.UserAgent()), c, identity, grant)
 	if e != nil {
 		a.error(w, e)
 		return

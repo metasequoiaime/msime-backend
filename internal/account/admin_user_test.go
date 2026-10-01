@@ -18,7 +18,7 @@ func TestAdminUserDetailsAndSessionRevocation(t *testing.T) {
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
-		r = r.WithContext(WithAdminActor(r.Context(), "google:owner"))
+		r = r.WithContext(adminTestContext(r.Context(), "google:owner"))
 		w := httptest.NewRecorder()
 		a.AdminHTTP(w, r)
 		return w

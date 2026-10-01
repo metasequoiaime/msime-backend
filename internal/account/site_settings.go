@@ -79,12 +79,14 @@ func (a *Service) siteDownloadMirrors(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", siteMirrorCacheMaxAge)
+	// Shared caches must key the copy by Origin, for the same reason as PublicNotices.
+	w.Header().Set("Vary", "Origin")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(out)
 }
 
-// adminSiteSettings serves GET and POST /api/site-settings; the server gate has already authenticated the admin and checked the mutation origin.
+// adminSiteSettings serves GET and POST /api/site-settings; the server gate has already authenticated the admin and checked the mutation origin. Every role may read; writing requires publish_notices.
 func (a *Service) adminSiteSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
@@ -96,6 +98,10 @@ func (a *Service) adminSiteSettings(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, s)
 		return
 	case "POST":
+		// The link is user-facing website content, so it is gated like notices.
+		if !requirePerm(w, r, PermPublishNotices) {
+			return
+		}
 	default:
 		writeError(w, 405, "method_not_allowed")
 		return

@@ -27,6 +27,12 @@ type fakeCloud struct {
 	seen      []string
 	// googleURL replaces the authorization URL the Google challenge answers with.
 	googleURL string
+	// adminState replaces the state the admin sign-in answers with.
+	adminState string
+	// adminSessions are the admin sessions handed out and not ended.
+	adminSessions map[string]bool
+	// limited counts down the 429 answers left to give.
+	limited int
 }
 
 func (f *fakeCloud) issue() map[string]any {
@@ -92,12 +98,42 @@ func (f *fakeCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		data, _ := io.ReadAll(file)
 		reply(201, map[string]any{"name": header.Filename, "size": len(data), "kind": r.FormValue("kind")})
-	case "GET /api/overview":
-		if r.Header.Get("Authorization") != "Bearer admin-key" {
+	case "POST /api/auth/cli/start":
+		target, _ := body["redirect_uri"].(string)
+		state := "s-admin"
+		authorization := "https://accounts.google.com/o/oauth2/auth?" + url.Values{"redirect_uri": {target}, "state": {state}, "client_id": {"desktop"}}.Encode()
+		if f.adminState != "" {
+			state = f.adminState
+		}
+		reply(200, map[string]any{"state": state, "expires_in": 600, "authorization_url": authorization})
+	case "POST /api/auth/cli/finish":
+		if body["state"] != "s-admin" || body["code"] != "admin-code" || !strings.HasPrefix(body["redirect_uri"].(string), "http://127.0.0.1:") {
 			reply(401, map[string]any{"error": map[string]string{"code": "unauthorized"}})
 			return
 		}
-		reply(200, map[string]any{"users": 3, "range_days": r.URL.Query().Get("days")})
+		if f.adminSessions == nil {
+			f.adminSessions = map[string]bool{}
+		}
+		f.adminSessions["admin-session"] = true
+		reply(200, map[string]any{"token": "admin-session", "token_type": "Bearer", "expires_in": 28800, "email": "admin@example.test"})
+	case "POST /api/auth/logout":
+		delete(f.adminSessions, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		reply(200, map[string]bool{"ok": true})
+	case "GET /api/overview", "GET /api/me":
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token != "admin-key" && !f.adminSessions[token] {
+			reply(401, map[string]any{"error": map[string]string{"code": "unauthorized"}})
+			return
+		}
+		reply(200, map[string]any{"users": 3, "range_days": r.URL.Query().Get("days"), "email": "admin@example.test"})
+	case "GET /v1/models":
+		if f.limited > 0 {
+			f.limited--
+			w.Header().Set("Retry-After", "1")
+			reply(429, map[string]any{"error": map[string]string{"code": "rate_limit_exceeded"}})
+			return
+		}
+		reply(200, map[string]any{"models": []string{"m"}})
 	default:
 		reply(404, map[string]any{"error": map[string]string{"code": "not_found"}})
 	}
@@ -544,5 +580,107 @@ func TestTheLoopbackGivesUpWithoutACodeOrInTime(t *testing.T) {
 	defer listener.Close()
 	if _, err := receiveGoogleCode(listener, "s", 50*time.Millisecond); err == nil || !strings.Contains(err.Error(), "in time") {
 		t.Fatalf("timeout: %v", err)
+	}
+}
+
+func TestAdminSignInKeepsASessionForTheAdminSite(t *testing.T) {
+	h := newHarness(t)
+	if code, _, errText := h.run("", "call", "GET", "/api/overview"); code != 1 || !strings.Contains(errText, "login admin") {
+		t.Fatalf("before sign-in: %d %s", code, errText)
+	}
+	code, out, errText := h.runWithBrowser(browser(t, url.Values{"code": {"admin-code"}}), "login", "admin")
+	if code != 0 || !strings.Contains(out, "admin@example.test") || strings.Contains(out, "admin-session") {
+		t.Fatalf("login admin: %d %s %s", code, out, errText)
+	}
+	if code, out, _ := h.run("", "call", "GET", "/api/overview", "-q", "days=7"); code != 0 || !strings.Contains(out, `"range_days": "7"`) {
+		t.Fatalf("with the session: %d %s", code, out)
+	}
+	if code, out, _ := h.run("", "whoami", "--admin"); code != 0 || !strings.Contains(out, "admin@example.test") {
+		t.Fatalf("whoami --admin: %d %s", code, out)
+	}
+	// The user session for the same host is a separate entry.
+	if code, _, _ := h.run("", "whoami"); code != 1 {
+		t.Fatal("the admin session was used as a user session")
+	}
+	if code, _, errText := h.run("", "logout", "--admin"); code != 0 || len(h.cloud.adminSessions) != 0 {
+		t.Fatalf("logout --admin: %d %s", code, errText)
+	}
+	if code, _, _ := h.run("", "logout", "--admin"); code != 1 {
+		t.Fatal("a second admin logout should find no session")
+	}
+}
+
+func TestAnEndedOrExpiredAdminSessionIsForgotten(t *testing.T) {
+	h := newHarness(t)
+	if code, _, errText := h.runWithBrowser(browser(t, url.Values{"code": {"admin-code"}}), "login", "admin"); code != 0 {
+		t.Fatal(errText)
+	}
+	h.cloud.adminSessions = nil
+	if code, _, errText := h.run("", "call", "GET", "/api/overview"); code != 1 || !strings.Contains(errText, "has ended") {
+		t.Fatalf("ended: %d %s", code, errText)
+	}
+	if code, _, errText := h.run("", "call", "GET", "/api/overview"); code != 1 || !strings.Contains(errText, "not signed in") {
+		t.Fatalf("after ending: %d %s", code, errText)
+	}
+	if code, _, errText := h.runWithBrowser(browser(t, url.Values{"code": {"admin-code"}}), "login", "admin"); code != 0 {
+		t.Fatal(errText)
+	}
+	h.now = h.now.Add(9 * time.Hour)
+	if code, _, errText := h.run("", "call", "GET", "/api/overview"); code != 1 || !strings.Contains(errText, "not signed in") {
+		t.Fatalf("expired: %d %s", code, errText)
+	}
+}
+
+func TestAdminSignInRefusesAStateTheAddressDoesNotCarry(t *testing.T) {
+	h := newHarness(t)
+	h.cloud.adminState = "another"
+	opened := false
+	code, _, errText := h.runWithBrowser(func(string) error { opened = true; return nil }, "login", "admin")
+	if code != 1 || opened || !strings.Contains(errText, "state") {
+		t.Fatalf("login admin: %d %v %s", code, opened, errText)
+	}
+}
+
+func TestARateLimitIsWaitedOutOnce(t *testing.T) {
+	h := newHarness(t)
+	h.env["MSIME_CLOUD_TOKEN"] = "device-token"
+	h.cloud.limited = 1
+	code, out, errText := h.run("", "call", "GET", "/v1/models")
+	if code != 0 || !strings.Contains(out, `"m"`) || !strings.Contains(errText, "retrying in 1s") {
+		t.Fatalf("one 429: %d %s %s", code, out, errText)
+	}
+	h.cloud.limited = 2
+	if code, out, _ := h.run("", "call", "GET", "/v1/models"); code != 1 || !strings.Contains(out, "rate_limit_exceeded") {
+		t.Fatalf("two 429s: %d %s", code, out)
+	}
+}
+
+func TestTheLiveAudioWebSocketIsRefused(t *testing.T) {
+	h := newHarness(t)
+	h.env["MSIME_CLOUD_TOKEN"] = "device-token"
+	if code, _, errText := h.run("", "call", "GET", "/v1/audio/stream?model=x"); code != 1 || !strings.Contains(errText, "WebSocket") {
+		t.Fatalf("stream: %d %s", code, errText)
+	}
+}
+
+func TestAdminRoutesComeFromTheAdminSiteTables(t *testing.T) {
+	h := newHarness(t)
+	_, out, _ := h.run("", "routes", "/api/")
+	for _, want := range []string{"POST   /api/actions", "GET    /api/users ", "*      /api/crash-groups/{id}/issue", "*      /api/dict-prs/{rest...}", "GET    /api/system", "POST   /api/admins"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("routes lacks %q", want)
+		}
+	}
+	var op operation
+	_, out, _ = h.run("", "describe", "POST", "/api/actions")
+	if err := json.Unmarshal([]byte(out), &op); err != nil || op.Auth != authAdmin || len(op.Guide) == 0 || !strings.Contains(strings.Join(op.Guide, "\n"), "ids") {
+		t.Fatalf("describe POST /api/actions: %s", out)
+	}
+	_, out, _ = h.run("", "describe", "POST", "/api/crash-groups/abc/issue")
+	if err := json.Unmarshal([]byte(out), &op); err != nil || op.Path != "/api/crash-groups/{id}/issue" {
+		t.Fatalf("any-method route: %s", out)
+	}
+	if !mentions("GET /api/users?page=2", "/api/users") || !mentions("`/api/users/{id}`", "/api/users") || mentions("/api/users-archive", "/api/users") {
+		t.Fatal("mentions matches longer paths or misses the path itself")
 	}
 }

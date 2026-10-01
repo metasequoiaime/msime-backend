@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,49 +14,30 @@ import (
 // 安全。
 func (a *Service) AdminReady(ctx context.Context) error {
 	if err := a.adminTables(ctx); err != nil {
-		if migrated := a.store.Migrate(ctx); migrated != nil {
+		// Same migration role as the startup migration in New, so the console tables get the owner and default privileges the deployment configured.
+		if migrated := a.store.MigrateAs(ctx, a.config.MigrationRole); migrated != nil {
 			return migrated
 		}
-		return a.adminTables(ctx)
+		if err = a.adminTables(ctx); err != nil {
+			return err
+		}
 	}
-	return nil
+	return a.backfillCrashSignatures(ctx)
 }
 
 func (a *Service) adminTables(ctx context.Context) error {
-	_, err := a.store.pool.Exec(ctx, `SELECT email FROM admin_members WHERE false; SELECT id FROM admin_events WHERE false; SELECT actor FROM admin_audit WHERE false; SELECT state_hash FROM admin_login_flows WHERE false; SELECT token_hash FROM admin_sessions WHERE false`)
-	return err
+	if _, err := a.store.pool.Exec(ctx, `SELECT email,role FROM admin_members WHERE false; SELECT id FROM admin_events WHERE false; SELECT actor,detail FROM admin_audit WHERE false; SELECT state_hash FROM admin_login_flows WHERE false; SELECT token_hash,id,name,created_at,last_seen_at,user_agent FROM admin_sessions WHERE false;
+SELECT key,name,builtin FROM admin_roles WHERE false; SELECT role,permission FROM admin_role_permissions WHERE false;
+SELECT hash,email,last4,created_at,expires_at FROM admin_tokens WHERE false;
+SELECT id,kind,title,target_page,target_id,created_at FROM admin_notifications WHERE false; SELECT email,notification_id FROM admin_notification_reads WHERE false; SELECT email,prefs,read_all_before FROM admin_preferences WHERE false;
+SELECT service,hour,calls,errors,latency_buckets,usage FROM admin_service_metrics WHERE false; SELECT service,day,ok_minutes,total_minutes,degraded,p95_ms FROM admin_service_daily WHERE false; SELECT id,service,title,description,state,started_at,resolved_at,auto FROM admin_incidents WHERE false;
+SELECT repo,tag,asset,day,download_count FROM release_asset_snapshots WHERE false`); err != nil {
+		return err
+	}
+	return a.store.consoleReady(ctx)
 }
 
-// Telemetry is mounted behind the server's client/session authentication and quota.
-func (a *Service) Telemetry(w http.ResponseWriter, r *http.Request) {
-	if a == nil {
-		writeError(w, 503, "user_auth_disabled")
-		return
-	}
-	var v struct {
-		ID       string `json:"id"`
-		Kind     string `json:"kind"`
-		Platform string `json:"platform"`
-		Version  string `json:"version"`
-		Message  string `json:"message"`
-		Stack    string `json:"stack"`
-	}
-	if !readSized(w, r, &v, 32768) {
-		return
-	}
-	if !resourceText(v.ID, 16, 128, false) || (v.Kind != "download" && v.Kind != "crash") || !resourceText(v.Platform, 1, 32, false) || !resourceText(v.Version, 1, 64, false) || !resourceText(v.Message, 0, 1000, true) || !resourceText(v.Stack, 0, 16000, true) || (v.Kind == "crash" && strings.TrimSpace(v.Message) == "") || (v.Kind == "download" && (v.Message != "" || v.Stack != "")) {
-		writeError(w, 400, "invalid_event")
-		return
-	}
-	_, err := a.store.pool.Exec(r.Context(), `INSERT INTO admin_events(id,kind,platform,version,message,stack) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`, v.ID, v.Kind, v.Platform, v.Version, v.Message, v.Stack)
-	if err != nil {
-		a.error(w, err)
-		return
-	}
-	write(w, 202, map[string]bool{"accepted": true})
-}
-
-// AdminHTTP must only be called after the independent admin authentication gate.
+// AdminHTTP must only be called after the independent admin authentication gate, with the caller's AdminAccess in the context.
 func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/")
 	if path == "site-settings" {
@@ -66,57 +48,20 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 		a.adminAction(w, r)
 		return
 	}
-	if r.Method != "GET" {
+	pathMatched := false
+	for _, route := range adminRoutes {
+		match, ok := matchAdminPattern(route.pattern, path)
+		if !ok {
+			continue
+		}
+		if route.method == r.Method {
+			route.handle(a, w, r, match)
+			return
+		}
+		pathMatched = true
+	}
+	if pathMatched || r.Method != "GET" {
 		writeError(w, 405, "method_not_allowed")
-		return
-	}
-	if strings.HasPrefix(path, "users/") {
-		a.adminUser(w, r, strings.TrimPrefix(path, "users/"))
-		return
-	}
-	for _, section := range []string{"skins", "candidate-skins", "plugins", "dictionaries", "replies"} {
-		if id, ok := strings.CutPrefix(path, section+"/"); ok {
-			a.adminContent(w, r, section, id)
-			return
-		}
-	}
-	if path == "overview" {
-		days := 30
-		if raw := r.URL.Query().Get("days"); raw != "" {
-			parsed, err := strconv.Atoi(raw)
-			if err != nil || (parsed != 7 && parsed != 30) {
-				writeError(w, 400, "invalid_days")
-				return
-			}
-			days = parsed
-		}
-		var result json.RawMessage
-		err := a.store.pool.QueryRow(r.Context(), `SELECT json_build_object(
-   'users',(SELECT count(*) FROM auth_users),
-   'new_users_30d',(SELECT count(*) FROM auth_users WHERE created_at>=now()-interval '30 days'),
-   'session_users',(SELECT count(DISTINCT user_id) FROM auth_sessions WHERE NOT revoked AND expires_at>now()),
-   'downloads',(SELECT count(*) FROM admin_events WHERE kind='download'),
-   'crashes',(SELECT count(*) FROM admin_events WHERE kind='crash'),
-   'open_crashes',(SELECT count(*) FROM admin_events WHERE kind='crash' AND NOT resolved),
-   'skins',(SELECT count(*) FROM community_skins),
-   'skin_downloads',(SELECT count(*) FROM community_skin_downloads),
-   'plugins',(SELECT count(*) FROM community_plugins),
-   'plugin_downloads',(SELECT count(*) FROM community_plugin_downloads),
-   'dictionaries',(SELECT count(*) FROM community_resources WHERE kind='dictionary'),
-   'replies',(SELECT count(*) FROM community_resources WHERE kind='reply'),
-   'resource_saves',(SELECT count(*) FROM community_resource_saves),
-   'daily',(SELECT json_agg(x ORDER BY day) FROM (
-     SELECT to_char(d AT TIME ZONE 'UTC','YYYY-MM-DD') AS day,
-     (SELECT count(*) FROM auth_users WHERE created_at>=d AND created_at<d+interval '1 day') AS users,
-     (SELECT count(*) FROM admin_events WHERE kind='download' AND created_at>=d AND created_at<d+interval '1 day') AS downloads,
-     (SELECT count(*) FROM admin_events WHERE kind='crash' AND created_at>=d AND created_at<d+interval '1 day') AS crashes
-	     FROM generate_series(date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' - ($1::int - 1) * interval '1 day',date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',interval '1 day') d
-   ) x), 'range_days',$1)`, days).Scan(&result)
-		if err != nil {
-			a.error(w, err)
-			return
-		}
-		write(w, 200, result)
 		return
 	}
 	page := 1
@@ -133,45 +78,88 @@ func (a *Service) AdminHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_search")
 		return
 	}
-	// Every SQL fragment is selected from this fixed allowlist, never from request text.
-	queries := map[string]string{
-		"users":           `SELECT u.id,u.display_name,u.created_at,(SELECT count(*) FROM auth_sessions s WHERE s.user_id=u.id AND NOT revoked AND expires_at>now()) AS sessions FROM auth_users u`,
-		"skins":           `SELECT s.id,s.name,s.description,s.owner_id,s.created_at,(SELECT count(*) FROM community_skin_downloads WHERE skin_id=s.id) AS downloads FROM community_skins s`,
-		"dictionaries":    `SELECT id,name,description,owner_id,revision,created_at,updated_at,jsonb_array_length(content->'entries') AS entries,(SELECT count(*) FROM community_resource_saves WHERE resource_id=community_resources.id) AS saves FROM community_resources WHERE kind='dictionary'`,
-		"replies":         `SELECT id,name,description,owner_id,revision,created_at,updated_at,content->>'prompt' AS prompt FROM community_resources WHERE kind='reply'`,
-		"candidate-skins": `SELECT s.id,s.package_id,s.name,COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'||upper(left(u.id,6))) AS author,(SELECT COALESCE(sum(size),0) FROM community_candidate_skin_files WHERE skin_id=s.id) AS size,(SELECT count(*) FROM community_candidate_skin_files WHERE skin_id=s.id) AS file_count,s.visibility,s.created_at,s.updated_at FROM community_candidate_skins s JOIN auth_users u ON u.id=s.owner_id`,
-		"plugins":         `SELECT p.id,p.kind,p.plugin_id,p.name,p.version,COALESCE(NULLIF(btrim(u.display_name),''),'水杉小鹿·'||upper(left(u.id,6))) AS author,p.owner_id,p.size,p.sha256,(SELECT count(*) FROM community_plugin_downloads WHERE pack_id=p.id) AS downloads,p.created_at FROM community_plugins p JOIN auth_users u ON u.id=p.owner_id`,
-		"downloads":       `SELECT id,platform,version,created_at FROM admin_events WHERE kind='download'`,
-		"crashes":         `SELECT id,platform,version,message,stack,resolved,created_at FROM admin_events WHERE kind='crash'`,
-		"audit":           `SELECT id,actor,action,target,created_at FROM admin_audit`,
-	}
-	query, ok := queries[path]
+	list, ok := adminLists[path]
 	if !ok {
 		writeError(w, 404, "not_found")
 		return
 	}
-	platform, version, status := r.URL.Query().Get("platform"), r.URL.Query().Get("version"), r.URL.Query().Get("status")
-	action, actor := r.URL.Query().Get("action"), r.URL.Query().Get("actor")
-	// Candidate skins hold both the public gallery and each account's private library, so moderation can list either one.
-	visibility := r.URL.Query().Get("visibility")
-	if len(platform) > 32 || len(version) > 64 || len(action) > 64 || len(actor) > 200 || (status != "" && status != "open" && status != "resolved") || (status != "" && path != "crashes") || ((platform != "" || version != "") && path != "crashes" && path != "downloads") || ((action != "" || actor != "") && path != "audit") || (visibility != "" && visibility != "public" && visibility != "private") || (visibility != "" && path != "candidate-skins") {
-		writeError(w, 400, "invalid_filter")
-		return
+	a.adminList(w, r, list, page, search)
+}
+
+// matchAdminPattern matches path against a route pattern (see adminRoute) and returns what "{}" matched.
+func matchAdminPattern(pattern, path string) (string, bool) {
+	prefix, suffix, wildcard := strings.Cut(pattern, "{}")
+	if !wildcard {
+		return "", pattern == path
+	}
+	if len(path) < len(prefix)+len(suffix) || !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	return path[len(prefix) : len(path)-len(suffix)], true
+}
+
+// adminListFilterParams is every filter parameter any list accepts; giving one to a list that does not accept it is an error rather than silently ignored.
+func adminListFilterParams() map[string]bool {
+	params := map[string]bool{}
+	for _, list := range adminLists {
+		for _, f := range list.filters {
+			params[f.param] = true
+		}
+	}
+	return params
+}
+
+// adminList serves one list page of 50 rows, newest first. Count and page share one statement snapshot, including pages beyond the last row.
+func (a *Service) adminList(w http.ResponseWriter, r *http.Request, list adminList, page int, search string) {
+	query := r.URL.Query()
+	accepted := map[string]bool{}
+	args := []any{search, (page - 1) * 50, page}
+	if list.args != nil {
+		args = append(args, list.args(a)...)
+	}
+	conditions := ""
+	for _, f := range list.filters {
+		accepted[f.param] = true
+		value := query.Get(f.param)
+		if len(value) > f.max {
+			writeError(w, 400, "invalid_filter")
+			return
+		}
+		if value != "" && f.values != nil {
+			mapped, ok := f.values[value]
+			if !ok {
+				writeError(w, 400, "invalid_filter")
+				return
+			}
+			value = mapped
+		}
+		args = append(args, value)
+		n := "$" + strconv.Itoa(len(args))
+		// f.field is a fixed identifier from adminLists, never request text.
+		if f.contains {
+			conditions += "\n AND (" + n + "='' OR to_jsonb(x)->>'" + f.field + "' ILIKE '%'||" + n + "||'%')"
+		} else {
+			conditions += "\n AND (" + n + "='' OR to_jsonb(x)->>'" + f.field + "'=" + n + ")"
+		}
+	}
+	for param := range adminListFilterParams() {
+		if !accepted[param] && query.Get(param) != "" {
+			writeError(w, 400, "invalid_filter")
+			return
+		}
+	}
+	// The page search matches field values only, never the field names, and skips the list's unsearched fields.
+	searched := "to_jsonb(x)"
+	if len(list.unsearched) > 0 {
+		searched += " - '{" + strings.Join(list.unsearched, ",") + "}'::text[]"
 	}
 	var result json.RawMessage
-	// Count and page share one statement snapshot, including pages beyond the last row.
 	err := a.store.pool.QueryRow(r.Context(), `WITH filtered AS MATERIALIZED (
- SELECT to_jsonb(x) AS item, created_at, id FROM (`+query+`) x
- WHERE ($1='' OR to_jsonb(x)::text ILIKE '%'||$1||'%')
- AND ($3='' OR to_jsonb(x)->>'platform'=$3)
- AND ($4='' OR to_jsonb(x)->>'version'=$4)
- AND ($5='' OR to_jsonb(x)->>'resolved'=CASE WHEN $5='resolved' THEN 'true' ELSE 'false' END)
- AND ($6='' OR to_jsonb(x)->>'action'=$6)
- AND ($7='' OR to_jsonb(x)->>'actor' ILIKE '%'||$7||'%')
- AND ($9='' OR to_jsonb(x)->>'visibility'=$9)
+ SELECT to_jsonb(x) AS item, created_at, id FROM (`+list.query+`) x
+ WHERE ($1='' OR EXISTS(SELECT 1 FROM jsonb_each_text(`+searched+`) e WHERE e.value ILIKE '%'||$1||'%'))`+conditions+`
 ), selected AS (SELECT * FROM filtered ORDER BY created_at DESC,id DESC LIMIT 50 OFFSET $2)
 SELECT json_build_object('items', COALESCE((SELECT json_agg(item ORDER BY created_at DESC,id DESC) FROM selected),'[]'::json),
- 'page',$8::int,'total',(SELECT count(*) FROM filtered),'has_more',(SELECT count(*) FROM filtered)>$2+50)`, search, (page-1)*50, platform, version, status, action, actor, page, visibility).Scan(&result)
+ 'page',$3::int,'total',(SELECT count(*) FROM filtered),'has_more',(SELECT count(*) FROM filtered)>$2+50)`, args...).Scan(&result)
 	if err != nil {
 		a.error(w, err)
 		return
@@ -179,78 +167,134 @@ SELECT json_build_object('items', COALESCE((SELECT json_agg(item ORDER BY create
 	write(w, 200, result)
 }
 
-func (a *Service) adminAction(w http.ResponseWriter, r *http.Request) {
-	var v struct {
-		Action string `json:"action"`
-		ID     string `json:"id"`
-		UserID string `json:"user_id"`
+// actionError is an action failure with its own status and code, for example 404 not_found or 409 exists.
+type actionError struct {
+	status int
+	code   string
+}
+
+func (e *actionError) Error() string { return e.code }
+
+// actionFail makes an action error that the dispatcher answers with status and code.
+func actionFail(status int, code string) error { return &actionError{status, code} }
+
+// requireActionID validates the single id an action works on.
+func requireActionID(v actionRequest) error {
+	if !resourceText(v.ID, 1, 128, false) {
+		return actionFail(400, "invalid_id")
 	}
-	if !read(w, r, &v) {
+	return nil
+}
+
+// Action value limits, in bytes of the raw JSON value. Most actions carry a small object; a notice carries a body of up to noticeBodyMax characters, which JSON may send as \u escapes (12 bytes for a character outside the BMP), so notice actions get room for that.
+const (
+	actionValueMax       = 8 << 10
+	noticeActionValueMax = 256 << 10
+	// actionBodyMax bounds the whole request: the largest value plus the generic fields (100 ids, reason, section).
+	actionBodyMax = noticeActionValueMax + 16<<10
+)
+
+// actionValueLimits raises the value limit for the actions that need more than actionValueMax.
+var actionValueLimits = map[string]int{
+	"save_notice_draft": noticeActionValueMax,
+	"publish_notice":    noticeActionValueMax,
+}
+
+// actionValueLimit is the largest value, in bytes, the action accepts.
+func actionValueLimit(action string) int {
+	if limit, ok := actionValueLimits[action]; ok {
+		return limit
+	}
+	return actionValueMax
+}
+
+// adminAction runs one registered action and its audit record in a single transaction; a failed action leaves no audit record.
+func (a *Service) adminAction(w http.ResponseWriter, r *http.Request) {
+	var v actionRequest
+	if !readSized(w, r, &v, actionBodyMax) {
 		return
 	}
-	if !resourceText(v.ID, 1, 128, false) {
+	switch {
+	case v.ID != "" && !resourceText(v.ID, 1, 128, false):
 		writeError(w, 400, "invalid_id")
 		return
+	case len(v.IDs) > 100:
+		writeError(w, 400, "invalid_ids")
+		return
+	case !resourceText(v.Reason, 0, 500, true):
+		writeError(w, 400, "invalid_reason")
+		return
+	case len(v.Section) > 64:
+		writeError(w, 400, "invalid_section")
+		return
+	case len(v.Value) > actionValueLimit(v.Action):
+		writeError(w, 400, "invalid_value")
+		return
 	}
-	queries := map[string]string{
-		"revoke_session":        `UPDATE auth_sessions SET revoked=true WHERE id=$1 AND user_id=$2`,
-		"revoke_sessions":       `UPDATE auth_sessions SET revoked=true WHERE user_id=$1`,
-		"delete_skin":           `DELETE FROM community_skins WHERE id=$1`,
-		"delete_candidate_skin": `DELETE FROM community_candidate_skins WHERE id=$1`,
-		"delete_plugin":         `DELETE FROM community_plugins WHERE id=$1`,
-		"delete_dictionary":     `DELETE FROM community_resources WHERE id=$1 AND kind='dictionary'`,
-		"delete_reply":          `DELETE FROM community_resources WHERE id=$1 AND kind='reply'`,
-		"resolve_crash":         `UPDATE admin_events SET resolved=true WHERE id=$1 AND kind='crash'`,
-		"reopen_crash":          `UPDATE admin_events SET resolved=false WHERE id=$1 AND kind='crash'`,
+	for _, id := range v.IDs {
+		if !resourceText(id, 1, 128, false) {
+			writeError(w, 400, "invalid_ids")
+			return
+		}
 	}
-	query, ok := queries[v.Action]
+	spec, ok := adminActions[v.Action]
 	if !ok {
 		writeError(w, 400, "invalid_action")
 		return
 	}
-	tx, err := a.store.pool.Begin(r.Context())
+	ctx := r.Context()
+	if spec.perm != "" && !AdminCan(ctx, spec.perm) {
+		writeError(w, 403, "permission_denied")
+		return
+	}
+	tx, err := a.store.pool.Begin(ctx)
 	if err != nil {
 		a.error(w, err)
 		return
 	}
-	defer tx.Rollback(r.Context())
-	args := []any{v.ID}
-	if v.Action == "revoke_session" {
-		if !resourceText(v.UserID, 1, 128, false) {
-			writeError(w, 400, "invalid_user_id")
-			return
-		}
-		args = append(args, v.UserID)
-	}
-	tag, err := tx.Exec(r.Context(), query, args...)
+	defer tx.Rollback(ctx)
+	result, err := spec.run(a, ctx, tx, v)
 	if err != nil {
+		a.writeActionError(w, err)
+		return
+	}
+	target, detail := result.Target, result.Detail
+	if target == "" {
+		target = v.ID
+	}
+	if detail == nil {
+		detail = map[string]any{}
+		if v.Reason != "" {
+			detail["reason"] = v.Reason
+		}
+	}
+	if err = auditTx(ctx, tx, v.Action, target, detail); err != nil {
 		a.error(w, err)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		if v.Action != "revoke_sessions" {
-			writeError(w, 404, "not_found")
-			return
-		}
-		// Revoking an existing user's already-empty session set is idempotent,
-		// but a missing user must not create a misleading audit record.
-		var exists bool
-		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_users WHERE id=$1)`, v.ID).Scan(&exists); err != nil {
-			a.error(w, err)
-			return
-		}
-		if !exists {
-			writeError(w, 404, "not_found")
-			return
-		}
-	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO admin_audit(action,target,actor) VALUES($1,$2,$3)`, v.Action, v.ID, adminActor(r.Context())); err != nil {
+	if err = tx.Commit(ctx); err != nil {
 		a.error(w, err)
 		return
 	}
-	if err = tx.Commit(r.Context()); err != nil {
-		a.error(w, err)
-		return
+	response := map[string]any{}
+	for k, value := range result.Extra {
+		response[k] = value
 	}
-	write(w, 200, map[string]any{"ok": true, "affected": tag.RowsAffected()})
+	response["ok"], response["affected"] = true, result.Affected
+	write(w, 200, response)
+}
+
+// writeActionError answers an action failure: actionFail codes as given, permission and not-implemented sentinels as 403 and 501, anything else through the shared error mapping.
+func (a *Service) writeActionError(w http.ResponseWriter, err error) {
+	var failure *actionError
+	switch {
+	case errors.As(err, &failure):
+		writeError(w, failure.status, failure.code)
+	case errors.Is(err, errPermissionDenied):
+		writeError(w, 403, "permission_denied")
+	case errors.Is(err, errNotImplemented):
+		notImplemented(w)
+	default:
+		a.error(w, err)
+	}
 }

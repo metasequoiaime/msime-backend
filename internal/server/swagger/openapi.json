@@ -14622,7 +14622,7 @@
           "官网"
         ],
         "security": [],
-        "description": "公开只读，供官网下载页展示 Windows 安装包的蓝奏云盘链接，由管理员在后台「站点设置」中修改。按 IP 每分钟 120 次限流；成功响应带 Cache-Control: public, max-age=60，允许官网和边缘缓存短时缓存。用户体系未启用时返回 503。",
+        "description": "公开只读，供官网下载页展示 Windows 安装包的蓝奏云盘链接，由管理员在后台「站点设置」中修改。与 /v1/notices 共用按 IP 每分钟 1200 次的限流（不占用登录等用户接口的 120 次）；成功响应带 Cache-Control: public, max-age=60 和 Vary: Origin，允许官网和边缘缓存短时缓存。用户体系未启用时返回 503。",
         "responses": {
           "200": {
             "description": "成功",
@@ -14705,7 +14705,7 @@
           "词条提交"
         ],
         "security": [],
-        "description": "仅接受 allowed_origins 中网站发出的浏览器请求（必须携带 Origin）。请求体最多 16 KiB。服务端依次校验词条、Cloudflare Turnstile（action 为 words，hostname 属于 allowed_origins）以及按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，只计通过人机验证的请求），然后用仅限 msime-dictionary、仅有 contents:write 与 pull_requests:write 的 GitHub App 安装令牌按 kind 追加：words 把 `词语<TAB>拼音<TAB>权重` 追加到 custom/words.txt（权重取基础词库同音节数词条的权重中位数，8 及以上音节合并计算，并限制在 words.txt 现有权重范围内；Engine 无法计算时用 5000）；english 把 `单词<TAB>显示词形<TAB>1` 追加到 custom/english.txt；translations 把 `原词<TAB>译文` 追加到 custom/translations.txt（同一原词的后一行覆盖前一行，所以允许修正已有翻译，只拒绝完全相同的一对）。三类共用一个滚动 Pull Request，标题按分支相对主分支新增的行数汇总，例如 feat(custom): add 3 words, 1 English word and 2 translations。已有开启的 community-words/* Pull Request 时追加提交，否则从主分支新建 community-words/<UTC yyyymmdd-hhmmss> 分支并开 Pull Request。写入使用文件 blob SHA 做乐观并发，冲突返回 409，服务端从不自动重试 GitHub 写入。备注会公开写入提交说明，@、#、GH- 与 :// 会插入零宽空格。服务不保存访客信息，不记录词条、备注或令牌。",
+        "description": "仅接受 allowed_origins 中网站发出的浏览器请求（必须携带 Origin）。请求体最多 16 KiB。服务端依次校验词条、Cloudflare Turnstile（action 为 words，hostname 属于 allowed_origins）以及按客户端地址的 PostgreSQL 限流（每 10 分钟 3 次、每天 20 次，只计通过人机验证的请求），然后用仅限 msime-dictionary、仅有 contents:write 与 pull_requests:write 的 GitHub App 安装令牌按 kind 追加：words 把 `词语<TAB>拼音<TAB>权重` 追加到 custom/words.txt（权重取基础词库同音节数词条的权重中位数，8 及以上音节合并计算，并限制在 words.txt 现有权重范围内；Engine 无法计算时用 5000）；english 把 `单词<TAB>显示词形<TAB>1` 追加到 custom/english.txt；translations 把 `原词<TAB>译文` 追加到 custom/translations.txt（同一原词的后一行覆盖前一行，所以允许修正已有翻译，只拒绝完全相同的一对）。三类共用一个滚动 Pull Request，标题按分支相对主分支新增的行数汇总，例如 feat(custom): add 3 words, 1 English word and 2 translations。已有开启的 community-words/* Pull Request 时追加提交，否则从主分支新建 community-words/<UTC yyyymmdd-hhmmss> 分支并开 Pull Request。写入使用文件 blob SHA 做乐观并发，冲突返回 409，服务端从不自动重试 GitHub 写入。备注会公开写入提交说明，@、#、GH- 与 :// 会插入零宽空格。服务不保存访客信息，不记录词条、备注或令牌。 写入前会用管理后台的屏蔽词库检查每个词条的各列和备注：命中屏蔽级的词条以 blocked_word 拒绝，备注命中则整次提交返回 400 blocked_word；命中待审级只在提交说明里标出词条位置和类别，供审核参考。",
         "requestBody": {
           "required": true,
           "content": {
@@ -14848,7 +14848,7 @@
             }
           },
           "400": {
-            "description": "请求无效（code 为 invalid_json、invalid_kind、invalid_entry_count、invalid_note、token_required）；词条问题在 rejected 中逐条给出（包括词库、英文词库或分支文件中已有的 already_listed）",
+            "description": "请求无效（code 为 invalid_json、invalid_kind、invalid_entry_count、invalid_note、token_required）；备注命中屏蔽词时 code 为 blocked_word，整次提交不写入；词条问题在 rejected 中逐条给出（包括词库、英文词库或分支文件中已有的 already_listed，以及命中屏蔽词的 blocked_word）",
             "content": {
               "application/json": {
                 "schema": {
@@ -14895,9 +14895,10 @@
                                   "invalid_gloss",
                                   "gloss_too_long",
                                   "duplicate_entry",
-                                  "already_listed"
+                                  "already_listed",
+                                  "blocked_word"
                                 ],
-                                "description": "words 类型用 word_*、pinyin_*、*_syllable*；english 类型用 word_*、display_*；translations 类型用 source_*、gloss_*；duplicate_entry 与 already_listed 各类型通用。"
+                                "description": "words 类型用 word_*、pinyin_*、*_syllable*；english 类型用 word_*、display_*；translations 类型用 source_*、gloss_*；duplicate_entry 与 already_listed 各类型通用。 blocked_word 表示该词条命中管理后台配置的屏蔽词，各类型通用；只给出类别，不会返回具体屏蔽词。"
                               },
                               "reason": {
                                 "type": "string",
@@ -15098,7 +15099,7 @@
             }
           },
           "503": {
-            "description": "功能未开启或配置无效、Turnstile/数据库/GitHub 暂不可用（此时尚未写入任何词条）",
+            "description": "功能未开启或配置无效、Turnstile/数据库/GitHub 暂不可用，或屏蔽词检查暂不可用（screening_unavailable）；此时尚未写入任何词条",
             "content": {
               "application/json": {
                 "schema": {
@@ -15133,7 +15134,7 @@
     },
     "/v1/telemetry/events": {
       "post": {
-        "summary": "上报安装包下载或崩溃事件",
+        "summary": "上报安装包下载、崩溃或匿名设备活跃事件",
         "tags": [
           "统计"
         ],
@@ -15145,7 +15146,7 @@
             "userSession": []
           }
         ],
-        "description": "需要有效设备或用户令牌、用户数据库及最新迁移。最多 32 KiB。事件 ID 全局唯一，重试复用 ID，重复事件返回 202 且不重复计数。时间以服务端接收时间为准。下载仅为上报计数；download 不得携带 message/stack，crash 必须有 message。不要上传输入内容、密码或个人信息。",
+        "description": "需要有效设备或用户令牌、用户数据库及最新迁移。最多 32 KiB。事件 ID 全局唯一，重试复用 ID，重复事件返回 202 且不重复计数。时间以服务端接收时间为准。kind：download 为一次下载；crash 为一次崩溃，必须有 message，可带 stack，服务端按 message 与首个非系统栈帧归入崩溃分组；active 为一台安装的活跃心跳，必须带 install_id；session 为一次正常结束的会话，session_crash 为一次以崩溃结束的会话，二者用于计算无崩溃会话率。只有 crash 可以携带 message/stack，其他 kind 携带即为 400 invalid_event。artifact、channel、install_id 都是可选字段，旧客户端不传也照常接收。install_id 必须是安装时随机生成的匿名标识，不得包含用户、账号或硬件标识。不要上传输入内容、密码或个人信息。",
         "requestBody": {
           "required": true,
           "content": {
@@ -15162,8 +15163,12 @@
                     "type": "string",
                     "enum": [
                       "download",
-                      "crash"
-                    ]
+                      "crash",
+                      "active",
+                      "session",
+                      "session_crash"
+                    ],
+                    "description": "事件类型，见接口说明。"
                   },
                   "platform": {
                     "type": "string",
@@ -15177,11 +15182,31 @@
                   },
                   "message": {
                     "type": "string",
-                    "maxLength": 1000
+                    "maxLength": 1000,
+                    "description": "仅 crash：崩溃信息，必填，可含换行。"
                   },
                   "stack": {
                     "type": "string",
-                    "maxLength": 16000
+                    "maxLength": 16000,
+                    "description": "仅 crash：调用栈，可含换行。"
+                  },
+                  "artifact": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "可选：下载的安装包文件名或产物名，单行，不含控制字符。",
+                    "example": "msime-windows-x64-setup.exe"
+                  },
+                  "channel": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
+                    "description": "可选：分发渠道键。后台识别 cn-mirror、website、github、app-store、testflight、appgallery、google-play，其他值按原样显示。",
+                    "example": "cn-mirror"
+                  },
+                  "install_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{16,64}$",
+                    "description": "匿名安装标识，16–64 个 [A-Za-z0-9_-]；kind=active 时必填，其他 kind 可选。"
                   }
                 },
                 "required": [
@@ -15200,10 +15225,13 @@
             "description": "已接收（含重复事件）"
           },
           "400": {
-            "description": "事件无效"
+            "description": "事件无效（invalid_event）：字段越界、kind 未知、非 crash 事件携带 message/stack、crash 缺少 message 或 active 缺少 install_id"
           },
           "401": {
             "description": "令牌无效"
+          },
+          "403": {
+            "description": "用户令牌所属账号已被封禁（account_banned）"
           },
           "415": {
             "description": "需要 JSON"
@@ -15213,6 +15241,258 @@
           },
           "503": {
             "description": "数据库或服务不可用"
+          }
+        }
+      }
+    },
+    "/v1/community/reports": {
+      "post": {
+        "summary": "举报社区内容",
+        "tags": [
+          "创作社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "description": "登录用户举报一项社区内容，由管理后台复核。kind 取 skins、candidate-skins、plugins、dictionaries、replies；只能举报自己可见的内容（已下架内容与私有候选皮肤返回 404）。同一账号重复举报同一内容不会新增记录，返回 200；每个账号每小时最多 30 次。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "skins",
+                      "candidate-skins",
+                      "plugins",
+                      "dictionaries",
+                      "replies"
+                    ]
+                  },
+                  "item_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "举报原因，不含控制字符"
+                  },
+                  "detail": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "补充说明，可含换行"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已举报过，未新增记录",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reported": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "已记录举报",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reported": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "404": {
+            "description": "内容不存在或不可见"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用"
+          }
+        }
+      }
+    },
+    "/v1/notices": {
+      "get": {
+        "summary": "公告列表",
+        "tags": [
+          "公告"
+        ],
+        "security": [],
+        "description": "公开只读，无需鉴权，供 App 与官网展示管理后台已发布的公告，按发布时间倒序最多 20 条；草稿和已归档的公告不会出现。响应允许缓存 60 秒（Cache-Control: public, max-age=60，并带 Vary: Origin），发布或归档最多 60 秒后可见。与 /v1/site/download-mirrors 共用按 IP 每分钟 1200 次的限流，不占用登录等用户接口的 120 次。",
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "query",
+            "required": false,
+            "description": "只返回投放到该平台（或全部平台）的公告",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "windows",
+                "macos",
+                "linux",
+                "android",
+                "ios",
+                "harmony"
+              ]
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "description": "只返回包含该渠道的公告",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "site",
+                "app",
+                "telegram"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "公告 ID"
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 200,
+                            "description": "标题"
+                          },
+                          "body": {
+                            "type": "string",
+                            "maxLength": 20000,
+                            "description": "正文，支持简单 Markdown"
+                          },
+                          "targets": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "all",
+                                "windows",
+                                "macos",
+                                "linux",
+                                "android",
+                                "ios",
+                                "harmony"
+                              ]
+                            },
+                            "description": "投放平台；all 表示全部平台"
+                          },
+                          "channels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "site",
+                                "app",
+                                "telegram"
+                              ]
+                            },
+                            "description": "展示渠道：site 官网横幅，app App 内通知，telegram 已推送到 Telegram"
+                          },
+                          "published_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "发布时间（UTC）"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "body",
+                          "targets",
+                          "channels",
+                          "published_at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "platform 或 channel 不在取值范围内（invalid_platform / invalid_channel）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "请求过多",
+            "headers": {
+              "Retry-After": {
+                "description": "重试等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "用户体系未启用或数据库不可用"
           }
         }
       }
