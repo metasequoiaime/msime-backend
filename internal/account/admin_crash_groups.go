@@ -128,7 +128,7 @@ func scanCrashGroup(row pgx.Row) (crashGroupRow, error) {
 // crashGroupsLimit caps the groups one page load returns; the busiest and most recent come first.
 const crashGroupsLimit = 500
 
-// crashSummary is the tile row of the crash page. Installs and sessions come from the optional active and session telemetry, so each is null rather than zero while clients do not report it.
+// crashSummary is the tile row of the crash page. Installs and sessions come from the optional active and session telemetry, so each is null rather than zero while clients do not report it. CrashFreeRate is session/(session+session_crash) over the last 7 days, the same formula and rounding as the overview's crash_free_rate. The summary query names every event kind so the planner can use admin_events_kind_time instead of scanning the whole table.
 type crashSummary struct {
 	Groups        int64    `json:"groups"`
 	Crashes7d     int64    `json:"crashes_7d"`
@@ -200,8 +200,8 @@ ORDER BY COALESCE(c.c7,0) DESC,g.last_seen DESC,g.signature LIMIT $3`, "", platf
  count(*) FILTER (WHERE kind='crash'),
  CASE WHEN count(install_id) FILTER (WHERE kind='crash')=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE kind='crash') END,
  CASE WHEN count(install_id)=0 THEN NULL ELSE count(DISTINCT install_id) FILTER (WHERE created_at>=date_trunc('day',now(),'UTC')) END,
- CASE WHEN count(*) FILTER (WHERE kind='session')=0 THEN NULL ELSE GREATEST(0,1-(count(*) FILTER (WHERE kind='session_crash'))::float8/(count(*) FILTER (WHERE kind='session'))) END
-FROM admin_events WHERE created_at>=now()-interval '7 days' AND ($1='' OR platform=$1)`, platform).Scan(&summary.Groups, &summary.Crashes7d, &summary.Devices7d, &summary.InstallsToday, &summary.CrashFreeRate)
+ round(count(*) FILTER (WHERE kind='session')::numeric/NULLIF(count(*) FILTER (WHERE kind IN ('session','session_crash')),0),4)::float8
+FROM admin_events WHERE kind IN ('download','crash','active','session','session_crash') AND created_at>=now()-interval '7 days' AND ($1='' OR platform=$1)`, platform).Scan(&summary.Groups, &summary.Crashes7d, &summary.Devices7d, &summary.InstallsToday, &summary.CrashFreeRate)
 	if err != nil {
 		a.error(w, err)
 		return

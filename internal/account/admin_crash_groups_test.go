@@ -150,7 +150,7 @@ func TestCrashGroupsList(t *testing.T) {
 		t.Fatalf("platforms %+v", all.Platforms)
 	}
 	s := all.Summary
-	if s.Groups != 3 || s.Crashes7d != 4 || s.Devices7d == nil || *s.Devices7d != 2 || s.InstallsToday == nil || *s.InstallsToday != 2 || s.CrashFreeRate == nil || *s.CrashFreeRate != 0.75 {
+	if s.Groups != 3 || s.Crashes7d != 4 || s.Devices7d == nil || *s.Devices7d != 2 || s.InstallsToday == nil || *s.InstallsToday != 2 || s.CrashFreeRate == nil || *s.CrashFreeRate != 0.8 {
 		t.Fatalf("summary %+v", s)
 	}
 
