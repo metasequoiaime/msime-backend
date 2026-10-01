@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Two services on separate pools stand in for two replicas: the second waits while the first holds the lock, gets ErrLockBusy once its wait runs out, takes the lock as soon as the first releases it, and a waiter whose request is cancelled stops at once.
@@ -63,5 +65,40 @@ func TestWaitLockAcrossPools(t *testing.T) {
 	release()
 	if acquired := first.store.pool.Stat().AcquiredConns(); acquired != 0 {
 		t.Fatal("release kept the connection", acquired)
+	}
+}
+
+// The lock holder's session gets server-side keepalives, so a holder whose node vanishes does not keep the lock for hours. A one-connection pool makes the connection inspected afterwards the one that held the lock.
+func TestWaitLockSetsServerKeepalives(t *testing.T) {
+	testStore(t)
+	cfg, err := pgxpool.ParseConfig(os.Getenv("MSIME_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	ctx := context.Background()
+	var tcp bool
+	if err = pool.QueryRow(ctx, `SELECT inet_server_addr() IS NOT NULL`).Scan(&tcp); err != nil {
+		t.Fatal(err)
+	}
+	if !tcp {
+		t.Skip("keepalives only apply to TCP connections")
+	}
+	release, err := (&Service{store: &Store{pool: pool}}).WaitLock(ctx, "test:"+t.Name()+":"+strconv.FormatInt(time.Now().UnixNano(), 10), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	var idle, interval, count string
+	if err = pool.QueryRow(ctx, `SELECT current_setting('tcp_keepalives_idle'),current_setting('tcp_keepalives_interval'),current_setting('tcp_keepalives_count')`).Scan(&idle, &interval, &count); err != nil {
+		t.Fatal(err)
+	}
+	if idle != "30" || interval != "10" || count != "3" {
+		t.Fatal("lock holder without server keepalives", idle, interval, count)
 	}
 }

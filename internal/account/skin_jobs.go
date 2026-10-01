@@ -39,6 +39,10 @@ func (a *Service) CreateSkinJob(ctx context.Context, id, owner string, perOwner,
 		return expires, err
 	}
 	defer tx.Rollback(ctx)
+	// The lock is held only for a few statements, but a replica whose node vanishes inside them would otherwise block every replica's job creation until the kernel reaps the dead connection.
+	if _, err = tx.Exec(ctx, serverKeepalives); err != nil {
+		return expires, err
+	}
 	if _, err = tx.Exec(ctx, skinJobsLock); err != nil {
 		return expires, err
 	}

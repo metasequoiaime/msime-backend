@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// serverKeepalives makes PostgreSQL notice within about a minute that the client of a session holding an advisory lock vanished without closing the connection (node lost, network partition), instead of keeping the lock for the kernel default of two hours. They are ignored on Unix sockets. They are set per session rather than as startup parameters in Open, because a connection pooler in front of PostgreSQL may reject unknown startup parameters.
+const serverKeepalives = `SET tcp_keepalives_idle=30; SET tcp_keepalives_interval=10; SET tcp_keepalives_count=3`
+
 // ErrLockBusy is returned by WaitLock when another request, on this replica or another, still holds the lock after the wait.
 var ErrLockBusy = errors.New("lock held by another request")
 
@@ -50,7 +53,7 @@ func (a *Service) tryLock(ctx context.Context, name string) (func(), error) {
 		conn.Release()
 		return nil, err
 	}
-	return func() {
+	release := func() {
 		// The request context may already be done; unlock on a fresh one, and drop the connection rather than return it to the pool still holding the lock.
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -58,5 +61,11 @@ func (a *Service) tryLock(ctx context.Context, name string) (func(), error) {
 			_ = conn.Conn().Close(unlockCtx)
 		}
 		conn.Release()
-	}, nil
+	}
+	// The holder's session sits idle while it works outside the database (GitHub calls), so PostgreSQL sends nothing that would reveal a holder whose node vanished without closing the socket; without server-side keepalives the lock would stay held for the kernel default of about two hours. Set only once the lock is taken, so polling attempts cost one round trip; the setting stays on the pooled connection, which is harmless.
+	if _, err = conn.Exec(ctx, serverKeepalives); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
 }

@@ -352,8 +352,7 @@ func (a *Service) AcquireStatusLeader(ctx context.Context) (*StatusLeader, error
 	}
 	// Taken out of the pool, the connection cannot be handed to a request or recycled by the pool's lifetime limits while it holds the lock.
 	leader := &StatusLeader{conn: pooled.Hijack()}
-	// Server-side keepalives make PostgreSQL notice within about a minute that a leader's host vanished without closing the connection, instead of keeping its lock for the kernel default of two hours. They are ignored on Unix sockets.
-	if _, err = leader.conn.Exec(ctx, `SET tcp_keepalives_idle=30; SET tcp_keepalives_interval=10; SET tcp_keepalives_count=3`); err != nil {
+	if _, err = leader.conn.Exec(ctx, serverKeepalives); err != nil {
 		leader.Release()
 		return nil, err
 	}
