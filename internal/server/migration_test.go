@@ -207,7 +207,7 @@ func TestStartupMigratesCommunityCandidateSkinTablesAddedLater(t *testing.T) {
 func TestStartupMigratesAdminConsoleObjectsAddedLater(t *testing.T) {
 	public := []string{
 		"community_reports", "word_submissions", "admin_crash_groups", "admin_notices", "admin_sensitive_words", "admin_sensitive_hits",
-		"community_skins.moderation", "community_skins.moderated_by", "community_resources.previous_moderation", "community_candidate_skins.moderated_at", "community_candidate_skins.category", "community_plugins.moderation_reason",
+		"community_skins.moderation", "community_skins.moderated_by", "community_resources.previous_moderation", "community_candidate_skins.moderated_at", "community_candidate_skins.category", "community_skins.category", "community_plugins.moderation_reason",
 		"auth_users.banned_at", "auth_users.ban_reason", "auth_users.banned_by", "auth_sessions.user_agent",
 		"admin_events.artifact", "admin_events.channel", "admin_events.install_id", "admin_events.signature", "admin_events_kind_check",
 	}

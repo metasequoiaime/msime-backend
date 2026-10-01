@@ -216,6 +216,10 @@ func (s *Store) Ready(ctx context.Context) error {
 	if _, e := s.pool.Exec(ctx, `SELECT category FROM community_candidate_skins WHERE false`); e != nil {
 		return e
 	}
+	// 键盘皮肤的分类列同理：约束和索引与列在同一次迁移中加上，只探测列。
+	if _, e := s.pool.Exec(ctx, `SELECT category FROM community_skins WHERE false`); e != nil {
+		return e
+	}
 	return s.consoleReady(ctx)
 }
 

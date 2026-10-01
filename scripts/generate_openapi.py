@@ -215,11 +215,16 @@ community_design = obj({
 moderation_field = string(enum=['approved','pending','removed'],description='审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。')
 moderation_param = {'name':'fields','in':'query','schema':string(enum=['','moderation'],default=''),'description':'moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。'}
 screening_responses = {'422':{'description':'名称、描述或内容命中拦截级敏感词（blocked_content），未保存；请修改后再提交','content':{'application/json':{'schema':{'$ref':'#/components/schemas/Error'}}}},'503':{'description':'服务不可用；或敏感词检查暂时不可用（screening_unavailable，带 Retry-After，未保存，稍后重试）','headers':{'Retry-After':{'description':'screening_unavailable 时的重试等待秒数','schema':{'type':'integer'}}}}}
-community_skin = obj({'id':string(),'name':string(),'description':string(),'author':string(),'design':community_design,'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'moderation':moderation_field})
+# 图库分类只是发布元数据，不属于 skin.toml 或键盘皮肤的 design；键盘皮肤与候选窗皮肤共用这组取值，与 internal/account 的 candidateSkinCategories 一致。
+candidate_categories=['nature','guofeng','acg','cute','food','tech','minimal','other']
+candidate_category=string(enum=candidate_categories,description='图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。')
+category_include_param={'name':'include','in':'query','schema':string(enum=['','category'],default=''),'description':'category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。'}
+community_skin = obj({'id':string(),'name':string(),'description':string(),'author':string(),'design':community_design,'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'moderation':moderation_field,'category':dict(candidate_category,description=candidate_category['description']+'仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。')})
 for path,method,title,body,response,status in [
  ('/v1/community/skins','get','浏览用户皮肤',None,obj({'skins':{'type':'array','items':community_skin},'has_more':{'type':'boolean'}}),'200'),
- ('/v1/community/skins','post','发布用户皮肤',obj({'id':string(format='uuid'),'name':string(maxLength=32),'description':string(maxLength=280),'design':community_design},['id','name','description','design'],True),obj({'id':string()}),'201'),
+ ('/v1/community/skins','post','发布用户皮肤',obj({'id':string(format='uuid'),'name':string(maxLength=32),'description':string(maxLength=280),'design':community_design,'category':dict(candidate_category,description=candidate_category['description']+'缺省（或 null）为 other，未知值或空串返回 400 invalid_category；不参与重试比较，同一内容换分类重试仍返回 200 且保留已存的分类。滚动升级期间旧版本副本会以 400 invalid_json 拒绝该键。')},['id','name','description','design'],True),obj({'id':string()}),'201'),
  ('/v1/community/skins/{id}','get','用户皮肤详情',None,community_skin,'200'),
+ ('/v1/community/skins/{id}','patch','作者修改皮肤分类',obj({'category':candidate_category},['category'],True),community_skin,'200'),
  ('/v1/community/skins/{id}','delete','作者下架皮肤',None,obj({'deleted':{'type':'boolean'}}),'200'),
  ('/v1/community/skins/{id}/download','post','下载皮肤并去重计数',None,obj({'design':community_design}),'200'),
  ('/v1/community/skins/{id}/rating','put','提交或修改评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200')
@@ -227,9 +232,11 @@ for path,method,title,body,response,status in [
     parameters=[]
     if '{id}' in path: parameters.append({'name':'id','in':'path','required':True,'schema':string(format='uuid')})
     elif method=='get': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},{'name':'scope','in':'query','schema':string(enum=['','mine'],default=''),'description':'mine 只列出自己的作品（含已下架），需要用户会话，否则 401 user_session_required。'}]
-    if method=='get' and path in ('/v1/community/skins','/v1/community/skins/{id}'): parameters.append(moderation_param)
+    if method in ('get','patch') and path in ('/v1/community/skins','/v1/community/skins/{id}'): parameters.append(moderation_param)
+    if method=='get' and path=='/v1/community/skins': parameters.append({'name':'category','in':'query','schema':string(enum=candidate_categories),'description':'只列出该图库分类的作品；未知分类返回 400 invalid_category。'})
+    if response is community_skin or method=='get' and path=='/v1/community/skins': parameters.append(category_include_param)
     operation={'summary':title,'tags':['皮肤社区'],'security':[] if method=='get' else [{'userSession':[]}], 'parameters':parameters,
-      'description':'仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。',
+      'description':'仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。'+('仅作者可修改（他人或不存在返回 404 skin_not_found），请求体只有 category（缺省、null 或未知值返回 400 invalid_category），返回与详情相同的作品；不改变审核状态，设为当前值同样返回 200。' if method=='patch' else '')+'详见 docs/skin-community.md。',
       'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数无效'),('401','需要用户登录'),('403','尚未下载或正在评价自己的作品'),('404','皮肤不存在或非作者'),('409','发布配额已满或 UUID 冲突'),('429','请求过多'),('503','服务不可用')]}}}
     if body: operation['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     if path=='/v1/community/skins' and method=='post':
@@ -237,9 +244,6 @@ for path,method,title,body,response,status in [
         operation['responses'].update(screening_responses)
     paths.setdefault(path,{})[method]=operation
 # 候选窗皮肤包：skin.toml 加 PNG/JPEG，与 /v1/skins 精选目录分表，服务端重新编码图片。
-# 图库分类只是发布元数据，不属于 skin.toml；与 internal/account 的 candidateSkinCategories 一致。
-candidate_categories=['nature','guofeng','acg','cute','food','tech','minimal','other']
-candidate_category=string(enum=candidate_categories,description='图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。')
 candidate_license = obj({'code':string(),'assets':string(),'source':string()},['code','assets','source'])
 community_candidate_skin = obj({'id':string(format='uuid'),'package_id':string(pattern='^[a-z0-9][a-z0-9._-]{0,63}$'),'name':string(),'description':string(),'author':string(),'version':string(),'license':candidate_license,'size':{'type':'integer','description':'重新编码后的图片总字节数'},'file_count':{'type':'integer','description':'图片数量，不含 skin.toml'},'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'created_at':string(format='date-time'),'visibility':string(enum=['private','public'],description='同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。'),'updated_at':string(format='date-time',description='同步字段，替换包或切换可见性时更新。'),'request_sha256':string(pattern='^[0-9a-f]{64}$',description='同步字段，仅作者可见：上传请求原始字节的摘要。'),'category':dict(candidate_category,description=candidate_category['description']+'仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。'),'moderation':moderation_field})
 candidate_files = {'type':'object','minProperties':1,'maxProperties':3,'additionalProperties':string(format='byte'),'description':'键为包内相对路径（仅 png/jpg/jpeg），值为标准 base64。'}
@@ -266,7 +270,7 @@ for path,method,title,body,response,status,description in [
     elif method=='get' and path=='/v1/community/candidate-skins': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},{'name':'scope','in':'query','schema':string(enum=['','mine'],default='')},fields]
     if path=='/v1/community/candidate-skins/{id}' and method=='get': parameters.append(fields)
     if method=='get' and path=='/v1/community/candidate-skins': parameters.append({'name':'category','in':'query','schema':string(enum=candidate_categories),'description':'只列出该图库分类的作品。'})
-    if response is community_candidate_skin or method=='get' and path=='/v1/community/candidate-skins': parameters.append({'name':'include','in':'query','schema':string(enum=['','category'],default=''),'description':'category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。'})
+    if response is community_candidate_skin or method=='get' and path=='/v1/community/candidate-skins': parameters.append(category_include_param)
     operation={'summary':title,'tags':['皮肤社区'],'security':[] if method=='get' and not path.endswith('/sync') else [{'userSession':[]}],'parameters':parameters,
       'description':description+' 详见 docs/skin-community.md。',
       'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数、清单或图片无效'),('401','需要用户登录'),('403','尚未下载或正在评价自己的作品'),('404','皮肤不存在、为他人的私有作品或非作者'),('409','配额已满、UUID 冲突或替换包 id 不符'),('415','需要 application/json'),('429','请求过多'),('503','服务不可用或图片处理繁忙')]}}}

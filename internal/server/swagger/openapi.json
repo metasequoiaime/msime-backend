@@ -10625,6 +10625,37 @@
               "default": ""
             },
             "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "nature",
+                "guofeng",
+                "acg",
+                "cute",
+                "food",
+                "tech",
+                "minimal",
+                "other"
+              ]
+            },
+            "description": "只列出该图库分类的作品；未知分类返回 400 invalid_category。"
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "category"
+              ],
+              "default": ""
+            },
+            "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
         "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
@@ -10798,6 +10829,20 @@
                               "removed"
                             ],
                             "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                          },
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "nature",
+                              "guofeng",
+                              "acg",
+                              "cute",
+                              "food",
+                              "tech",
+                              "minimal",
+                              "other"
+                            ],
+                            "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
                           }
                         }
                       }
@@ -11056,6 +11101,20 @@
                       "monospaced"
                     ],
                     "additionalProperties": false
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "nature",
+                      "guofeng",
+                      "acg",
+                      "cute",
+                      "food",
+                      "tech",
+                      "minimal",
+                      "other"
+                    ],
+                    "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。缺省（或 null）为 other，未知值或空串返回 400 invalid_category；不参与重试比较，同一内容换分类重试仍返回 200 且保留已存的分类。滚动升级期间旧版本副本会以 400 invalid_json 拒绝该键。"
                   }
                 },
                 "required": [
@@ -11100,6 +11159,19 @@
               "default": ""
             },
             "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "category"
+              ],
+              "default": ""
+            },
+            "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
           }
         ],
         "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。详见 docs/skin-community.md。",
@@ -11268,6 +11340,20 @@
                         "removed"
                       ],
                       "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "nature",
+                        "guofeng",
+                        "acg",
+                        "cute",
+                        "food",
+                        "tech",
+                        "minimal",
+                        "other"
+                      ],
+                      "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
                     }
                   }
                 }
@@ -11294,6 +11380,292 @@
           },
           "503": {
             "description": "服务不可用"
+          }
+        }
+      },
+      "patch": {
+        "summary": "作者修改皮肤分类",
+        "tags": [
+          "皮肤社区"
+        ],
+        "security": [
+          {
+            "userSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "moderation"
+              ],
+              "default": ""
+            },
+            "description": "moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。"
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "",
+                "category"
+              ],
+              "default": ""
+            },
+            "description": "category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。"
+          }
+        ],
+        "description": "仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。仅作者可修改（他人或不存在返回 404 skin_not_found），请求体只有 category（缺省、null 或未知值返回 400 invalid_category），返回与详情相同的作品；不改变审核状态，设为当前值同样返回 200。详见 docs/skin-community.md。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "design": {
+                      "type": "object",
+                      "properties": {
+                        "background": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16777215
+                        },
+                        "keyBackground": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16777215
+                        },
+                        "keyForeground": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16777215
+                        },
+                        "accent": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16777215
+                        },
+                        "actionBackground": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16777215
+                        },
+                        "gradientEnd": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16777215
+                        },
+                        "customBorderColor": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16777215
+                        },
+                        "cornerRadius": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 20
+                        },
+                        "borderWidth": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 2
+                        },
+                        "shadow": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 0.4
+                        },
+                        "keyOpacity": {
+                          "type": "number",
+                          "minimum": 0.25,
+                          "maximum": 1
+                        },
+                        "patternOpacity": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 0.5
+                        },
+                        "photoShade": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 0.8
+                        },
+                        "photoPosition": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "keyShape": {
+                          "type": "string",
+                          "enum": [
+                            "rounded",
+                            "capsule",
+                            "ticket",
+                            "pebble"
+                          ]
+                        },
+                        "keyMaterial": {
+                          "type": "string",
+                          "enum": [
+                            "flat",
+                            "raised",
+                            "glass",
+                            "paper"
+                          ]
+                        },
+                        "pattern": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 3
+                        },
+                        "monospaced": {
+                          "type": "boolean"
+                        },
+                        "gradientHorizontal": {
+                          "type": "boolean"
+                        },
+                        "photo": {
+                          "type": "string",
+                          "format": "byte",
+                          "description": "JPEG, at most 512000 decoded bytes, at most 1024 pixels per axis"
+                        }
+                      },
+                      "required": [
+                        "background",
+                        "keyBackground",
+                        "keyForeground",
+                        "accent",
+                        "actionBackground",
+                        "cornerRadius",
+                        "borderWidth",
+                        "shadow",
+                        "pattern",
+                        "monospaced"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "downloads": {
+                      "type": "integer"
+                    },
+                    "rating_count": {
+                      "type": "integer"
+                    },
+                    "rating_average": {
+                      "type": "number"
+                    },
+                    "owned": {
+                      "type": "boolean"
+                    },
+                    "my_rating": {
+                      "type": "integer"
+                    },
+                    "moderation": {
+                      "type": "string",
+                      "enum": [
+                        "approved",
+                        "pending",
+                        "removed"
+                      ],
+                      "description": "审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。"
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "nature",
+                        "guofeng",
+                        "acg",
+                        "cute",
+                        "food",
+                        "tech",
+                        "minimal",
+                        "other"
+                      ],
+                      "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数无效"
+          },
+          "401": {
+            "description": "需要用户登录"
+          },
+          "403": {
+            "description": "尚未下载或正在评价自己的作品"
+          },
+          "404": {
+            "description": "皮肤不存在或非作者"
+          },
+          "409": {
+            "description": "发布配额已满或 UUID 冲突"
+          },
+          "429": {
+            "description": "请求过多"
+          },
+          "503": {
+            "description": "服务不可用"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "nature",
+                      "guofeng",
+                      "acg",
+                      "cute",
+                      "food",
+                      "tech",
+                      "minimal",
+                      "other"
+                    ],
+                    "description": "图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。"
+                  }
+                },
+                "required": [
+                  "category"
+                ],
+                "additionalProperties": false
+              }
+            }
           }
         }
       },

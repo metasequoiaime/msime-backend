@@ -102,7 +102,7 @@ type CommunityCandidateSkin struct {
 	Category string `json:"category,omitempty"`
 }
 
-// candidateSkinCategories 是图库分类的全部取值，与 community_candidate_skin_schema.sql 的 community_candidate_skins_category_check 一致。分类只是发布元数据，不属于 skin.toml；缺省为 other。
+// candidateSkinCategories 是图库分类的全部取值，候选窗皮肤与社区键盘皮肤共用，与 community_candidate_skin_schema.sql 的 community_candidate_skins_category_check、community_schema.sql 的 community_skins_category_check 一致。分类只是发布元数据，不属于 skin.toml 或键盘皮肤的 design；缺省为 other。
 var candidateSkinCategories = []string{"nature", "guofeng", "acg", "cute", "food", "tech", "minimal", "other"}
 
 const defaultCandidateSkinCategory = "other"

@@ -125,6 +125,17 @@ type CommunitySkin struct {
 	Moderation string `json:"moderation,omitempty"`
 	// moderation 是为作者读出的状态，其他人为空。
 	moderation string
+	// Category 是图库分类，取值与候选窗皮肤相同（candidateSkinCategories），只在请求带 include=category 时出现（见 communitySkinItem）。
+	Category string `json:"category,omitempty"`
+}
+
+// communitySkinItem 按客户端的声明裁剪条目：没有 fields=moderation 时去掉审核状态，没有 include=category 时去掉分类，未声明的响应因此与加入这些字段之前逐字节相同。
+func communitySkinItem(v CommunitySkin, fields map[string]bool, category bool) CommunitySkin {
+	v.Moderation = ownerModeration(fields, v.moderation)
+	if !category {
+		v.Category = ""
+	}
+	return v
 }
 
 // communityFields 读取社区列表和详情接口的 `fields=` 开关：逗号分隔、取自 allowed 的名称列表，出现其他名称时 ok 为 false。已发布的客户端解析社区条目时拒绝未知字段，所以额外字段只发给显式请求的客户端。
@@ -157,12 +168,12 @@ const communitySelect = `SELECT s.id,s.name,s.description,
  (SELECT count(*) FROM community_skin_ratings WHERE skin_id=s.id),
  COALESCE((SELECT avg(stars) FROM community_skin_ratings WHERE skin_id=s.id),0),
  s.owner_id=$1,COALESCE((SELECT stars FROM community_skin_ratings WHERE skin_id=s.id AND user_id=$1),0),
- CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END
+ CASE WHEN s.owner_id=$1 THEN s.moderation ELSE '' END,s.category
  FROM community_skins s JOIN auth_users u ON u.id=s.owner_id `
 
 func scanSkin(row interface{ Scan(...any) error }) (CommunitySkin, error) {
 	var s CommunitySkin
-	err := row.Scan(&s.ID, &s.Name, &s.Description, &s.Author, &s.Design, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.moderation)
+	err := row.Scan(&s.ID, &s.Name, &s.Description, &s.Author, &s.Design, &s.Downloads, &s.RatingCount, &s.RatingAverage, &s.Owned, &s.MyRating, &s.moderation, &s.Category)
 	return s, err
 }
 
@@ -199,12 +210,22 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_fields")
 		return
 	}
+	category := r.URL.Query().Get("category")
+	if category != "" && !validCandidateSkinCategory(category) {
+		writeError(w, 400, "invalid_category")
+		return
+	}
+	withCategory, ok := candidateIncludeCategory(r)
+	if !ok {
+		writeError(w, 400, "invalid_include")
+		return
+	}
 	viewer := a.communityViewer(r)
 	if scope == "mine" && viewer == "" {
 		writeError(w, 401, "user_session_required")
 		return
 	}
-	rows, e := a.store.pool.Query(r.Context(), communitySelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($4='' OR s.owner_id=$1) AND (s.moderation<>'removed' OR s.owner_id=$1) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $3`, viewer, search, offset, scope)
+	rows, e := a.store.pool.Query(r.Context(), communitySelect+`WHERE strpos(lower(s.name),lower($2))>0 AND ($4='' OR s.owner_id=$1) AND (s.moderation<>'removed' OR s.owner_id=$1) AND ($5='' OR s.category=$5) ORDER BY s.created_at DESC,s.id LIMIT 21 OFFSET $3`, viewer, search, offset, scope, category)
 	if e != nil {
 		a.error(w, e)
 		return
@@ -217,8 +238,7 @@ func (a *Service) communityList(w http.ResponseWriter, r *http.Request) {
 			a.error(w, e)
 			return
 		}
-		v.Moderation = ownerModeration(fields, v.moderation)
-		items = append(items, v)
+		items = append(items, communitySkinItem(v, fields, withCategory))
 	}
 	if e = rows.Err(); e != nil {
 		a.error(w, e)
@@ -236,7 +256,17 @@ func (a *Service) communityDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_fields")
 		return
 	}
-	v, e := scanSkin(a.store.pool.QueryRow(r.Context(), communitySelect+`WHERE s.id=$2 AND (s.moderation<>'removed' OR s.owner_id=$1)`, a.communityViewer(r), r.PathValue("id")))
+	withCategory, ok := candidateIncludeCategory(r)
+	if !ok {
+		writeError(w, 400, "invalid_include")
+		return
+	}
+	a.writeCommunitySkin(w, r, a.communityViewer(r), fields, withCategory)
+}
+
+// writeCommunitySkin 以详情接口的形状写出 viewer 看到的 {id} 作品（含完整 design），详情和作者修改分类的 PATCH 共用。
+func (a *Service) writeCommunitySkin(w http.ResponseWriter, r *http.Request, viewer string, fields map[string]bool, withCategory bool) {
+	v, e := scanSkin(a.store.pool.QueryRow(r.Context(), communitySelect+`WHERE s.id=$2 AND (s.moderation<>'removed' OR s.owner_id=$1)`, viewer, r.PathValue("id")))
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "skin_not_found")
 		return
@@ -250,8 +280,7 @@ func (a *Service) communityDetail(w http.ResponseWriter, r *http.Request) {
 		a.error(w, e)
 		return
 	}
-	v.Moderation = ownerModeration(fields, v.moderation)
-	write(w, 200, v)
+	write(w, 200, communitySkinItem(v, fields, withCategory))
 }
 func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.principal(w, r, false)
@@ -263,8 +292,18 @@ func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
 		Design      json.RawMessage `json:"design"`
+		// 缺省（或 null）为 other。分类不参与下面的重试比较：同一内容的重试无论带什么分类都返回已存的作品，之后改分类走 PATCH。
+		Category *string `json:"category"`
 	}
 	if !readSized(w, r, &input, 710000) {
+		return
+	}
+	category := defaultCandidateSkinCategory
+	if input.Category != nil {
+		category = *input.Category
+	}
+	if !validCandidateSkinCategory(category) {
+		writeError(w, 400, "invalid_category")
 		return
 	}
 	input.ID = strings.ToLower(input.ID)
@@ -332,7 +371,7 @@ func (a *Service) communityPublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "skin_publish_limit")
 		return
 	}
-	_, e = tx.Exec(r.Context(), `INSERT INTO community_skins(id,owner_id,name,description,design,moderation,moderation_reason) VALUES($1,$2,$3,$4,$5,'pending',$6)`, input.ID, p.UserID, input.Name, input.Description, raw, flag)
+	_, e = tx.Exec(r.Context(), `INSERT INTO community_skins(id,owner_id,name,description,design,moderation,moderation_reason,category) VALUES($1,$2,$3,$4,$5,'pending',$6,$7)`, input.ID, p.UserID, input.Name, input.Description, raw, flag, category)
 	if e == nil {
 		e = tx.Commit(r.Context())
 	}
@@ -369,6 +408,44 @@ func (a *Service) communityDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, 200, map[string]bool{"deleted": true})
+}
+
+// communityUpdate 是作者修改自己作品发布元数据的接口，请求体 {"category":"<分类>"}，返回 200 和与详情相同形状的作品（同样支持 fields=moderation 与 include=category）。他人的作品与不存在一样返回 404 skin_not_found。分类不属于 design，所以不改变审核状态，也不影响发布重试的比较；限流沿用每个社区接口都计入的按地址额度。
+func (a *Service) communityUpdate(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.principal(w, r, false)
+	if !ok {
+		return
+	}
+	fields, ok := communityFields(r, "moderation")
+	if !ok {
+		writeError(w, 400, "invalid_fields")
+		return
+	}
+	withCategory, ok := candidateIncludeCategory(r)
+	if !ok {
+		writeError(w, 400, "invalid_include")
+		return
+	}
+	var input struct {
+		Category *string `json:"category"`
+	}
+	if !read(w, r, &input) {
+		return
+	}
+	if input.Category == nil || !validCandidateSkinCategory(*input.Category) {
+		writeError(w, 400, "invalid_category")
+		return
+	}
+	result, e := a.store.pool.Exec(r.Context(), `UPDATE community_skins SET category=$3 WHERE id=$1 AND owner_id=$2`, r.PathValue("id"), p.UserID, *input.Category)
+	if e != nil {
+		a.error(w, e)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, 404, "skin_not_found")
+		return
+	}
+	a.writeCommunitySkin(w, r, p.UserID, fields, withCategory)
 }
 func (a *Service) communityDownload(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.principal(w, r, false)
