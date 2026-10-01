@@ -91,10 +91,11 @@ func (a *Service) downloadsSummary(ctx context.Context, now time.Time) (download
 	}
 	defer tx.Rollback(ctx)
 
-	rows, err := tx.Query(ctx, `SELECT platform,version,artifact,channel,count(*) FILTER (WHERE created_at>=$1),count(*)
+	// 平台别名（win、darwin、harmonyos 等）归到规范 ID 下，所以同一平台在每个版本、安装包和渠道下只占一行。
+	rows, err := tx.Query(ctx, `SELECT `+canonicalPlatformSQL("platform")+` AS p,version,artifact,channel,count(*) FILTER (WHERE created_at>=$1),count(*)
  FROM admin_events WHERE kind='download' AND created_at>=$2 AND created_at<$3
- GROUP BY platform,version,artifact,channel
- ORDER BY count(*) DESC,platform,version,artifact NULLS LAST,channel NULLS LAST LIMIT $4`, today, weekStart, today.AddDate(0, 0, 1), downloadsRowLimit+1)
+ GROUP BY p,version,artifact,channel
+ ORDER BY count(*) DESC,p,version,artifact NULLS LAST,channel NULLS LAST LIMIT $4`, today, weekStart, today.AddDate(0, 0, 1), downloadsRowLimit+1)
 	if err != nil {
 		return summary, err
 	}
