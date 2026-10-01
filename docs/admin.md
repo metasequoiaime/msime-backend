@@ -154,7 +154,7 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 ## 限流与通用约定
 
 - 限流按身份分桶：`admin:<actor>`，每分钟 300 次，超限返回 429 `rate_limit_exceeded` 并带 `Retry-After: 60`。以前是所有管理员共享一个每分钟 120 次的桶；外壳每 60 秒轮询一次，多人同时在线会互相挤占，所以改为按人计。同一个人的多个 Google 会话共享一个桶，PAT 另算一个桶。
-- 登录相关端点（`/api/auth/*`）仍按来源 IP（TCP 对端）计，每分钟 120 次；其中发起 Google 登录的 `/api/auth/google/start` 另有每个来源 IP 每分钟 10 次的限额，超限同样返回 429 并带 `Retry-After: 60`。
+- 登录相关端点（`/api/auth/*`）仍按来源地址计（见「客户端地址」：配置了 `client_ip_header` 时取代理写入的地址，否则是 TCP 对端），每分钟 120 次；其中发起 Google 登录的 `/api/auth/google/start` 和命令行登录的 `/api/auth/cli/start` 共用每个来源地址每分钟 10 次的限额，超限同样返回 429 并带 `Retry-After: 60`。
 - 以上三项限额在启用数据库（`auth.enabled`）时记在 PostgreSQL 的 `auth_rates` 表（作用域分别为 `admin`、`admin-auth`、`admin-login`，身份和 IP 只存摘要），为所有副本共享的固定一分钟窗口，所以多副本轮询负载均衡不会把限额放大成副本数倍；窗口边界前后最多可连续用掉两个窗口的额度。计数失败时返回 503 `admin_auth_unavailable` 并带 `Retry-After: 30`，不放行请求。未启用数据库时退回各进程内存中的令牌桶，限额按副本各自计算，只适合单副本。
 - 每个后台请求有 15 秒的服务端超时。
 - 数据库写操作统一经过 `POST /api/actions`，请求体为 `{"action","id"?,"user_id"?,"ids"?: [≤100],"reason"?: ≤500 字,"section"?,"value"?: JSON}`，拒绝未知字段。`value` 一般不超过 8 KiB，`save_notice_draft` 和 `publish_notice` 放宽到 256 KiB，以容纳 20000 字的公告正文。批量操作在单个事务内完成，审计与变更同事务写入，失败不部分生效。涉及 GitHub 的操作走各自的 REST 子路径，例如 `POST /api/dict-prs/{n}/approve`。
@@ -283,7 +283,11 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 
 ### 客户端跨域
 
-`/v1/notices` 受 `/v1` 中间件的来源规则约束：浏览器从其他域名请求时，该域名必须在顶层 `allowed_origins` 中，否则返回 403。官网要显示公告横幅，需要先把官网域名加进去。
+`/v1/notices` 和 `/v1/telemetry/events` 受 `/v1` 中间件的来源规则约束：浏览器从其他域名请求时，该域名必须在顶层 `allowed_origins` 中，否则返回 403。官网要显示公告横幅或上报镜像下载，需要先把官网域名加进去（生产为 `https://msime.app`）。
+
+### 客户端地址
+
+按地址计的限额（账号和社区接口每分钟 120 次、公告和下载镜像每分钟 1200 次、遥测每分钟 60 次和每天 20 次崩溃、匿名开户每天 `auth.anonymous.daily_per_address` 次、后台登录、官网词条投稿）都用同一个客户端地址：顶层 `client_ip_header` 为空时只信任 TCP 对端；部署在反向代理后，把它设为由代理覆盖写入的头，例如 Cloudflare 的 `CF-Connecting-IP`（`X-Forwarded-For` 取最后一段）。IPv6 地址按 /64 归为一个。生产经 Cloudflare Tunnel 和 traefik 转发，TCP 对端永远是 traefik，必须设为 `CF-Connecting-IP`，否则所有用户共用一份额度。只填代理会覆盖的头，客户端自己能带的头可以伪造。旧的 `word_submissions.client_ip_header` 仍然有效，与顶层配置同时设置且不同时拒绝启动。
 
 ## 社区事后审核
 
@@ -295,7 +299,9 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 - 后台的「通过并上架」带上审核员看到的状态和版本：`approve_content` 的 `value: {"from":"pending"|"removed","created_at":"…","updated_at":"…"}`，`created_at` 区分作者删除后用同一 id 重新发布的内容，`updated_at` 只用于作者可以修改的候选皮肤、词库和回复模板。内容已被其他审核员处理，或作者在此期间改过、删除重发过内容，接口返回 409 `conflict` 且不做改动，审核员需要查看最新内容后再操作。不带 `value` 的调用不做这项检查。
 - 封禁作者会以 `owner_banned` 下架其全部内容，只有解封能恢复。
 - 举报：登录用户通过 `POST /v1/community/reports` 举报，后台卡片显示被举报次数，详情列出举报原因，每条新举报生成一条通知。
-- 目前没有事先审核（pre-moderation）模式，也没有向作者发送下架原因的机制；确认框里填写的原因只记录在审核记录和操作日志中。
+- 作者可以看到自己作品的状态：社区列表和详情带 `fields=moderation` 时，自己的作品多一个 `moderation` 字段（`approved`、`pending`、`removed`），客户端只对 `removed` 显示「已下架」徽标。皮肤和插件也支持 `scope=mine` 列出自己的作品，已下架的也在其中。他人看不到这个字段，不带参数的响应保持原样。
+- 目前没有事先审核（pre-moderation）模式，也没有向作者发送下架原因的机制；确认框里填写的原因只记录在审核记录和操作日志中，接口不会返回给作者。
+- 上传命中拦截级规则返回 422 `blocked_content`；敏感词库暂时无法加载时，上传返回 503 `screening_unavailable` 并带 `Retry-After`，不保存，也不会误报成账号服务不可用。
 
 ## 公开客户端接口
 
@@ -305,10 +311,11 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 
 不需要认证，返回最近 20 条已发布的公告：`{"items":[{"id","title","body","targets":[…],"channels":[…],"published_at"}]}`。
 
-- `platform` 为 `windows`、`macos`、`linux`、`android`、`ios`、`harmony` 之一，匹配投放到该平台或全部平台的公告。
+- `platform` 为 `windows`、`macos`、`linux`、`android`、`ios`、`harmony` 之一，匹配投放到该平台或全部平台的公告。也接受别名（不区分大小写）：`win`、`mac`、`darwin`、`ipados`、`harmonyos`、`ohos`，按对应的平台匹配。
+- 正文 `body` 是简单 Markdown（后台编辑框也这样提示）。客户端渲染时必须禁用原始 HTML，链接在外部浏览器打开。
 - `channel` 为 `site`、`app` 或 `telegram`。
 - 参数非法返回 400 `invalid_platform` 或 `invalid_channel`。
-- 响应带 `Cache-Control: public, max-age=60` 和 `Vary: Origin`，发布和归档最多 60 秒后可见。该接口与 `GET /v1/site/download-mirrors` 共用每个 IP 每分钟 1200 次的限额，与登录、刷新令牌和社区接口的每 IP 每分钟 120 次限额分开计数，所以轮询公告不会挤占登录额度；同一反向代理后的客户端共享这一额度，客户端应遵守缓存头，不要频繁轮询。
+- 响应带 `Cache-Control: public, max-age=60` 和 `Vary: Origin`，发布和归档最多 60 秒后可见。该接口与 `GET /v1/site/download-mirrors` 共用每个 IP 每分钟 1200 次的限额，与登录、刷新令牌和社区接口的每 IP 每分钟 120 次限额分开计数，所以轮询公告不会挤占登录额度；客户端不要比 max-age 更频繁地请求：在设置窗口或 App 首页打开时拉取，不要由输入法进程在后台轮询。公告以可关闭的横幅或卡片显示，关闭记录按公告 `id` 保存在本机。
 
 ### `GET /v1/site/download-mirrors`
 
@@ -322,40 +329,48 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 {"kind": "skins", "item_id": "…", "reason": "商标侵权", "detail": "可选补充说明"}
 ```
 
-- `kind` 为 `skins`、`candidate-skins`、`plugins`、`dictionaries`、`replies` 之一；`reason` 1–64 字；`detail` 最多 1000 字。
+- `kind` 为 `skins`、`candidate-skins`、`plugins`、`dictionaries`、`replies` 之一；`reason` 1–64 字；`detail` 最多 1000 字。客户端统一使用固定的原因列表：侵权/抄袭、色情低俗、违法违规、垃圾广告、恶意插件、其他。设备的匿名账号会话也可以举报。
 - 只能举报自己能看到的内容（未下架；候选皮肤必须是公开的），否则返回 404 `item_not_found`。
 - 同一用户重复举报同一内容只记一次：首次返回 201，重复返回 200，响应体都是 `{"reported":true}`。
 - 每个账号每小时最多举报 30 次。
 
 ### `POST /v1/telemetry/events`
 
-携带现有设备或用户 Bearer 令牌，请求体最多 32 KiB，成功返回 `202 {"accepted":true}`。
+不需要认证：不需要设备令牌或用户会话，带了 `Authorization` 也会被忽略，不做校验，所以未登录的客户端、msime-windows 和官网都能上报，仍带令牌的旧客户端照常工作。请求体最多 32 KiB，`Content-Type: application/json`，成功返回 `202 {"accepted":true}`。按客户端地址（见「客户端地址」）限流：每分钟 60 次，与登录和社区接口的 120 次分开计数；`crash` 每个地址每天另限 20 次，超出返回 429 和 `Retry-After: 3600`。
 
 | 字段 | 规则 |
 | --- | --- |
-| `id` | 必填，16–128 字符的全局唯一事件 ID，推荐 UUID；重试必须复用，同一 ID 只记录第一次 |
+| `id` | 必填，16–128 字符的全局唯一事件 ID，用 UUID v4；重试必须复用，同一 ID 只记录第一次 |
 | `kind` | 必填，见下表 |
-| `platform` | 必填，1–32 字符，如 `windows`、`macos`、`android`、`ios`、`harmony` |
-| `version` | 必填，1–64 字符 |
-| `message` | 只有 `crash` 使用，且必填，最多 1000 字符 |
-| `stack` | 只有 `crash` 使用，最多 16000 字符 |
-| `artifact` | 可选，安装包名，1–64 字符，单行 |
+| `platform` | 必填，1–32 字符，用规范平台 ID：`windows`、`macos`、`linux`、`android`、`ios`、`harmony` |
+| `version` | 必填，1–64 字符，真实的应用版本号 |
+| `message` | 只有 `crash` 使用，且必填，最多 1000 个 Unicode 标量；异常或信号摘要，首行应有意义 |
+| `stack` | 只有 `crash` 使用；帧写作模块+偏移或符号，模块路径只保留文件名，不得带出用户目录名。超过 16000 个标量时服务端在最后一个完整行处截断后照常接收 |
+| `artifact` | 可选，安装包文件名，1–64 字符，单行 |
 | `channel` | 可选，分发渠道，匹配 `^[a-z0-9][a-z0-9_-]{0,31}$`；后台为 `cn-mirror`、`website`、`github`、`app-store`、`testflight`、`appgallery`、`google-play` 显示中文名 |
-| `install_id` | 可选（`active` 必填），匿名安装 ID，16–64 位 `[A-Za-z0-9_-]`，不能含用户或硬件标识 |
+| `install_id` | `active` 必填，其他事件也都应带上（崩溃页的影响设备数按它去重）；安装时随机生成并保存在本机的匿名 ID，16–64 位 `[A-Za-z0-9_-]`，不得来自硬件、账号或用户数据 |
+
+只接受上表字段，未知字段返回 400 `invalid_json`。`crash` 的 `message` 和 `stack` 中的 CRLF 与单独的 CR 统一转为 LF，所以 Windows 的报告不会因控制字符被拒绝，并与 LF 的同一崩溃归入同一分组。请求体的 32 KiB 是字节数，客户端应把 stack 的 UTF-8 字节数控制在约 12 KB 以内。
 
 | `kind` | 含义 | 用于 |
 | --- | --- | --- |
-| `download` | 一次安装包下载 | 下载记录、累计下载 |
-| `crash` | 一次崩溃，带错误信息和堆栈 | 崩溃分组：入库时计算签名并更新分组 |
-| `active` | 该安装当天活跃 | 活跃设备、各平台活跃、影响设备数 |
-| `session` | 一次正常结束的会话 | 无崩溃会话率 |
-| `session_crash` | 一次以崩溃结束的会话 | 无崩溃会话率 = session ÷ (session + session_crash)，按近 7 天计算 |
+| `active` | 该安装当天活跃，每个安装每个 UTC 日最多一次，`id` 用 `active-<install_id>-<yyyymmdd>`，重复发送不额外计数 | 活跃设备、各平台活跃 |
+| `session` | 一次正常结束的会话：输入法宿主进程的一次生命周期，iOS 键盘为一次显示 | 无崩溃会话率 |
+| `session_crash` | 一次以崩溃结束的会话。只有本地有该会话的崩溃记录（崩溃处理程序写下的）时才算；进程被系统回收、注销、关机或低内存杀掉而留下的会话标记不算崩溃 | 无崩溃会话率 = session ÷ (session + session_crash)，按近 7 天计算 |
+| `crash` | 一次崩溃，带错误信息和堆栈。崩溃处理程序只写盘，下次启动再发送 | 崩溃分组：入库时计算签名并更新分组 |
+| `download` | 一次安装包下载，只由官网在用户点击国内镜像（蓝奏云）链接时上报：`channel=cn-mirror`、`artifact` 为安装包文件名、`version` 为发布版本 | 下载记录、累计下载 |
 
-非 `crash` 事件不能带非空的 `message` 或 `stack`。后台统计时会归一平台名（`win` → windows，`mac`、`darwin` → macos，`ipados` → ios，`harmony`、`ohos` → HarmonyOS）。服务端以接收时间入库，离线上报算在接收日；后台不额外存 IP 或用户身份。客户端须在用户同意采集后发送，并先清理输入文本、密码、令牌和个人信息。数据保存在 PostgreSQL，多副本共享；`download` 和 `crash` 事件不自动清理，需要按规模设置归档或保留策略。新增字段和类型都是可选的，旧客户端无需修改。
+客户端在下次启动时补发上一次会话的 `session` 或 `session_crash`。客户端不发 `download`：GitHub Release 的下载量取自服务端的 Release 快照，应用安装数看 `active`。如果再为 GitHub Release 下载上报 `channel=github` 的事件，这次下载会被遥测和快照各计一次。
+
+非 `crash` 事件不能带非空的 `message` 或 `stack`。后台统计时会归一平台名（`win` → windows，`mac`、`darwin` → macos，`ipados` → ios，`harmony`、`harmonyos`、`ohos` → HarmonyOS），下载记录也按归一后的平台分组。服务端以接收时间入库，离线上报算在接收日；后台不额外存 IP 或用户身份（限流只存地址的 SHA-256）。数据保存在 PostgreSQL，多副本共享；`download` 和 `crash` 事件不自动清理，需要按规模设置归档或保留策略。
+
+响应处理：202 已接收（重复 ID 也是 202）；400 表示事件本身不合法，丢弃，不要重试；429（遵守 `Retry-After`）、5xx 和网络错误保留事件，稍后用同一 ID 重试。离线队列最多保留 64 条。
+
+同意：使用情况上报默认开启，用户可以在设置里关闭（各端共用偏好键 `usage_reporting`，布尔值，默认 true；旧的 `telemetry_enabled` 不再读取）。关闭后什么都不发，并清空本地队列。隐私说明和应用内文案必须如实描述发送的内容。不要上传输入内容、密码、令牌或个人信息。
+
+浏览器（官网）上报时用 `fetch(url, {method: "POST", keepalive: true, headers: {"Content-Type": "application/json"}, body})`，不能用 `navigator.sendBeacon`：它发不出 `application/json` 的跨域请求，接口会返回 415。
 
 `active`、`session`、`session_crash` 事件保留 90 天，由每小时的清理任务删除（概览最多读近 60 天）；`download` 和 `crash` 事件不清理，累计下载和崩溃分组依赖它们。
-
-如果官网或客户端对 GitHub Release 的下载也上报 `channel=github` 的下载事件，这次下载会被遥测和 Release 快照各计一次。在确定统计口径之前，不要为 GitHub Release 下载上报遥测事件。
 
 ### 词库投稿的新错误码
 
@@ -365,9 +380,9 @@ GitHub 读请求在内存中缓存 60 秒，并使用 ETag 条件请求，以免
 
 下列设计元素依赖客户端、官网或外部系统。后台已做好接收和展示，在对方完成之前显示空态或说明，不造假数据。
 
-1. 活跃设备、各平台活跃、无崩溃会话率、影响设备数：各客户端需要上报 `active`、`session`、`session_crash` 事件和匿名 `install_id`。
-2. 下载记录的安装包和渠道：官网镜像和客户端需要在下载事件里带上 `artifact` 和 `channel`。GitHub Release 渠道靠快照获取，不依赖这一条。
-3. 社区举报：客户端需要增加「举报」按钮，调用 `POST /v1/community/reports`。
+1. 活跃设备、各平台活跃、无崩溃会话率、影响设备数：各客户端需要匿名上报 `active`、`session`、`session_crash`、`crash` 事件和 `install_id`。生产配置需要设置 `client_ip_header`，否则遥测和其他按地址的限额由所有用户共用。
+2. 下载记录的安装包和渠道：官网在国内镜像链接被点击时上报带 `artifact` 和 `channel=cn-mirror` 的下载事件。GitHub Release 渠道靠快照获取，客户端不上报下载。
+3. 社区举报：客户端需要在展示他人作品的画廊里增加「举报」入口，调用 `POST /v1/community/reports`。
 4. 公告的 App 内通知和官网横幅：App 和官网需要拉取 `GET /v1/notices`，官网域名还要加入 `allowed_origins`。在此之前公告只写入数据库，用户看不到。
 5. 「下载后完成安装」比例无法测量，已去掉。
 6. 公告只有 Telegram 一个推送渠道（QQ 群没有官方 Bot API）；触达人数需要客户端回执，显示「—」。
