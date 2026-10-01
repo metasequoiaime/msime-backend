@@ -180,7 +180,8 @@ export function PRDetailCard({ pr, repo, overrides, setOverrides, onNext, onPrev
       <Hint keycap="K">上一个</Hint>
       <Hint keycap="A">通过</Hint>
       <Hint keycap="R">驳回</Hint>
-      <Hint keycap="/">搜索</Hint>
+      {/* The header shows the search box from 900px only. */}
+      <span className="max-[899px]:hidden"><Hint keycap="/">搜索</Hint></span>
     </div>
   </Card>;
 }

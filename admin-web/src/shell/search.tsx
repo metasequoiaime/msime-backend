@@ -33,7 +33,8 @@ export function GlobalSearch() {
   const q = query.trim();
   const debounced = useDebounced(q, 200);
   useHotkeys("/", event => {
-    if (overlayOpen()) return;
+    // Below 900px the header hides the search box (display:none, so no offsetParent); the key then types normally instead of being swallowed.
+    if (overlayOpen() || !input.current || input.current.offsetParent === null) return;
     event.preventDefault();
     input.current?.focus();
   }, { useKey: true });
