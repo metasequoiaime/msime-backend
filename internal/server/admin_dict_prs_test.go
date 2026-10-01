@@ -618,3 +618,33 @@ func TestDictPRSearchNotes(t *testing.T) {
 		t.Fatalf("%+v", hits)
 	}
 }
+
+// A sensitive word in a pull request marks the entry as ad, and reviewing the pull request again and again leaves the word's hit statistics untouched.
+func TestDictPRSensitiveFlagDoesNotCountHits(t *testing.T) {
+	s, _, conn, schema := dictPRServer(t)
+	s.config.Engine.Binary = fakeEngine(t, `request=$(cat); case "$request" in *listed_english_batch*) echo '{"listed":[false]}';; *) echo '{"listed":[false,false,false]}';; esac`)
+	if _, err := conn.Exec(context.Background(), `INSERT INTO `+pgx.Identifier{schema, "admin_sensitive_words"}.Sanitize()+`(pattern,category,level,created_by) VALUES('metasequoia','ad','review','test')`); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		w := dictCall(s, "GET", "/api/dict-prs/12", "")
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		body := decodeDict[dictDetailBody](t, w)
+		if e := body.Entries[6]; e.Word != "水杉" || e.Pinyin != "metasequoia" || e.Flag != dictFlagAd || !strings.Contains(e.Reason, "metasequoia") {
+			t.Fatalf("%+v", e)
+		}
+	}
+	if w := dictCall(s, "GET", "/api/dict-prs", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// The words page flushes this replica's pending hit counts before it reads them.
+	if w := dictCall(s, "GET", "/api/sensitive-words", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var hits int
+	if err := conn.QueryRow(context.Background(), `SELECT count(*) FROM `+pgx.Identifier{schema, "admin_sensitive_hits"}.Sanitize()).Scan(&hits); err != nil || hits != 0 {
+		t.Fatal("review views counted sensitive hits", hits, err)
+	}
+}

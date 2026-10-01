@@ -589,3 +589,23 @@ func TestReleaseAssetSnapshotJob(t *testing.T) {
 		cancel()
 	}
 }
+
+// The release search index belongs to its Server: one server's listing never shows up in another's search, and a new listing of a platform replaces the old one.
+func TestReleaseSearchIndexIsPerServer(t *testing.T) {
+	a, b := &Server{}, &Server{}
+	for _, s := range []*Server{a, b} {
+		s.config.Admin.GitHub.Platforms = releaseTestPlatforms
+	}
+	windows := releaseTestPlatforms[0]
+	a.indexReleases(windows, []ghRelease{{TagName: "windows-v0.5.4"}, {TagName: "windows-v0.5.3"}})
+	if hits := a.searchReleases("0.5.4"); len(hits) != 1 || hits[0].ID != "windows:windows-v0.5.4" || hits[0].Title != "Windows v0.5.4" || hits[0].Target != "release" {
+		t.Fatalf("%+v", hits)
+	}
+	if hits := b.searchReleases("0.5"); len(hits) != 0 {
+		t.Fatalf("another server's releases leaked: %+v", hits)
+	}
+	a.indexReleases(windows, []ghRelease{{TagName: "windows-v0.6.0"}})
+	if hits := a.searchReleases("WINDOWS"); len(hits) != 1 || hits[0].ID != "windows:windows-v0.6.0" {
+		t.Fatalf("%+v", hits)
+	}
+}

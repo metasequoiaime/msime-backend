@@ -456,7 +456,8 @@ func (s *Server) checkDictEntries(ctx context.Context, files []dictFile) []dictE
 		}
 		s.flagDictFile(ctx, f, entries[first:], keys)
 	}
-	matcher := s.accounts.Sensitive()
+	// Reviewing is a read, repeated on every list and detail view; only the website submission screening counts hits.
+	matcher := s.accounts.SensitivePreview()
 	for i := range entries {
 		e := &entries[i]
 		text := e.Word

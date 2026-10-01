@@ -233,10 +233,13 @@ ON CONFLICT (word_id,day) DO UPDATE SET count=admin_sensitive_hits.count+EXCLUDE
 	return err
 }
 
-// sensitiveMatcher is the SensitiveMatcher handed out by Sensitive; it reaches the database and the cached state through the Service.
-type sensitiveMatcher struct{ a *Service }
+// sensitiveMatcher is the SensitiveMatcher handed out by Sensitive and SensitivePreview; it reaches the database and the cached state through the Service. preview leaves the hit counts alone.
+type sensitiveMatcher struct {
+	a       *Service
+	preview bool
+}
 
-// Match reports every word text hits, block hits first, at most once per word, and counts each hit. Plain words match a case-insensitive substring of the text with white space and format characters removed; regexes match case-insensitively against the text with white space kept, either with full-width ASCII folded to half-width or as written. Format characters are ignored for both.
+// Match reports every word text hits, block hits first, at most once per word, and counts each hit unless the matcher is a preview. Plain words match a case-insensitive substring of the text with white space and format characters removed; regexes match case-insensitively against the text with white space kept, either with full-width ASCII folded to half-width or as written. Format characters are ignored for both.
 func (m sensitiveMatcher) Match(ctx context.Context, text string) ([]SensitiveHit, error) {
 	now := time.Now()
 	words, err := m.a.sensitive.list(ctx, m.a.store, now)
@@ -266,7 +269,9 @@ func (m sensitiveMatcher) Match(ctx context.Context, text string) ([]SensitiveHi
 	slices.SortStableFunc(hits, func(x, y SensitiveHit) int {
 		return sensitiveLevelRank(x.Level) - sensitiveLevelRank(y.Level)
 	})
-	m.a.sensitive.record(ctx, m.a.store, hits, now)
+	if !m.preview {
+		m.a.sensitive.record(ctx, m.a.store, hits, now)
+	}
 	return hits, nil
 }
 
@@ -277,8 +282,11 @@ func sensitiveLevelRank(level string) int {
 	return 1
 }
 
-// Sensitive returns the shared matcher.
-func (a *Service) Sensitive() SensitiveMatcher { return sensitiveMatcher{a} }
+// Sensitive returns the shared matcher for screening text people submit; every hit counts toward the word's statistics.
+func (a *Service) Sensitive() SensitiveMatcher { return sensitiveMatcher{a: a} }
+
+// SensitivePreview returns a matcher over the same word list that records no hits, for read-only views such as the dictionary pull request review and the community detail drawer, so looking at an item again and again does not inflate the hit statistics.
+func (a *Service) SensitivePreview() SensitiveMatcher { return sensitiveMatcher{a: a, preview: true} }
 
 // adminSensitiveWords serves GET /api/sensitive-words: the whole list, newest first, with each word's hits over the last seven UTC days (today included) and the largest of those counts for the console's bars.
 func (a *Service) adminSensitiveWords(w http.ResponseWriter, r *http.Request, _ string) {

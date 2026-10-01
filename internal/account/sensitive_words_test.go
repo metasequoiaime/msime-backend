@@ -128,6 +128,13 @@ func TestSensitiveWordConsole(t *testing.T) {
 		t.Fatal(hits, err)
 	}
 
+	// A preview matcher finds the same words but counts nothing, so re-reading a review page does not inflate the statistics.
+	for range 3 {
+		if hits, err = a.SensitivePreview().Match(ctx, "VX: abc_12345 加v"); err != nil || len(hits) != 2 || hits[0].WordID != plain {
+			t.Fatal("preview", hits, err)
+		}
+	}
+
 	// Hit counts are written in a batch; the list flushes this replica's pending counts before it reads.
 	list = listSensitive(t, a)
 	counts := map[int64]int64{}

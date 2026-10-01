@@ -151,7 +151,8 @@ func (a *Service) contentModeration(ctx context.Context, section, id string, raw
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	flags, err := a.Sensitive().Match(ctx, contentScreenText(section, base))
+	// Opening the drawer is a read; only the upload screening counts hits.
+	flags, err := a.SensitivePreview().Match(ctx, contentScreenText(section, base))
 	if err != nil {
 		return nil, err
 	}
