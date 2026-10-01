@@ -68,6 +68,11 @@ func makeVerifiers(ctx context.Context, c Config, client *http.Client) map[strin
 
 // loopbackTarget accepts only the RFC 8252 loopback redirect a desktop client listens on: http://127.0.0.1:<port>/callback or http://[::1]:<port>/callback with an explicit unprivileged port, and nothing else (no userinfo, query, fragment or other path).
 func loopbackTarget(target string) bool {
+	return LoopbackTarget(target)
+}
+
+// LoopbackTarget is loopbackTarget for the admin command-line sign-in, which takes the same redirects.
+func LoopbackTarget(target string) bool {
 	rest, ok := strings.CutPrefix(target, "http://127.0.0.1:")
 	if !ok {
 		rest, ok = strings.CutPrefix(target, "http://[::1]:")

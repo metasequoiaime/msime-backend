@@ -120,7 +120,9 @@ func TestUpstreamFailureDoesNotLeak(t *testing.T) {
 func TestNoRedirectOrCredentialForwarding(t *testing.T) {
 	destination := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("redirect was followed") }))
 	defer destination.Close()
-	s := fixture(t, func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, destination.URL, 307) })
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	})
 	if w := call(s, "POST", "/v1/translate", `{"text":"test","source_lang":"auto","target_lang":"en"}`); w.Code != 502 {
 		t.Fatal(w.Code)
 	}

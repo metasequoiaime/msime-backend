@@ -16,35 +16,35 @@ type unavailableAdminStore struct {
 	fail string
 }
 
-var adminStorageFailure = errors.New("private database connection failure")
+var errAdminStorage = errors.New("private database connection failure")
 
 func (s *unavailableAdminStore) SaveAdminFlow(ctx context.Context, k string, v account.AdminLoginFlow) error {
 	if s.fail == "save" {
-		return adminStorageFailure
+		return errAdminStorage
 	}
 	return s.adminMemoryStore.SaveAdminFlow(ctx, k, v)
 }
 func (s *unavailableAdminStore) ConsumeAdminFlow(ctx context.Context, k string) (account.AdminLoginFlow, error) {
 	if s.fail == "consume" {
-		return account.AdminLoginFlow{}, adminStorageFailure
+		return account.AdminLoginFlow{}, errAdminStorage
 	}
 	return s.adminMemoryStore.ConsumeAdminFlow(ctx, k)
 }
 func (s *unavailableAdminStore) AdminSession(ctx context.Context, k string) (account.AdminIdentity, error) {
 	if s.fail == "session" {
-		return account.AdminIdentity{}, adminStorageFailure
+		return account.AdminIdentity{}, errAdminStorage
 	}
 	return s.adminMemoryStore.AdminSession(ctx, k)
 }
 func (s *unavailableAdminStore) DeleteAdminSession(ctx context.Context, k string) error {
 	if s.fail == "delete" {
-		return adminStorageFailure
+		return errAdminStorage
 	}
 	return s.adminMemoryStore.DeleteAdminSession(ctx, k)
 }
 func (s *unavailableAdminStore) AdminEmailAllowed(ctx context.Context, email string) (bool, error) {
 	if s.fail == "allowed" {
-		return false, adminStorageFailure
+		return false, errAdminStorage
 	}
 	return s.adminMemoryStore.AdminEmailAllowed(ctx, email)
 }

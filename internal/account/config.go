@@ -95,6 +95,7 @@ func (c Config) Validate() error {
 		seen := map[string]bool{}
 		for _, id := range ids {
 			if id == "" || len(id) > 255 || strings.TrimSpace(id) != id || seen[id] {
+				//lint:ignore ST1005 the message starts with a proper noun
 				return errors.New("Client ID 必须非空且唯一")
 			}
 			seen[id] = true
@@ -107,6 +108,7 @@ func (c Config) Validate() error {
 		}
 		// The exchanged ID token is checked by the ordinary Google verifier, so the desktop client must be one of its audiences.
 		if !listed || os.Getenv(d.SecretEnv) == "" {
+			//lint:ignore ST1005 the message starts with a proper noun
 			return errors.New("Google 桌面客户端配置无效：client_id 须同时列在 client_ids 中，且密钥环境变量不能为空")
 		}
 		if _, e := c.providerTokenKey(); e != nil {
@@ -122,6 +124,7 @@ func (c Config) Validate() error {
 	if c.Email.From != "" {
 		a, e := mail.ParseAddress(c.Email.From)
 		if e != nil || a.Address != c.Email.From || c.Email.Host == "" || strings.ContainsAny(c.Email.Host, "/:\r\n ") || (c.Email.Port != 465 && c.Email.Port != 587) || c.Email.Username == "" || os.Getenv(c.Email.PasswordEnv) == "" {
+			//lint:ignore ST1005 the message starts with a proper noun
 			return errors.New("Lark SMTP 配置无效：仅支持 TLS 465 或 STARTTLS 587")
 		}
 	}

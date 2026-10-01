@@ -41,6 +41,7 @@ type Server struct {
 
 	adminStore  adminAuthStore
 	adminGoogle *adminGoogleAuth
+	adminCLI    *adminGoogleAuth
 	accounts    *account.Service
 	lifetime    context.Context
 	stop        context.CancelFunc

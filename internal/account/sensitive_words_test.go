@@ -374,7 +374,7 @@ func TestSensitiveMatcherFolding(t *testing.T) {
 	plain := addSensitive(t, a, `{"pattern":"加V","category":"ad","level":"block"}`, 200)
 	wide := addSensitive(t, a, `{"pattern":"/ＱＱ\\d{5,}/","category":"ad","level":"review"}`, 200)
 	m := a.Sensitive()
-	for _, text := range []string{"加​V", "加⁠ ｖ", "‮加v"} {
+	for _, text := range []string{"加\u200bV", "加\u2060 ｖ", "\u202e加v"} {
 		if hits, err := m.Match(ctx, text); err != nil || len(hits) != 1 || hits[0].WordID != plain {
 			t.Fatalf("%q: %v %v", text, hits, err)
 		}

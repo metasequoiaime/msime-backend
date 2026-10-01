@@ -741,7 +741,7 @@ func addedLines(base, head string) int {
 }
 
 // Commit messages and titles are public. Contributed text is flattened by validation; this breaks every @ (mention), # and GH- (issue references, including closing keywords) and :// (autolinks) with a zero-width space so a submission cannot ping people, touch issues or plant links.
-var githubReferenceBreaker = strings.NewReplacer("@", "@​", "#", "#​", "://", ":​//", "GH-", "GH​-", "gh-", "gh​-", "Gh-", "Gh​-", "gH-", "gH​-")
+var githubReferenceBreaker = strings.NewReplacer("@", "@\u200b", "#", "#\u200b", "://", ":\u200b//", "GH-", "GH\u200b-", "gh-", "gh\u200b-", "Gh-", "Gh\u200b-", "gH-", "gH\u200b-")
 
 // submissionCommitMessage titles the commit with this submission alone and lists its entries; the note follows on its own line after sanitising.
 func submissionCommitMessage(sub submission) string {

@@ -25,20 +25,27 @@ func TestNativeRankingPersistsCountersAndWeights(t *testing.T) {
 		Canonical string `json:"canonical_pinyin"`
 		Word      string `json:"word"`
 		Weight    int64  `json:"weight"`
-	} { t.Helper(); raw, err := cfg.QuerySnapshot(ctx, map[string]any{"operation": "personal_query", "query": query}, func(ctx context.Context, w io.Writer) error {
-		return s.StreamDictionarySnapshot(ctx, user, func(raw json.RawMessage) error { _, err := w.Write(append(raw, '\n')); return err })
-	}); if err != nil {
-		t.Fatal(err)
-	}; var out struct {
-		Candidates []struct {
-			Code      string `json:"code"`
-			Canonical string `json:"canonical_pinyin"`
-			Word      string `json:"word"`
-			Weight    int64  `json:"weight"`
-		} `json:"candidates"`
-	}; if err = json.Unmarshal(raw, &out); err != nil {
-		t.Fatal(err)
-	}; return out.Candidates }
+	} {
+		t.Helper()
+		raw, err := cfg.QuerySnapshot(ctx, map[string]any{"operation": "personal_query", "query": query}, func(ctx context.Context, w io.Writer) error {
+			return s.StreamDictionarySnapshot(ctx, user, func(raw json.RawMessage) error { _, err := w.Write(append(raw, '\n')); return err })
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct {
+			Candidates []struct {
+				Code      string `json:"code"`
+				Canonical string `json:"canonical_pinyin"`
+				Word      string `json:"word"`
+				Weight    int64  `json:"weight"`
+			} `json:"candidates"`
+		}
+		if err = json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Candidates
+	}
 	baseline := readCandidates(one.User.ID)
 	if len(baseline) < 2 {
 		t.Fatal(baseline)

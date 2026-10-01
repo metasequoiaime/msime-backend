@@ -41,7 +41,7 @@ def coverage(text):
 def check(stats, minimum=90):
     module = "github.com/metasequoiaime/MSIME-Backend"
     # Keep every executable package in the denominator, including the CLI.
-    for package in (module, module + "/cmd/msime-server", module + "/admin-web",
+    for package in (module, module + "/cmd/msime-server", module + "/cmd/msime-cloud", module + "/admin-web",
                     module + "/internal/account", module + "/internal/server",
                     module + "/internal/engine", module + "/internal/skins"):
         if package not in stats or stats[package][0] <= 0:

@@ -265,10 +265,12 @@ func validateTranslationEndpoint(e *TranslationEndpoint, requireProvider bool) e
 		}
 		u, err := url.Parse(e.URL)
 		if err != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery {
+			//lint:ignore ST1005 the message starts with a proper noun
 			return errors.New("Tencent translation URL must have a root path and no query")
 		}
 		e.secretID = os.Getenv(e.SecretIDEnv)
 		if e.secretID == "" || strings.ContainsAny(e.secretID, " /,\r\n\t") || e.TokenEnv == "" {
+			//lint:ignore ST1005 the message starts with a proper noun
 			return errors.New("Tencent translation requires secret_id_env and token_env")
 		}
 		if e.Region == "" {

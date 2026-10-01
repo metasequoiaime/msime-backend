@@ -227,7 +227,7 @@ func TestAdminPersonalAccessTokens(t *testing.T) {
 		t.Fatal(stored, err)
 	}
 	me := decodeMe(t, meRequest(a, session, "GET", "", ""))
-	if me.Token == nil || me.Token.Last4 != token[len(token)-4:] || me.Token.ExpiresAt.Sub(time.Now()) < 29*24*time.Hour {
+	if me.Token == nil || me.Token.Last4 != token[len(token)-4:] || time.Until(me.Token.ExpiresAt) < 29*24*time.Hour {
 		t.Fatalf("%+v", me.Token)
 	}
 	// A token cannot renew itself, so a leaked token expires.

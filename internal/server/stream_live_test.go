@@ -96,7 +96,7 @@ func TestPartnerStreamingLive(t *testing.T) {
 	for {
 		_, b, e := conn.Read(ctx)
 		if e != nil {
-			t.Fatalf("读取实时结果失败: status=%d error=%v",websocket.CloseStatus(e),e)
+			t.Fatalf("读取实时结果失败: status=%d error=%v", websocket.CloseStatus(e), e)
 		}
 		if len(b) < 8 {
 			t.Fatal("响应帧过短")

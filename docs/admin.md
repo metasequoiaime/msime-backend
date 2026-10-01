@@ -81,7 +81,7 @@ server {
 | 身份 | 认证方式 | 审计中的 actor | 角色与权限 |
 | --- | --- | --- | --- |
 | 所有者 | Google 登录，邮箱在 `google.allowed_emails` / `allowed_emails_env` 中 | `google:<sub>:<email>` | 恒为维护者，拥有全部 8 项权限，不受权限矩阵影响 |
-| 成员 | Google 登录或个人访问令牌，邮箱在已启用的 `admin_members` 中 | `google:<sub>:<email>` 或 `pat:<email>` | `admin_members.role` 对应角色在权限矩阵中的权限 |
+| 成员 | Google 登录（浏览器或命令行）或个人访问令牌，邮箱在已启用的 `admin_members` 中 | `google:<sub>:<email>` 或 `pat:<email>` | `admin_members.role` 对应角色在权限矩阵中的权限 |
 | 管理员密钥 | `Authorization: Bearer <MSIME_ADMIN_TOKEN>` | `legacy-token` | 维护者，拥有除 `manage_permissions` 以外的全部权限；没有个人中心 |
 
 Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效期、nonce、`email_verified`，以及邮箱是否在白名单或 `admin_members` 中。授权码流程使用 PKCE S256 和一次性 state；state 与浏览器 HttpOnly Cookie 绑定，在数据库中保留 10 分钟。管理员会话在 PostgreSQL 中只存令牌哈希，有效期固定 8 小时；浏览器使用 Secure、HttpOnly、SameSite=Lax、无 Domain 的 `__Host-` Cookie。会话另外记录创建时间、最近活动时间（每 5 分钟最多更新一次）、截断到 256 字符的 User-Agent 和 Google 名字，供个人中心显示和吊销。Cookie 会话发起的写请求要求 `Origin` 与回调地址的来源完全相同，否则返回 403 `origin_required`；后台的访问地址（协议和域名）与 `admin.google.redirect_uri` 不一致时，所有写操作都会因此失败。普通 Google 用户不会因此成为管理员，也不会自动创建输入法用户账户。Google Cloud 项目处于测试发布状态时，需要把管理员加入测试用户。此处遵循 [Google OpenID Connect 服务端流程](https://developers.google.com/identity/openid-connect/openid-connect)。
@@ -91,7 +91,17 @@ Google 登录时，后端校验 ID Token 的签名、issuer、audience、有效�
 | `GET /api/auth/session` | 登录状态、版本号、管理员邮箱和启用的登录方式 |
 | `GET /api/auth/google/start` | 创建 state、nonce 和 PKCE，跳转到 Google |
 | `GET /api/auth/google/callback` | 校验回调并创建管理员会话 |
-| `POST /api/auth/logout` | 删除服务端会话并清除 Cookie |
+| `POST /api/auth/logout` | 删除服务端会话（Cookie 或 Bearer 携带的会话）并清除 Cookie |
+| `POST /api/auth/cli/start` | 命令行登录：`{"redirect_uri":"http://127.0.0.1:<端口>/callback"}`，返回 `state`、`expires_in` 和 Google 授权地址 |
+| `POST /api/auth/cli/finish` | 命令行登录：`{"state","code","redirect_uri"}`，校验后返回 8 小时的管理员会话 `token` |
+
+### 命令行登录
+
+`msime-cloud login admin` 让所有者和成员在终端里用自己的 Google 账号登录后台，之后 `msime-cloud call GET /api/...` 自动带上会话，不需要管理员密钥，也不需要先在浏览器里生成个人访问令牌。
+
+- 网页客户端只能回调到后台域名，所以命令行登录使用用户体系已有的「桌面应用」OAuth 客户端（`auth.google.desktop`），按 RFC 8252 回调到本机 `127.0.0.1` 的临时端口。需要同时配置 `admin.google` 和 `auth.google.desktop`，两者缺一时 `cli/*` 返回 404 `cli_login_disabled`，`GET /api/auth/session` 的 `cli_enabled` 为 false。桌面客户端无需登记回调地址；Google Cloud 项目处于测试发布状态时，同样要把管理员加入测试用户。
+- 服务端持有桌面客户端密钥和 PKCE verifier，自己用授权码换取 ID Token，按网页登录完全相同的规则校验（签名、issuer、audience 为桌面客户端、有效期、nonce、`email_verified`、白名单或 `admin_members`），并同样记录 Google 名字和 User-Agent。state 不绑定 Cookie，而是由命令行在本机回调上核对；回调地址不入库，换取令牌时 Google 会拒绝与授权时不同的 `redirect_uri`。`cli/start` 与网页登录共用每个来源 IP 每分钟 10 次的限额。
+- 返回的会话与浏览器会话是同一种：8 小时、只存哈希、出现在个人中心的会话列表里、可吊销，审计 actor 为 `google:<sub>:<email>`。命令行以 `Authorization: Bearer <token>` 发送，和个人访问令牌一样不需要 `Origin`；`POST /api/auth/logout` 带上它即结束该会话。
 
 ### 个人访问令牌（PAT）
 
