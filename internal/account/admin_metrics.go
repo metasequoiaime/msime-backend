@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
@@ -274,12 +275,24 @@ func incidentID(v actionRequest) (int64, error) {
 }
 
 // actionOpenIncident opens an incident from value {service, title, description}.
+// monitoredService reports whether key is a service the status page shows: its own database probe, admin.services, or without them the derived upstreams. When the console knows of no service at all, any well-formed key is accepted, as before services were passed in.
+func (a *Service) monitoredService(key string) bool {
+	services := a.admin.Services
+	if len(services) == 0 {
+		services = a.admin.DerivedServices
+	}
+	if len(services) == 0 || key == "database" {
+		return true
+	}
+	return slices.ContainsFunc(services, func(s AdminService) bool { return s.Key == key })
+}
+
 func actionOpenIncident(a *Service, ctx context.Context, tx pgx.Tx, v actionRequest) (actionResult, error) {
 	value, err := decodeIncidentValue(v.Value)
 	if err != nil {
 		return actionResult{}, err
 	}
-	if value.Service == nil || !serviceKeyPattern.MatchString(*value.Service) {
+	if value.Service == nil || !serviceKeyPattern.MatchString(*value.Service) || !a.monitoredService(*value.Service) {
 		return actionResult{}, actionFail(400, "invalid_service")
 	}
 	if value.Title == nil {

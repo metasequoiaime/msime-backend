@@ -272,6 +272,20 @@ func TestIncidentActions(t *testing.T) {
 	if err = db.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM admin_incidents),(SELECT count(*) FROM admin_audit)`).Scan(&incidents, &audits); err != nil || incidents != 2 || audits != 4 {
 		t.Fatalf("after refusals: %d incidents, %d audit rows, %v", incidents, audits, err)
 	}
+	// Once the console knows which services exist, an incident can only be opened for one of them or for the database probe.
+	a.ConfigureAdmin(AdminSettings{DerivedServices: []AdminService{{Key: "chat", Name: "AI 联想"}}})
+	if w = incidentAction(a, owner, `{"action":"open_incident","value":{"service":"translation","title":"x"}}`); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_service") {
+		t.Fatalf("unmonitored service: %d %s", w.Code, w.Body)
+	}
+	for _, key := range []string{"chat", "database"} {
+		if w = incidentAction(a, owner, `{"action":"open_incident","value":{"service":"`+key+`","title":"x"}}`); w.Code != 200 {
+			t.Fatalf("%s: %d %s", key, w.Code, w.Body)
+		}
+	}
+	a.ConfigureAdmin(AdminSettings{Services: []AdminService{{Key: "translation"}}, DerivedServices: []AdminService{{Key: "chat"}}})
+	if w = incidentAction(a, owner, `{"action":"open_incident","value":{"service":"chat","title":"x"}}`); w.Code != 400 {
+		t.Fatalf("configured services replace the derived ones: %d %s", w.Code, w.Body)
+	}
 }
 
 func jsonString(id int64) string {
