@@ -268,3 +268,17 @@ func TestStartupMigratesAdminConsoleObjectsAddedLater(t *testing.T) {
 		})
 	}
 }
+
+// notificationRows lists the console notifications recorded in schema as "kind page id", oldest first, so a test can check that a GitHub-driven write really reached the bell.
+func notificationRows(t *testing.T, conn *pgx.Conn, schema string) []string {
+	t.Helper()
+	rows, err := conn.Query(context.Background(), `SELECT kind||' '||target_page||' '||target_id FROM `+pgx.Identifier{schema, "admin_notifications"}.Sanitize()+` ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}

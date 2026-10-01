@@ -512,7 +512,7 @@ func TestAdminIssuesListUnavailable(t *testing.T) {
 
 // Issues created after the first complete listing are announced once; the backlog never is.
 func TestAdminIssuesAnnounceNew(t *testing.T) {
-	s, f, _, _ := issuesFixture(t)
+	s, f, conn, schema := issuesFixture(t)
 	if _, err := s.pendingIssues(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -527,6 +527,9 @@ func TestAdminIssuesAnnounceNew(t *testing.T) {
 	}
 	if !m.seen[issuesWinRepo+"#13"] || len(m.seen) != 1 {
 		t.Fatal(m.seen)
+	}
+	if got := notificationRows(t, conn, schema); !slices.Equal(got, []string{"issue issues " + issuesWinRepo + "#13"}) {
+		t.Fatal("issue notifications", got)
 	}
 }
 

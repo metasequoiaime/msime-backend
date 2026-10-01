@@ -146,6 +146,7 @@ INSERT INTO admin_service_metrics(service,hour,calls) VALUES('chat',date_trunc('
 func TestAutoIncidentLifecycle(t *testing.T) {
 	a, db := monitoringService(t)
 	ctx := context.Background()
+	since := lastNotificationID(t, db)
 	opened, err := a.OpenAutoIncident(ctx, "chat", "AI 联想响应变慢", "最近 5 分钟 P95 4.2s")
 	if err != nil || !opened {
 		t.Fatalf("open = %v, %v", opened, err)
@@ -172,6 +173,10 @@ func TestAutoIncidentLifecycle(t *testing.T) {
 	}
 	if len(incidents) != 2 || incidents[0].Title != "人工记录" || incidents[0].State != "open" || incidents[0].Auto || incidents[1].State != "resolved" || incidents[1].ResolvedAt == nil || !incidents[1].Auto {
 		t.Fatalf("incidents = %+v", incidents)
+	}
+	// Only the automatic incident that actually opened is announced, pointing at the status page.
+	if got := notificationTargets(t, db, NotifyIncident, since); len(got) != 1 || !strings.HasPrefix(got[0], "status ") {
+		t.Fatal("incident notifications", got)
 	}
 }
 

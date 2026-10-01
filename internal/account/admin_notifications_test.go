@@ -213,3 +213,27 @@ func jsonInt(n int64) string {
 	raw, _ := json.Marshal(n)
 	return string(raw)
 }
+
+// notificationTargets lists the target_page/target_id of the notifications of kind recorded since the given id, oldest first, so a unit's test can check that its write reached the console bell.
+func notificationTargets(t *testing.T, db *Store, kind string, since int64) []string {
+	t.Helper()
+	rows, err := db.pool.Query(context.Background(), `SELECT target_page||' '||target_id FROM admin_notifications WHERE kind=$1 AND id>$2 ORDER BY id`, kind, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// lastNotificationID is the newest notification id, the starting point for notificationTargets.
+func lastNotificationID(t *testing.T, db *Store) int64 {
+	t.Helper()
+	var id int64
+	if err := db.pool.QueryRow(context.Background(), `SELECT COALESCE(max(id),0) FROM admin_notifications`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}

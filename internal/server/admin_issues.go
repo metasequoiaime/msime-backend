@@ -130,12 +130,9 @@ type issueMemory struct {
 	seen     map[string]bool
 }
 
-// issueMemories holds the issueMemory of each Server; the Server struct is shared with other units, so the state lives here instead of in a field.
-var issueMemories sync.Map
-
+// issueMemory returns the Server's issue triage memory; it lives in the Server, so it goes away with it.
 func (s *Server) issueMemory() *issueMemory {
-	m, _ := issueMemories.LoadOrStore(s, &issueMemory{})
-	return m.(*issueMemory)
+	return &s.issues
 }
 
 // issueError is a failure answered with status and code.

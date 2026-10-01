@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -393,6 +394,7 @@ func TestCommunityReport(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/community/reports", Route(a, "POST /v1/community/reports", (*Service).CommunityReport))
 	body := `{"kind":"skins","item_id":"skin-a","reason":"商标侵权","detail":"素材来自官方宣传图"}`
+	since := lastNotificationID(t, db)
 	apiRequest(t, mux, "POST", "/v1/community/reports", body, "", 401)
 	apiRequest(t, mux, "POST", "/v1/community/reports", body, reader.AccessToken, 201)
 	// A repeat report from the same account is accepted without a second record.
@@ -401,6 +403,10 @@ func TestCommunityReport(t *testing.T) {
 	var count int
 	if err := db.pool.QueryRow(context.Background(), `SELECT count(*) FROM community_reports WHERE kind='skins' AND item_id='skin-a'`).Scan(&count); err != nil || count != 2 {
 		t.Fatal(count, err)
+	}
+	// Each new report, and not the repeat, reaches the console bell and opens the item on the community page.
+	if got := notificationTargets(t, db, NotifyReport, since); !slices.Equal(got, []string{"community skins/skin-a", "community skins/skin-a"}) {
+		t.Fatal("report notifications", got)
 	}
 	for _, tc := range []struct {
 		body, code string

@@ -46,6 +46,7 @@ var errDictPRConflict = errors.New("dictionary pull request changed concurrently
 
 // dictPRState is the per-server memory of the review page: the last pull request list and the submitter notes last read for the global search, the pull requests already announced as notifications, and the lock that serialises review writes within this process.
 type dictPRState struct {
+	once     sync.Once
 	mu       sync.Mutex
 	index    []dictPRSummary
 	notes    map[int]string
@@ -53,12 +54,13 @@ type dictPRState struct {
 	writes   sync.Mutex
 }
 
-// dictPRStates holds each Server's dictPRState; the Server struct is shared by every unit, so the review page keeps its state beside it rather than in it.
-var dictPRStates sync.Map
-
+// dictPRState returns the Server's review page state, creating its maps on first use; it lives in the Server, so it goes away with it.
 func (s *Server) dictPRState() *dictPRState {
-	v, _ := dictPRStates.LoadOrStore(s, &dictPRState{notes: map[int]string{}, notified: map[int]bool{}})
-	return v.(*dictPRState)
+	st := &s.dictPRs
+	st.once.Do(func() {
+		st.notes, st.notified = map[int]string{}, map[int]bool{}
+	})
+	return st
 }
 
 type dictPull struct {

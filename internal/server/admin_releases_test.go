@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -537,6 +538,10 @@ func TestAdminReleaseWrites(t *testing.T) {
 	}
 	if !jsonEqual(audits[4].Detail, map[string]any{"latest_restored": false, "platform": "Windows", "previous": "windows-v0.5.3", "version": "v0.5.4", "was_latest": true}) {
 		t.Fatalf("%+v", audits[4].Detail)
+	}
+	// Each accepted trigger and withdrawal reaches the console bell; rejected writes and note edits do not.
+	if got := notificationRows(t, admin, schema); !slices.Equal(got, []string{"release release windows", "release release windows", "release release windows", "release release windows"}) {
+		t.Fatal("release notifications", got)
 	}
 }
 

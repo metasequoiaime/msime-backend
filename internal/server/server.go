@@ -59,6 +59,10 @@ type Server struct {
 	adminJobs sync.WaitGroup
 	// metrics aggregates upstream calls for the console's cloud and status pages.
 	metrics serviceMetrics
+	// dictPRs, issues and releaseIndex are the console's per-server memory of GitHub listings: notification de-duplication and the global search indexes.
+	dictPRs      dictPRState
+	issues       issueMemory
+	releaseIndex releaseSearchIndex
 }
 
 func New(c Config) (*Server, error) {

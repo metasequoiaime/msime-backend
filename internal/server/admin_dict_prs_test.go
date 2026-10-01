@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,7 +398,7 @@ func TestDictPRRouting(t *testing.T) {
 }
 
 func TestDictPRList(t *testing.T) {
-	s, _, _, _ := dictPRServer(t)
+	s, _, conn, schema := dictPRServer(t)
 	w := dictCall(s, "GET", "/api/dict-prs", "")
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -420,6 +421,9 @@ func TestDictPRList(t *testing.T) {
 	// The open pull request is announced once, and the list feeds the global search and the shell badge.
 	if st := s.dictPRState(); !st.notified[12] || st.notified[11] || st.notified[9] {
 		t.Fatal(st.notified)
+	}
+	if got := notificationRows(t, conn, schema); !slices.Equal(got, []string{"dict_pr dictpr 12"}) {
+		t.Fatal("dictionary pull request notifications", got)
 	}
 	if hits := s.searchDictPRs("#12"); len(hits) != 1 || hits[0].ID != "12" || hits[0].Target != "dictpr" || hits[0].Kind != "dict_pr" {
 		t.Fatalf("%+v", hits)

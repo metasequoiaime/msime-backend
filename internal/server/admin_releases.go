@@ -738,25 +738,23 @@ func (s *Server) releaseNotify(ctx context.Context, p AdminPlatformConfig, title
 	}
 }
 
-// releaseSearchIndex holds the releases each Server last read from GitHub, by platform, so the global search never calls GitHub.
-var releaseSearchIndex = struct {
-	sync.Mutex
-	servers map[*Server]map[string][]account.AdminSearchHit
-}{servers: map[*Server]map[string][]account.AdminSearchHit{}}
+// releaseSearchIndex holds the releases a Server last read from GitHub, by platform, so the global search never calls GitHub.
+type releaseSearchIndex struct {
+	mu         sync.Mutex
+	byPlatform map[string][]account.AdminSearchHit
+}
 
 func (s *Server) indexReleases(p AdminPlatformConfig, releases []ghRelease) {
 	hits := make([]account.AdminSearchHit, 0, len(releases))
 	for _, r := range releases {
 		hits = append(hits, account.AdminSearchHit{Kind: "release", ID: p.ID + ":" + r.TagName, Title: p.Name + " " + releaseVersion(p, r.TagName), Where: "发布管理", Target: "release"})
 	}
-	releaseSearchIndex.Lock()
-	defer releaseSearchIndex.Unlock()
-	byPlatform := releaseSearchIndex.servers[s]
-	if byPlatform == nil {
-		byPlatform = map[string][]account.AdminSearchHit{}
-		releaseSearchIndex.servers[s] = byPlatform
+	s.releaseIndex.mu.Lock()
+	defer s.releaseIndex.mu.Unlock()
+	if s.releaseIndex.byPlatform == nil {
+		s.releaseIndex.byPlatform = map[string][]account.AdminSearchHit{}
 	}
-	byPlatform[p.ID] = hits
+	s.releaseIndex.byPlatform[p.ID] = hits
 }
 
 // searchReleases matches q against the cached releases for the global search; it never calls GitHub.
@@ -765,12 +763,12 @@ func (s *Server) searchReleases(q string) []account.AdminSearchHit {
 	if q == "" {
 		return nil
 	}
-	releaseSearchIndex.Lock()
-	defer releaseSearchIndex.Unlock()
+	s.releaseIndex.mu.Lock()
+	defer s.releaseIndex.mu.Unlock()
 	var hits []account.AdminSearchHit
 	// Platforms in config order keep the result stable between calls.
 	for _, p := range s.config.Admin.GitHub.Platforms {
-		for _, hit := range releaseSearchIndex.servers[s][p.ID] {
+		for _, hit := range s.releaseIndex.byPlatform[p.ID] {
 			_, tag, _ := strings.Cut(hit.ID, ":")
 			if strings.Contains(strings.ToLower(hit.Title), q) || strings.Contains(strings.ToLower(tag), q) {
 				hits = append(hits, hit)
