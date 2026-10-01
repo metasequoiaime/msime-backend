@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS community_skin_ratings (
  stars integer NOT NULL CHECK(stars BETWEEN 1 AND 5),
  PRIMARY KEY(skin_id,user_id)
 );
+-- 键盘皮肤的收藏，每个账号每款最多一条。created_at 是收藏时间，`scope=saved` 按它倒序列出，所以按 (user_id,created_at) 建索引。
+CREATE TABLE IF NOT EXISTS community_skin_saves (
+ skin_id text NOT NULL REFERENCES community_skins(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(skin_id,user_id)
+);
+CREATE INDEX IF NOT EXISTS community_skin_saves_user ON community_skin_saves(user_id,created_at DESC);
 
 -- Versioned, data-only word packs and reply prompts. No personal dictionary is exposed.
 CREATE TABLE IF NOT EXISTS community_resources (

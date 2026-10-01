@@ -111,7 +111,7 @@ func New(c Config) (*Server, error) {
 	}
 	s.initAdminGoogle()
 	s.accounts.ConfigureEngine(c.Engine)
-	s.accounts.ConfigureClientIPHeader(c.ClientIPHeader)
+	s.accounts.ConfigureClientAddress(c.ClientIPHeader, c.siteProxySecret)
 	if c.Admin.Enabled {
 		s.accounts.ConfigureAdmin(s.adminAccountSettings())
 		s.accounts.ConfigureNoticeBroadcaster(s.noticeBroadcaster())

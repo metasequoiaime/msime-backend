@@ -4,15 +4,16 @@
 
 ## 接口
 
-- `GET /v1/community/skins?q=&offset=0&scope=&fields=&category=&include=`：公开目录，按发布时间倒序每页 20 条，返回 `skins` 和 `has_more`。目录不含壁纸字节。`scope=mine` 只列出自己的作品（含被审核员下架的），需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。`category` 只列出该分类的作品（见下文「键盘皮肤分类」），未知分类返回 400 `invalid_category`。
+- `GET /v1/community/skins?q=&offset=0&scope=&fields=&category=&include=`：公开目录，按发布时间倒序每页 20 条，返回 `skins` 和 `has_more`。目录不含壁纸字节。`scope=mine` 只列出自己的作品（含被审核员下架的）；`scope=saved` 只列出自己收藏的作品，按收藏时间倒序，分页方式相同，别人已下架的作品不再列出。两者都需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。`category` 只列出该分类的作品（见下文「键盘皮肤分类」），未知分类返回 400 `invalid_category`。
 - `GET /v1/community/skins/{id}?fields=&include=`：公开详情，含完整 design；登录时额外返回自己的评分与是否为作者。
 - `POST /v1/community/skins`：需要用户会话，提交 `{id,name,description,design,category?}`。id 为客户端生成的 UUID，用于网络失败后的安全重试。`category` 缺省（或为 null）时为 `other`，未知值或空串返回 400 `invalid_category`。每个账号最多 50 款。响应仍为 `{id}`（首次 201，重试 200），不是作品条目，所以不读 `include`。
 - `PATCH /v1/community/skins/{id}?fields=&include=`：仅作者可修改（他人的作品与不存在一样返回 404 `skin_not_found`），提交 `{"category":"<分类>"}`；category 缺省、为 null、空串或未知值都返回 400 `invalid_category`，其他键返回 400 `invalid_json`。返回 200 和与详情形状相同的作品（含完整 design），同样支持 `fields=moderation` 与 `include=category`。不改变审核状态，设为当前分类同样返回 200。被审核员下架的作品作者仍可修改。限流与其他社区接口相同，计入按地址的每分钟额度（超出 429 `rate_limit_exceeded`）。分类见下文「键盘皮肤分类」。
 - `POST /v1/community/skins/{id}/download`：需要用户会话，返回 `{design}`，每个账号只计一次下载。
-- `PUT /v1/community/skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。必须已下载，作者不可自评；重复提交更新同一条评分。
+- `PUT /v1/community/skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。登录即可评分，不需要先下载；不能给自己的作品评分（403 `download_before_rating_or_own_skin`，错误码沿用旧名，现在只表示「自己的作品」）；不存在或已下架的作品返回 404 `skin_not_found`。重复提交更新同一条评分。
+- `PUT /v1/community/skins/{id}/save`：需要用户会话，提交 `{"saved":true|false}` 收藏或取消收藏，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`（saves 为收藏总数）。不存在或已下架（作者本人除外）的作品收藏时返回 404 `skin_not_found`；取消收藏不看作品状态，总是删除并返回 200，作品下架后用户仍能把它移出收藏。
 - `DELETE /v1/community/skins/{id}`：仅作者可删除；不删除其他设备已下载的本地副本。
 
-摘要字段：id、name、description、author、design、downloads、rating_count、rating_average、owned、my_rating，仅在 `fields=moderation` 时出现在自己作品上的 moderation，以及仅在 `include=category` 时出现的 category。人数代表累计去重下载账号数，不代表实时活跃使用人数。发布之后不允许原地替换设计以继承旧版评分；修改设计需发布新作品。
+摘要字段：id、name、description、author、design、downloads、rating_count、rating_average、owned、my_rating，仅在 `fields=moderation` 时出现在自己作品上的 moderation，仅在 `fields=saved` 时出现的 saved（当前用户是否收藏，匿名为 false）和 saves（收藏总数），以及仅在 `include=category` 时出现的 category。列表和详情的 `fields` 是逗号分隔的列表，可以组合，例如 `fields=moderation,saved`；不带 `saved` 时响应与加入收藏之前逐字节相同。人数代表累计去重下载账号数，不代表实时活跃使用人数。发布之后不允许原地替换设计以继承旧版评分；修改设计需发布新作品。
 
 标题最多 32 个 Unicode 字符，说明最多 280 个；设计颜色为 24-bit RGB、数值范围与 iOS 编辑器一致。JSON 请求最大 710,000 字节，壁纸最多 512,000 字节且长宽均不超过 1024。服务器解码后重编码 JPEG，移除原图元数据。未知字段或错误图片会被拒绝。
 
@@ -35,11 +36,11 @@
 
 复用现有 PostgreSQL 用户体系。配置 `auth.apple.client_ids: ["app.msime.ios"]`；Apple Developer 中为相同 App ID 启用 Sign in with Apple，并重新生成包含该 entitlement 的签名配置。客户端不包含设备共享令牌或 Apple 私钥。Apple nonce 来自后端挑战，ID Token 校验继续使用现有 issuer/audience/signature/nonce 校验。
 
-运行角色有 DDL 权限时不需要单独迁移：新版本启动发现缺表会自己补上。按最小权限部署（运行角色只有 DML）时仍照旧：上线前使用迁移账号执行新版本的 `-migrate-users`，或者由数据库管理员在事务中执行 `internal/account/community_schema.sql`，并给运行角色授予三张新表的 SELECT/INSERT/UPDATE/DELETE。这些表放在现有 PostgreSQL 中，无需 K8s 本地目录或 PVC。先迁移再滚动更新，旧二进制可兼容新增表。数据库需按现有方案备份。
+运行角色有 DDL 权限时不需要单独迁移：新版本启动发现缺表会自己补上。按最小权限部署（运行角色只有 DML）时仍照旧：上线前使用迁移账号执行新版本的 `-migrate-users`，或者由数据库管理员在事务中执行 `internal/account/community_schema.sql`，并给运行角色授予三张新表的 SELECT/INSERT/UPDATE/DELETE。加入收藏的版本新增 `community_skin_saves`（主键 `(skin_id,user_id)`，`created_at` 为收藏时间，索引 `community_skin_saves_user (user_id, created_at DESC)`，对作品和账号都级联删除），最小权限部署时同样要授权：`GRANT SELECT, INSERT, UPDATE, DELETE ON community_skin_saves TO msime_backend;`。这些表放在现有 PostgreSQL 中，无需 K8s 本地目录或 PVC。先迁移再滚动更新，旧二进制可兼容新增表。数据库需按现有方案备份。
 
-下载及评分的唯一键保证多副本并发去重；发布锁定账号行保证配额。浏览和写入继续使用数据库限流。没有给下载用户数设置产品上限；实际吞吐需按部署容量测试，不能把配额或副本数解释为可承载人数。
+下载、收藏及评分的唯一键保证多副本并发去重；发布锁定账号行保证配额。浏览和写入继续使用数据库限流。没有给下载用户数设置产品上限；实际吞吐需按部署容量测试，不能把配额或副本数解释为可承载人数。
 
-Apple 客户端入口：皮肤 → 皮肤社区。用户显式确认公开素材后发布，浏览不会修改当前皮肤。账号注销级联删除作品、评分和下载记录。登录令牌保存到本机 Keychain，刷新串行执行。
+Apple 客户端入口：皮肤 → 皮肤社区。用户显式确认公开素材后发布，浏览不会修改当前皮肤。账号注销级联删除作品、评分、收藏和下载记录。登录令牌保存到本机 Keychain，刷新串行执行。
 
 ## 初始精选皮肤
 
@@ -101,23 +102,24 @@ msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID
 
 ## 候选窗皮肤包分享
 
-用户可以把自己的候选窗皮肤包（msime-skins 格式，`skin.toml` 加 PNG/JPEG 图片）公开发布到社区，其他用户下载后安装到外部皮肤目录。同一张表也是账号的皮肤库：登录后客户端把本机外部皮肤以私有（`private`）作品同步上来，私有作品只有作者本人能看到、预览和下载，作者可以随时把它转为公开。接口位于 `/v1/community/candidate-skins`，数据存放在 `community_candidate_skins`、`community_candidate_skin_files`、`community_candidate_skin_downloads` 和 `community_candidate_skin_ratings` 四张独立的表中，与上面的精选 `candidate_skins` 表和 `/v1/skins` 目录互不影响：用户上传不会进入 `/v1/skins`。
+用户可以把自己的候选窗皮肤包（msime-skins 格式，`skin.toml` 加 PNG/JPEG 图片）公开发布到社区，其他用户下载后安装到外部皮肤目录。同一张表也是账号的皮肤库：登录后客户端把本机外部皮肤以私有（`private`）作品同步上来，私有作品只有作者本人能看到、预览和下载，作者可以随时把它转为公开。接口位于 `/v1/community/candidate-skins`，数据存放在 `community_candidate_skins`、`community_candidate_skin_files`、`community_candidate_skin_downloads`、`community_candidate_skin_ratings` 和 `community_candidate_skin_saves` 五张独立的表中，与上面的精选 `candidate_skins` 表和 `/v1/skins` 目录互不影响：用户上传不会进入 `/v1/skins`。
 
 ### 接口
 
-- `GET /v1/community/candidate-skins?q=&offset=0&scope=&fields=&category=&include=`：公开目录，按发布时间倒序每页 20 条，返回 `skins` 和 `has_more`，不含清单和图片字节。`scope=mine` 只列出自己的作品，需要用户会话；其他 scope 返回 400 `invalid_scope`。只有 `scope=mine&fields=sync` 会包含自己的私有作品，其余情况只列公开作品。`category` 只列出该分类的作品（见下文「分类」），未知分类返回 400 `invalid_category`。
+- `GET /v1/community/candidate-skins?q=&offset=0&scope=&fields=&category=&include=`：公开目录，按发布时间倒序每页 20 条，返回 `skins` 和 `has_more`，不含清单和图片字节。`scope=mine` 只列出自己的作品；`scope=saved` 只列出自己收藏的作品，按收藏时间倒序。两者都需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。只有 scope 非空且 `fields` 含 `sync` 时才会包含自己的私有作品，其余情况只列公开作品；别人的私有作品永远不出现，收藏之后被作者设为私有的作品也会从收藏者的列表里消失。`category` 只列出该分类的作品（见下文「分类」），未知分类返回 400 `invalid_category`。
 - `GET /v1/community/candidate-skins/{id}?fields=&include=`：公开详情；登录时额外返回自己的评分与是否为作者。私有作品只有作者带 `fields=sync` 时可见，其他情况与不存在一样返回 404 `skin_not_found`。
-- 列表和详情的 `fields` 是逗号分隔的列表：`sync`、`moderation`，或两者一起 `fields=sync,moderation`。`moderation` 的含义与用户皮肤相同（见上文），单独使用时不会带出同步字段。
+- 列表和详情的 `fields` 是逗号分隔的列表，取值 `sync`、`moderation`、`saved`，可任意组合，例如 `fields=sync,moderation`、`fields=sync,saved`。`moderation` 和 `saved` 的含义与用户皮肤相同（见上文），单独使用时不会带出同步字段。
 - `GET /v1/community/candidate-skins/{id}/preview`：返回预览图 `{path,content_type,data}`，data 为标准 base64，content_type 为 `image/png` 或 `image/jpeg`。公开作品任何人可取，私有作品仅作者可取，否则 404。
 - `POST /v1/community/candidate-skins`：需要用户会话，提交 `{id,name,description,manifest,files,visibility?,category?}`。manifest 为原样的 skin.toml 文本，files 的键为包内相对路径、值为标准 base64；`visibility` 为 `public` 或 `private`，缺省为 `public`，其他值返回 400 `invalid_visibility`；`category` 缺省（或为 null）时为 `other`，未知值返回 400 `invalid_category`。首次发布返回 201，同一请求重试返回 200。
 - `GET /v1/community/candidate-skins/sync`：需要用户会话（否则 401 `user_session_required`），返回 `{"skins":[{id,package_id,request_sha256,visibility,updated_at}]}`：自己的全部作品（含私有），按 `updated_at` 倒序，不分页（每个账号最多 100 款）。
 - `PUT /v1/community/candidate-skins/{id}`：仅作者可替换（否则 404 `skin_not_found`），提交 `{name,description,manifest,files}`，校验、大小上限、超时和图片重新编码都与发布相同。清单 `id` 必须与原作品的 `package_id` 相同，否则 409 `candidate_skin_package_mismatch`；公开作品的新清单必须声明 `[license] assets`，否则 400 `candidate_skin_license_required`。替换清单、图片、标题、说明、version、license 和预览图，重新计算 `request_sha256` 并更新 `updated_at`；保留 id、可见性、created_at、下载与评分。与已存 `request_sha256` 相同时直接返回 200，不写入也不计限流。
 - `PATCH /v1/community/candidate-skins/{id}`：仅作者可修改（否则 404），提交 `{"visibility"?: "public"|"private", "category"?: "<分类>"}`，两个键至少带一个（都缺省返回 400 `invalid_visibility`），在同一事务里生效，返回 200 和作品。转为公开要求已存的 license assets 非空（否则 400 `candidate_skin_license_required`），占用公开配额（满额 409 `candidate_skin_publish_limit`），并计入每小时发布限流；切换可见性会更新 `updated_at`，已有下载与评分保留。修改分类（未知值 400 `invalid_category`）计入私有创建与替换共用的每小时 60 次，不更新 `updated_at`、不改 `request_sha256`，也不让作品重新进入审核。设为当前值时不做任何修改，也不计限流。
 - `POST /v1/community/candidate-skins/{id}/download`：需要用户会话，返回 `{id,package_id,manifest,files}`，每个账号只计一次下载。私有作品仅作者可下载，否则 404。
-- `PUT /v1/community/candidate-skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。必须已下载，作者不可自评；重复提交更新同一条评分。私有作品返回 404。
-- `DELETE /v1/community/candidate-skins/{id}`：仅作者可删除，连带删除图片、下载和评分记录；不删除其他设备已安装的副本。
+- `PUT /v1/community/candidate-skins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`。登录即可评分，不需要先下载；不能给自己的公开作品评分（403 `download_before_rating_or_own_skin`，错误码沿用旧名，现在只表示「自己的作品」）；不存在、私有或已下架的作品返回 404 `skin_not_found`。重复提交更新同一条评分。
+- `PUT /v1/community/candidate-skins/{id}/save`：需要用户会话，提交 `{"saved":true|false}`，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`。不存在、已下架（作者本人除外）或别人的私有作品收藏时返回 404 `skin_not_found`；取消收藏总是返回 200；作者可以收藏自己的私有作品。
+- `DELETE /v1/community/candidate-skins/{id}`：仅作者可删除，连带删除图片、下载、评分和收藏记录；不删除其他设备已安装的副本。
 
-摘要字段：id、package_id、name、description、author、version、license（code、assets、source，缺省为空字符串）、size（重新编码后的图片总字节数）、file_count（图片数量，不含 skin.toml）、downloads、rating_count、rating_average、owned、my_rating、created_at。
+摘要字段：id、package_id、name、description、author、version、license（code、assets、source，缺省为空字符串）、size（重新编码后的图片总字节数）、file_count（图片数量，不含 skin.toml）、downloads、rating_count、rating_average、owned、my_rating、created_at，以及仅在 `fields=saved` 时出现的 saved 和 saves。
 
 同步字段 `visibility`、`updated_at` 和 `request_sha256`（上传请求原始字节的摘要，仅作者可见，其他人看到的作品不带该字段）只在客户端声明支持时出现：列表和详情带 `fields=sync`（其他值返回 400 `invalid_fields`），发布请求体带 `visibility` 键，以及 sync、PUT、PATCH 三个接口。已发布的客户端按拒绝未知字段的方式解析摘要，也会拒绝 license assets 为空的条目，所以没有声明支持的响应与引入私有作品之前逐字节相同，并且永远不含私有作品。
 
@@ -167,11 +169,13 @@ msime-skins 清单写 `base = "fluent"`（msime-windows 只接受四个内置 ID
 运行角色有 DDL 权限时新版本启动会自动建表。按最小权限部署时，上线前用迁移账号执行新版本的 `-migrate-users`，或在事务中执行 `internal/account/community_candidate_skin_schema.sql`（需要 PostgreSQL 12 及以上，用到生成列），并给运行角色授予四张新表的权限：
 
 ```sql
-GRANT SELECT, INSERT, UPDATE, DELETE ON community_candidate_skins, community_candidate_skin_files, community_candidate_skin_downloads, community_candidate_skin_ratings TO msime_backend;
+GRANT SELECT, INSERT, UPDATE, DELETE ON community_candidate_skins, community_candidate_skin_files, community_candidate_skin_downloads, community_candidate_skin_ratings, community_candidate_skin_saves TO msime_backend;
 ```
+
+加入收藏的版本新增 `community_candidate_skin_saves`（主键 `(skin_id,user_id)`，`created_at` 为收藏时间，索引 `community_candidate_skin_saves_user (user_id, created_at DESC)`，对作品和账号都级联删除）；启动探测会检查这张表，缺表时自动执行迁移。已有部署只需额外授予这一张表，见上面的 GRANT。旧二进制不读这张表，回滚不需要处理它。
 
 先迁移再滚动更新，旧二进制不读这四张表。加入私有作品的版本在启动时给 `community_candidate_skins` 增加 `visibility`（已有行为 `public`）和 `updated_at`（已有行取其 `created_at`）两列，并把 license assets 的列约束换成命名约束 `community_candidate_skins_license_check`（公开行要求非空，私有行可为空），重复执行不会改变任何东西；旧二进制仍能读写这张表。但旧二进制不认识 `visibility`，会把私有作品当公开作品列出和下发，所以必须等所有副本都换成新版本后再让客户端开始同步私有作品，回滚到旧版本前也要先处理私有行。
 
-加入分类的版本在启动时给 `community_candidate_skins` 增加 `category text NOT NULL DEFAULT 'other'`（已有行为 `other`，PostgreSQL 11 起带常量默认值的加列不重写表）、命名约束 `community_candidate_skins_category_check` 和服务按分类筛选的索引 `community_candidate_skins_category_newest (category, created_at DESC, id)`，重复执行不会改变任何东西；启动探测会检查这一列，缺列时自动执行迁移。没有新表，所以不需要新的授权：按最小权限部署时只需在上线前用迁移账号执行新版本的 `-migrate-users`，运行角色对这张表已有的 SELECT/INSERT/UPDATE/DELETE 覆盖新列。旧二进制插入的行取默认值 `other`，回滚不需要处理这一列。每个账号满额时约占 200 MiB bytea（100 款，每款最多 2 MiB 图片），需计入数据库容量与备份。账号注销级联删除作品、图片、评分和下载记录。
+加入分类的版本在启动时给 `community_candidate_skins` 增加 `category text NOT NULL DEFAULT 'other'`（已有行为 `other`，PostgreSQL 11 起带常量默认值的加列不重写表）、命名约束 `community_candidate_skins_category_check` 和服务按分类筛选的索引 `community_candidate_skins_category_newest (category, created_at DESC, id)`，重复执行不会改变任何东西；启动探测会检查这一列，缺列时自动执行迁移。没有新表，所以不需要新的授权：按最小权限部署时只需在上线前用迁移账号执行新版本的 `-migrate-users`，运行角色对这张表已有的 SELECT/INSERT/UPDATE/DELETE 覆盖新列。旧二进制插入的行取默认值 `other`，回滚不需要处理这一列。每个账号满额时约占 200 MiB bytea（100 款，每款最多 2 MiB 图片），需计入数据库容量与备份。账号注销级联删除作品、图片、评分、收藏和下载记录。
 
 公开作品发布即公开，不做事前审核；候选皮肤和其他社区内容一样由管理后台的社区审核页事后复核，审核规则见 [管理后台的「社区事后审核」](admin.md#社区事后审核)。管理后台 API 另外提供 `GET /api/candidate-skins`（可用 `visibility=public|private` 和 `category=<分类>` 筛选）、`GET /api/candidate-skins/{id}`（元数据、可见性、分类、清单文本和每个文件的路径、大小、SHA-256，不含图片字节）、审计过的 `delete_candidate_skin` 永久删除操作，以及审计过的 `set_candidate_skin_category` 用于修改分类；社区审核页的候选皮肤详情抽屉提供分类下拉框。

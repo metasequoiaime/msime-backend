@@ -242,7 +242,7 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	// 在代理之后所有人的 TCP 对端都是代理，`client_ip_header` 指定携带真实地址的头。
-	peer := account.ClientAddress(r, s.config.ClientIPHeader)
+	peer := account.ClientAddress(r, s.config.ClientIPHeader, s.config.siteProxySecret)
 	if !s.adminLimit(r.Context(), w, "admin-auth", peer, 120) {
 		return true
 	}
@@ -287,7 +287,7 @@ func (s *Server) adminAuthRoute(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		// 在代理之后所有人的 TCP 对端都是代理，`client_ip_header` 指定携带真实地址的头。
-		peer := account.ClientAddress(r, s.config.ClientIPHeader)
+		peer := account.ClientAddress(r, s.config.ClientIPHeader, s.config.siteProxySecret)
 		if !s.adminLimit(r.Context(), w, "admin-login", peer, 10) {
 			return true
 		}

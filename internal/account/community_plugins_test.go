@@ -432,7 +432,8 @@ func TestCommunityPluginLifecycle(t *testing.T) {
 			t.Fatal(query, w.Code)
 		}
 	}
-	if w := c.do("PUT", path+"/rating", `{"stars":5}`, user.AccessToken); w.Code != 403 || !strings.Contains(w.Body.String(), "download_before_rating_or_own_plugin") {
+	// 登录即可评分，不需要先下载。
+	if w := c.do("PUT", path+"/rating", `{"stars":5}`, user.AccessToken); w.Code != 200 {
 		t.Fatal("rating before download", w.Code, w.Body.String())
 	}
 	var wg sync.WaitGroup

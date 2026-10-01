@@ -90,8 +90,11 @@ type Config struct {
 	TimeoutSeconds       int                   `json:"timeout_seconds"`
 	AllowedOrigins       []string              `json:"allowed_origins"`
 	// ClientIPHeader 是受信任的反向代理用访客地址覆盖写入的头（例如 Cloudflare 之后的 `CF-Connecting-IP`，或 `X-Real-IP`；`X-Forwarded-For` 取最后一项）。所有按地址的限额都用它：账号接口、匿名开户、匿名遥测、后台登录限额和官网词条投稿。为空时只信任 TCP 对端，在代理之后会让所有客户端共用一份额度。只有代理会覆盖这个头时才设置，因为客户端可以自己带它。旧的 `word_submissions.client_ip_header` 仍作为别名接受。
-	ClientIPHeader  string                `json:"client_ip_header"`
-	WordSubmissions WordSubmissionsConfig `json:"word_submissions"`
+	ClientIPHeader string `json:"client_ip_header"`
+	// SiteProxySecretEnv 是保存官网 BFF 共享密钥的环境变量名，空表示不启用。启用后，带着与之相等的 `X-MSIME-Site-Proxy` 头的请求，按 `X-MSIME-Client-IP` 中的访客地址计算所有按地址的限额（见 account.ClientAddress）。值至少 32 个可见 ASCII 字符，必须与官网 Pages 的 `SITE_PROXY_SECRET` 相同。
+	SiteProxySecretEnv string `json:"site_proxy_secret_env,omitempty"`
+	siteProxySecret    string
+	WordSubmissions    WordSubmissionsConfig `json:"word_submissions"`
 	// Replicas is how many server processes share the fleet-wide request budget; the main token bucket lives in each process's memory, so every replica enforces its share of each limit.
 	Replicas int `json:"replicas"`
 	// RequestLog 控制每个请求一行的请求日志，省略时开启，写 false 关闭。见 request_log.go。
@@ -268,6 +271,9 @@ func (c *Config) Validate() error {
 	if err := c.resolveClientIPHeader(); err != nil {
 		return err
 	}
+	if err := c.resolveSiteProxySecret(); err != nil {
+		return err
+	}
 	if err := c.WordSubmissions.validate(c.Auth.Enabled, c.AllowedOrigins); err != nil {
 		return err
 	}
@@ -290,6 +296,23 @@ func (c *Config) resolveClientIPHeader() error {
 		return errors.New("client_ip_header must be a header name")
 	}
 	c.ClientIPHeader, c.WordSubmissions.ClientIPHeader = top, top
+	return nil
+}
+
+// minSiteProxySecretBytes 是官网代理密钥的最短长度：它能让请求替自己声明访客地址，太短就可以被猜出来绕过按地址的限额。
+const minSiteProxySecretBytes = 32
+
+// resolveSiteProxySecret 读取 `site_proxy_secret_env` 指向的官网代理密钥，并同时交给词条表单，让所有按地址的限额对访客身份的判断一致。配置了变量名却读不到合格的值时拒绝启动：静默关闭会让官网所有访客重新共用一份额度。
+func (c *Config) resolveSiteProxySecret() error {
+	c.siteProxySecret = ""
+	if c.SiteProxySecretEnv != "" {
+		secret := os.Getenv(c.SiteProxySecretEnv)
+		if len(secret) < minSiteProxySecretBytes || len(secret) > 256 || strings.IndexFunc(secret, func(r rune) bool { return r < 0x21 || r > 0x7e }) >= 0 {
+			return fmt.Errorf("site_proxy_secret_env %s must hold %d to 256 visible ASCII characters", c.SiteProxySecretEnv, minSiteProxySecretBytes)
+		}
+		c.siteProxySecret = secret
+	}
+	c.WordSubmissions.siteProxySecret = c.siteProxySecret
 	return nil
 }
 

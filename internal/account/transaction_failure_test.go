@@ -62,7 +62,7 @@ func testUserDataTransactions(t *testing.T, native bool) {
 		clipboard      string
 		skin, resource string
 		revision       int64
-		// foreignCandidate is another account's candidate skin the fixture user has downloaded, so rating it succeeds.
+		// foreignCandidate is another account's candidate skin the fixture user has downloaded, so rating it succeeds. 同一个 id 也是那个账号的键盘皮肤、插件和回复模板，评分操作用它们。
 		foreignCandidate string
 	}
 	seed := func(t *testing.T) fixture {
@@ -91,6 +91,18 @@ func testUserDataTransactions(t *testing.T, native bool) {
 		author := complete(t, db, Identity{"email", randomToken() + "@example.test"})
 		foreign := randomToken()[:8] + "-1234-1234-1234-" + randomToken()[:12]
 		insertCandidateSkin(t, db, foreign, author.User.ID, "foreign candidate")
+		for _, row := range []struct {
+			query, owner, id string
+		}{
+			{`INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,version,license,manifest,archive,request_sha256) VALUES($1,$2,'sound','pack','pack','1.0','MIT','id = "pack"','zip',encode(sha256(convert_to($1::text,'UTF8')),'hex'))`, uid, id},
+			{`INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,version,license,manifest,archive,request_sha256) VALUES($1,$2,'sound','pack','pack','1.0','MIT','id = "pack"','zip',encode(sha256(convert_to($1::text,'UTF8')),'hex'))`, author.User.ID, foreign},
+			{`INSERT INTO community_skins(id,owner_id,name,description,design) VALUES($1,$2,'foreign skin','','` + communityFixture + `')`, author.User.ID, foreign},
+			{`INSERT INTO community_resources(id,owner_id,kind,name,description,content) VALUES($1,$2,'reply','foreign reply','','{"prompt":"hello"}')`, author.User.ID, foreign},
+		} {
+			if _, err := db.pool.Exec(t.Context(), row.query, row.id, row.owner); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if _, err := db.pool.Exec(t.Context(), `INSERT INTO community_candidate_skin_downloads(skin_id,user_id) VALUES($1,$2)`, foreign, uid); err != nil {
 			t.Fatal(err)
 		}
@@ -111,7 +123,7 @@ func testUserDataTransactions(t *testing.T, native bool) {
 	snapshot := func(t *testing.T, uid string) string {
 		t.Helper()
 		var all strings.Builder
-		for _, table := range []string{"auth_users", "user_dictionary_state", "user_dictionary_entries", "user_dictionary_changes", "user_dictionary_overlay", "user_candidate_positions", "user_candidate_selections", "user_clipboard_settings", "user_clipboard", "user_preferences", "auth_sessions", "community_skins", "community_resources", "community_skin_downloads", "community_resource_saves", "community_candidate_skins", "community_candidate_skin_files", "community_candidate_skin_downloads", "community_candidate_skin_ratings", "admin_members", "admin_sessions", "admin_audit", "site_settings"} {
+		for _, table := range []string{"auth_users", "user_dictionary_state", "user_dictionary_entries", "user_dictionary_changes", "user_dictionary_overlay", "user_candidate_positions", "user_candidate_selections", "user_clipboard_settings", "user_clipboard", "user_preferences", "auth_sessions", "community_skins", "community_resources", "community_skin_downloads", "community_resource_saves", "community_candidate_skins", "community_candidate_skin_files", "community_candidate_skin_downloads", "community_candidate_skin_ratings", "community_skin_saves", "community_candidate_skin_saves", "community_plugin_saves", "admin_members", "admin_sessions", "admin_audit", "site_settings"} {
 			var raw string
 			column := "user_id"
 			if table == "auth_users" {
@@ -202,6 +214,13 @@ func testUserDataTransactions(t *testing.T, native bool) {
 		"delete resource":         {"DELETE", (*Service).resourceDelete, func(f fixture) string { return `` }, 200},
 		"save resource":           {"PUT", (*Service).resourceSave, func(f fixture) string { return `{"saved":true}` }, 200},
 		"unsave resource":         {"PUT", (*Service).resourceSave, func(f fixture) string { return `{"saved":false}` }, 200},
+		"save skin":               {"PUT", (*Service).communitySaveSkin, func(f fixture) string { return `{"saved":true}` }, 200},
+		"save candidate skin":     {"PUT", (*Service).communityCandidateSave, func(f fixture) string { return `{"saved":true}` }, 200},
+		"unsave candidate skin":   {"PUT", (*Service).communityCandidateSave, func(f fixture) string { return `{"saved":false}` }, 200},
+		"save plugin":             {"PUT", (*Service).communityPluginSave, func(f fixture) string { return `{"saved":true}` }, 200},
+		"rate skin":               {"PUT", (*Service).communityRate, func(f fixture) string { return `{"stars":4}` }, 200},
+		"rate plugin":             {"PUT", (*Service).communityPluginRate, func(f fixture) string { return `{"stars":4}` }, 200},
+		"rate resource":           {"PUT", (*Service).resourceRate, func(f fixture) string { return `{"stars":4}` }, 200},
 		"profile read":            {"GET", (*Service).me, func(f fixture) string { return `` }, 200},
 		"preferences read":        {"GET", (*Service).preferences, func(f fixture) string { return `` }, 200},
 		"positions read":          {"GET", (*Service).candidatePositions, func(f fixture) string { return `` }, 200},
@@ -221,7 +240,7 @@ func testUserDataTransactions(t *testing.T, native bool) {
 			if name == "clipboard clear" {
 				r.SetPathValue("id", "")
 			}
-			if name == "rate candidate skin" {
+			if strings.HasPrefix(name, "rate ") {
 				r.SetPathValue("id", f.foreignCandidate)
 			}
 			w := httptest.NewRecorder()

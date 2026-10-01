@@ -51,8 +51,10 @@ type Service struct {
 	sensitive   sensitiveWords
 	broadcaster NoticeBroadcaster
 
-	// clientIPHeader 是受信任的反向代理写入访客地址的头（顶层 `client_ip_header`），为空时只信任 TCP 对端。在开始服务前由 ConfigureClientIPHeader 设置一次。
+	// clientIPHeader 是受信任的反向代理写入访客地址的头（顶层 `client_ip_header`），为空时只信任 TCP 对端。在开始服务前由 ConfigureClientAddress 设置一次。
 	clientIPHeader string
+	// siteProxySecret 是官网 BFF 证明自己身份的共享密钥（顶层 `site_proxy_secret_env` 指向的值），为空时不信任 SiteProxyClientIPHeader。同样由 ConfigureClientAddress 设置一次。
+	siteProxySecret string
 }
 
 func New(ctx context.Context, c Config) (*Service, error) {
@@ -131,10 +133,11 @@ func (a *Service) maintain(lifetime context.Context) {
 	}
 }
 
-// ConfigureClientIPHeader 在构建服务端时、开始处理请求前调用一次，传入校验过的顶层 `client_ip_header`。
-func (a *Service) ConfigureClientIPHeader(header string) {
+// ConfigureClientAddress 在构建服务端时、开始处理请求前调用一次，传入校验过的顶层 `client_ip_header` 和官网代理密钥（未启用时为空）。
+func (a *Service) ConfigureClientAddress(header, siteProxySecret string) {
 	if a != nil {
 		a.clientIPHeader = header
+		a.siteProxySecret = siteProxySecret
 	}
 }
 
@@ -162,14 +165,27 @@ func (a *Service) RateLimit(ctx context.Context, scope, subject string, limit in
 	return a.store.Rate(ctx, scope+":"+hash(subject), limit, window)
 }
 
-// ClientAddress 返回请求的限流主体。在代理之后 TCP 对端是代理，所以 header 指定的头（由代理写入，例如 `CF-Connecting-IP`）含有地址时以它为准；`X-Forwarded-For` 这类列表取最后一项，即最近的代理追加的那一项。IPv6 访客按 /64 归组，这是单个用户通常能控制的最小地址块。header 为空时只信任 TCP 对端，因为客户端可以自己带任何头。
-func ClientAddress(r *http.Request, header string) string {
+// 官网 BFF（Cloudflare Pages Functions）代访客调用接口时带的两个头：SiteProxyHeader 是共享密钥，SiteProxyClientIPHeader 是它看到的访客地址。所有官网访客从同一组 Cloudflare 出口过来，不信任后者就会共用一份按地址的额度。
+const (
+	SiteProxyHeader         = "X-MSIME-Site-Proxy"
+	SiteProxyClientIPHeader = "X-MSIME-Client-IP"
+)
+
+// ClientAddress 返回请求的限流主体。在代理之后 TCP 对端是代理，所以 header 指定的头（由代理写入，例如 `CF-Connecting-IP`）含有地址时以它为准；`X-Forwarded-For` 这类列表取最后一项，即最近的代理追加的那一项。siteProxySecret 非空且请求的 SiteProxyHeader 与它相等（常量时间比较）时，SiteProxyClientIPHeader 中的合法地址优先于前两者；密钥不符、未配置或地址不合法时这两个头被完全忽略。IPv6 访客按 /64 归组，这是单个用户通常能控制的最小地址块。header 为空时只信任 TCP 对端，因为客户端可以自己带任何头。
+func ClientAddress(r *http.Request, header, siteProxySecret string) string {
 	candidate := ""
 	if header != "" {
 		if values := r.Header.Values(header); len(values) > 0 {
 			candidate = values[len(values)-1]
 			if i := strings.LastIndexByte(candidate, ','); i >= 0 {
 				candidate = candidate[i+1:]
+			}
+		}
+	}
+	if siteProxySecret != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get(SiteProxyHeader)), []byte(siteProxySecret)) == 1 {
+		if visitor := strings.TrimSpace(r.Header.Get(SiteProxyClientIPHeader)); visitor != "" {
+			if _, err := netip.ParseAddr(visitor); err == nil {
+				candidate = visitor
 			}
 		}
 	}
@@ -191,9 +207,9 @@ func ClientAddress(r *http.Request, header string) string {
 	return address.String()
 }
 
-// clientAddress 是按配置的 `client_ip_header` 计算的 ClientAddress。
+// clientAddress 是按配置的 `client_ip_header` 和官网代理密钥计算的 ClientAddress。
 func (a *Service) clientAddress(r *http.Request) string {
-	return ClientAddress(r, a.clientIPHeader)
+	return ClientAddress(r, a.clientIPHeader, a.siteProxySecret)
 }
 
 func IsPath(path string) bool {
@@ -246,12 +262,14 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"GET /v1/community/candidate-skins/{id}/preview":   (*Service).communityCandidatePreview,
 		"POST /v1/community/candidate-skins/{id}/download": (*Service).communityCandidateDownload,
 		"PUT /v1/community/candidate-skins/{id}/rating":    (*Service).communityCandidateRate,
+		"PUT /v1/community/candidate-skins/{id}/save":      (*Service).communityCandidateSave,
 		"GET /v1/community/plugins":                        (*Service).communityPluginList,
 		"POST /v1/community/plugins":                       (*Service).communityPluginPublish,
 		"GET /v1/community/plugins/{id}":                   (*Service).communityPluginDetail,
 		"DELETE /v1/community/plugins/{id}":                (*Service).communityPluginDelete,
 		"POST /v1/community/plugins/{id}/download":         (*Service).communityPluginDownload,
 		"PUT /v1/community/plugins/{id}/rating":            (*Service).communityPluginRate,
+		"PUT /v1/community/plugins/{id}/save":              (*Service).communityPluginSave,
 		"GET /v1/community/skins":                          (*Service).communityList,
 		"POST /v1/community/skins":                         (*Service).communityPublish,
 		"GET /v1/community/skins/{id}":                     (*Service).communityDetail,
@@ -259,6 +277,7 @@ func Mount(mux *http.ServeMux, a *Service) {
 		"PATCH /v1/community/skins/{id}":                   (*Service).communityUpdate,
 		"POST /v1/community/skins/{id}/download":           (*Service).communityDownload,
 		"PUT /v1/community/skins/{id}/rating":              (*Service).communityRate,
+		"PUT /v1/community/skins/{id}/save":                (*Service).communitySaveSkin,
 
 		"DELETE /v1/users/me/dictionary/candidates":         (*Service).candidateDelete,
 		"PUT /v1/users/me/dictionary/snapshot":              (*Service).restoreDictionarySnapshot,
@@ -342,6 +361,8 @@ func (a *Service) error(w http.ResponseWriter, e error) {
 		writeError(w, 429, "rate_limit_exceeded")
 	case errors.Is(e, ErrConflict):
 		writeError(w, 409, "identity_already_linked")
+	case errors.Is(e, ErrRefreshSuperseded):
+		writeError(w, 409, "refresh_superseded")
 	default:
 		writeError(w, 503, "auth_unavailable")
 	}

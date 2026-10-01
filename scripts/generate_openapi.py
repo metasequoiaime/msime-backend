@@ -71,6 +71,9 @@ for path,method,title,body,response,protected,status in auth_operations:
     op={'summary':title,'tags':['用户体系'],'security':[{'userSession':[]}] if protected else [],'responses':responses,'description':'JSON 请求最多 16 KiB。绑定身份需要在挑战创建和验证时携带同一用户的会话令牌；绑定和注销要求最近 10 分钟内登录。设备令牌不能用于用户管理。'}
     if body: op['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     paths.setdefault(path,{})[method]=op
+# 并发刷新：轮换后 30 秒内再次出现的旧刷新令牌返回 409 refresh_superseded，不撤销会话。
+paths['/v1/auth/refresh']['post']['description']+=' 刷新令牌轮换后 30 秒内再次提交旧令牌（并发刷新输掉竞争）时返回 409 refresh_superseded，会话不撤销，调用方应改用并发请求拿到的新令牌；超过 30 秒的重放返回 401 并撤销整个会话。'
+paths['/v1/auth/refresh']['post']['responses']['409']=dict(paths['/v1/auth/refresh']['post']['responses']['409'],description='refresh_superseded：该刷新令牌 30 秒内刚被轮换，会话仍有效。')
 paths['/v1/users/me/avatar']['put']={'summary':'上传自定义头像','tags':['用户体系'],'security':[{'userSession':[]}],'description':'请求体为 PNG 或 JPEG 原始字节，最多 1 MiB，边长不超过 4096。服务端裁成居中正方形并重新编码为 256×256 JPEG，存入公开存储并替换原有自定义头像；每用户每小时最多 20 次。未配置头像存储时返回 503。','requestBody':{'required':True,'content':{'image/png':{'schema':string(format='binary')},'image/jpeg':{'schema':string(format='binary')}}},'responses':{'200':{'description':'成功，返回更新后的用户和身份','content':{'application/json':{'schema':obj({'user':user,'identities':{'type':'array','items':obj({'provider':provider,'subject':string()})}})}}},'400':{'description':'不是有效的 PNG/JPEG 图片'},'401':{'description':'需要登录'},'413':{'description':'超过 1 MiB'},'415':{'description':'不是 image/png 或 image/jpeg'},'429':{'description':'限流'},'502':{'description':'头像存储不可用'},'503':{'description':'未配置头像存储'}}}
 result['security']=[{'deviceToken':[]},{'userSession':[]}]
 result['components']['securitySchemes']['userSession']={'type':'http','scheme':'bearer','description':'登录返回的 access_token，不是 refresh_token 或供应商密钥。'}
@@ -214,12 +217,18 @@ community_design = obj({
 # 社区列表和详情接口的可选字段。已发布的客户端拒绝未知字段，所以只有显式请求时才出现。
 moderation_field = string(enum=['approved','pending','removed'],description='审核状态：仅在请求带 fields=moderation 时出现，且只出现在当前用户自己的作品上；他人的作品和匿名访问永远不带。事后审核模式下 pending 的作品已经公开，客户端只需对 removed 显示「已下架」，不显示下架原因。')
 moderation_param = {'name':'fields','in':'query','schema':string(enum=['','moderation'],default=''),'description':'moderation 表示在自己的作品上接收 moderation 审核状态；其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。'}
+# 收藏：fields=saved 时每个条目带 saved 和 saves，同样只发给显式请求的客户端。
+saved_fields = {'saved':{'type':'boolean','description':'当前用户是否收藏，匿名为 false。仅在请求带 fields=saved 时出现。'},'saves':{'type':'integer','description':'收藏总数。仅在请求带 fields=saved 时出现。'}}
+community_fields_param = {'name':'fields','in':'query','schema':string(enum=['','moderation','saved','moderation,saved'],default=''),'description':'逗号分隔：moderation 表示在自己的作品上接收 moderation 审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。不带此参数时响应与以前逐字节相同。'}
+community_scope_param = {'name':'scope','in':'query','schema':string(enum=['','mine','saved'],default=''),'description':'mine 只列出自己的作品（含已下架）；saved 只列出自己收藏的作品，按收藏时间倒序。两者都需要用户会话，否则 401 user_session_required；其他值返回 400 invalid_scope。'}
+save_request = obj({'saved':{'type':'boolean'}},['saved'],True)
+save_response = obj({'saved':{'type':'boolean'},'saves':{'type':'integer','description':'收藏总数'}},['saved','saves'])
 screening_responses = {'422':{'description':'名称、描述或内容命中拦截级敏感词（blocked_content），未保存；请修改后再提交','content':{'application/json':{'schema':{'$ref':'#/components/schemas/Error'}}}},'503':{'description':'服务不可用；或敏感词检查暂时不可用（screening_unavailable，带 Retry-After，未保存，稍后重试）','headers':{'Retry-After':{'description':'screening_unavailable 时的重试等待秒数','schema':{'type':'integer'}}}}}
 # 图库分类只是发布元数据，不属于 skin.toml 或键盘皮肤的 design；键盘皮肤与候选窗皮肤共用这组取值，与 internal/account 的 candidateSkinCategories 一致。
 candidate_categories=['nature','guofeng','acg','cute','food','tech','minimal','other']
 candidate_category=string(enum=candidate_categories,description='图库分类：nature 自然、guofeng 国风、acg 二次元、cute 可爱、food 美食、tech 科技夜色、minimal 简约、other 其他。')
 category_include_param={'name':'include','in':'query','schema':string(enum=['','category'],default=''),'description':'category 表示每个条目带上 category 字段；不带时响应与引入分类之前逐字节相同。其他值返回 400 invalid_include。'}
-community_skin = obj({'id':string(),'name':string(),'description':string(),'author':string(),'design':community_design,'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'moderation':moderation_field,'category':dict(candidate_category,description=candidate_category['description']+'仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。')})
+community_skin = obj({'id':string(),'name':string(),'description':string(),'author':string(),'design':community_design,'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'moderation':moderation_field,'category':dict(candidate_category,description=candidate_category['description']+'仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。'),**saved_fields})
 for path,method,title,body,response,status in [
  ('/v1/community/skins','get','浏览用户皮肤',None,obj({'skins':{'type':'array','items':community_skin},'has_more':{'type':'boolean'}}),'200'),
  ('/v1/community/skins','post','发布用户皮肤',obj({'id':string(format='uuid'),'name':string(maxLength=32),'description':string(maxLength=280),'design':community_design,'category':dict(candidate_category,description=candidate_category['description']+'缺省（或 null）为 other，未知值或空串返回 400 invalid_category；不参与重试比较，同一内容换分类重试仍返回 200 且保留已存的分类。滚动升级期间旧版本副本会以 400 invalid_json 拒绝该键。')},['id','name','description','design'],True),obj({'id':string()}),'201'),
@@ -227,17 +236,19 @@ for path,method,title,body,response,status in [
  ('/v1/community/skins/{id}','patch','作者修改皮肤分类',obj({'category':candidate_category},['category'],True),community_skin,'200'),
  ('/v1/community/skins/{id}','delete','作者下架皮肤',None,obj({'deleted':{'type':'boolean'}}),'200'),
  ('/v1/community/skins/{id}/download','post','下载皮肤并去重计数',None,obj({'design':community_design}),'200'),
- ('/v1/community/skins/{id}/rating','put','提交或修改评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200')
+ ('/v1/community/skins/{id}/rating','put','提交或修改评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200'),
+ ('/v1/community/skins/{id}/save','put','收藏或取消收藏皮肤',save_request,save_response,'200')
 ]:
     parameters=[]
     if '{id}' in path: parameters.append({'name':'id','in':'path','required':True,'schema':string(format='uuid')})
-    elif method=='get': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},{'name':'scope','in':'query','schema':string(enum=['','mine'],default=''),'description':'mine 只列出自己的作品（含已下架），需要用户会话，否则 401 user_session_required。'}]
-    if method in ('get','patch') and path in ('/v1/community/skins','/v1/community/skins/{id}'): parameters.append(moderation_param)
+    elif method=='get': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},community_scope_param]
+    if method=='get' and path in ('/v1/community/skins','/v1/community/skins/{id}'): parameters.append(community_fields_param)
+    if method=='patch' and path=='/v1/community/skins/{id}': parameters.append(moderation_param)
     if method=='get' and path=='/v1/community/skins': parameters.append({'name':'category','in':'query','schema':string(enum=candidate_categories),'description':'只列出该图库分类的作品；未知分类返回 400 invalid_category。'})
     if response is community_skin or method=='get' and path=='/v1/community/skins': parameters.append(category_include_param)
     operation={'summary':title,'tags':['皮肤社区'],'security':[] if method=='get' else [{'userSession':[]}], 'parameters':parameters,
-      'description':'仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重，评分需先下载且不能自评。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。'+('仅作者可修改（他人或不存在返回 404 skin_not_found），请求体只有 category（缺省、null 或未知值返回 400 invalid_category），返回与详情相同的作品；不改变审核状态，设为当前值同样返回 200。' if method=='patch' else '')+'详见 docs/skin-community.md。',
-      'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数无效'),('401','需要用户登录'),('403','尚未下载或正在评价自己的作品'),('404','皮肤不存在或非作者'),('409','发布配额已满或 UUID 冲突'),('429','请求过多'),('503','服务不可用')]}}}
+      'description':'仅支持数据型 Apple 键盘 v1。发布最多 50 款，重试使用相同 UUID；下载人数按账号去重。登录即可评分，不能给自己的作品评分（403 download_before_rating_or_own_skin），已下架的作品不能评分（404）。收藏请求体为 {"saved":bool}，重复提交结果相同，返回收藏状态与收藏总数；已下架的作品只有作者本人可收藏，其他人 404。列表每页 20 条，不包含照片字节。作者自己已下架的作品只对作者可见。'+('仅作者可修改（他人或不存在返回 404 skin_not_found），请求体只有 category（缺省、null 或未知值返回 400 invalid_category），返回与详情相同的作品；不改变审核状态，设为当前值同样返回 200。' if method=='patch' else '')+'详见 docs/skin-community.md。',
+      'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数无效'),('401','需要用户登录'),('403','正在评价自己的作品'),('404','皮肤不存在或非作者'),('409','发布配额已满或 UUID 冲突'),('429','请求过多'),('503','服务不可用')]}}}
     if body: operation['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     if path=='/v1/community/skins' and method=='post':
         operation['responses']['200']={'description':'同一发布请求的安全重试','content':{'application/json':{'schema':response}}}
@@ -245,7 +256,7 @@ for path,method,title,body,response,status in [
     paths.setdefault(path,{})[method]=operation
 # 候选窗皮肤包：skin.toml 加 PNG/JPEG，与 /v1/skins 精选目录分表，服务端重新编码图片。
 candidate_license = obj({'code':string(),'assets':string(),'source':string()},['code','assets','source'])
-community_candidate_skin = obj({'id':string(format='uuid'),'package_id':string(pattern='^[a-z0-9][a-z0-9._-]{0,63}$'),'name':string(),'description':string(),'author':string(),'version':string(),'license':candidate_license,'size':{'type':'integer','description':'重新编码后的图片总字节数'},'file_count':{'type':'integer','description':'图片数量，不含 skin.toml'},'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'created_at':string(format='date-time'),'visibility':string(enum=['private','public'],description='同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。'),'updated_at':string(format='date-time',description='同步字段，替换包或切换可见性时更新。'),'request_sha256':string(pattern='^[0-9a-f]{64}$',description='同步字段，仅作者可见：上传请求原始字节的摘要。'),'category':dict(candidate_category,description=candidate_category['description']+'仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。'),'moderation':moderation_field})
+community_candidate_skin = obj({'id':string(format='uuid'),'package_id':string(pattern='^[a-z0-9][a-z0-9._-]{0,63}$'),'name':string(),'description':string(),'author':string(),'version':string(),'license':candidate_license,'size':{'type':'integer','description':'重新编码后的图片总字节数'},'file_count':{'type':'integer','description':'图片数量，不含 skin.toml'},'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'created_at':string(format='date-time'),'visibility':string(enum=['private','public'],description='同步字段：仅在列表、详情带 fields=sync，发布请求带 visibility，或 sync、PUT、PATCH 接口的响应中出现；已发布客户端拒绝未知字段。'),'updated_at':string(format='date-time',description='同步字段，替换包或切换可见性时更新。'),'request_sha256':string(pattern='^[0-9a-f]{64}$',description='同步字段，仅作者可见：上传请求原始字节的摘要。'),'category':dict(candidate_category,description=candidate_category['description']+'仅在请求带 include=category 时出现；已发布客户端拒绝未知字段。'),'moderation':moderation_field,**saved_fields})
 candidate_files = {'type':'object','minProperties':1,'maxProperties':3,'additionalProperties':string(format='byte'),'description':'键为包内相对路径（仅 png/jpg/jpeg），值为标准 base64。'}
 community_candidate_skin_publish = obj({'id':string(format='uuid'),'name':string(minLength=1,maxLength=32),'description':string(maxLength=280),'manifest':string(maxLength=65536,description='原样的 skin.toml 文本'),'files':candidate_files,'visibility':string(enum=['private','public'],description='缺省为 public；带上该字段即选择在响应中接收同步字段。'),'category':dict(candidate_category,description=candidate_category['description']+'缺省为 other，未知值返回 400 invalid_category；不计入 request_sha256。')},['id','name','description','manifest','files'],True)
 community_candidate_skin_replace = obj({'name':string(minLength=1,maxLength=32),'description':string(maxLength=280),'manifest':string(maxLength=65536,description='原样的 skin.toml 文本，id 须与原包相同'),'files':candidate_files},['name','description','manifest','files'],True)
@@ -253,7 +264,7 @@ community_candidate_skin_sync_item = obj({'id':string(format='uuid'),'package_id
 community_candidate_skin_package = obj({'id':string(format='uuid'),'package_id':string(),'manifest':string(),'files':candidate_files})
 candidate_rules='只接受 skin.toml 加 PNG/JPEG 图片（最多 3 个文件，均须被清单引用）：单个图片不超过 1 MiB、合计不超过 2 MiB，每边 1 到 2048 像素、整包不超过 800 万像素；必须用 preview 指定一张包内图片作为预览图（重新编码后不超过 256 KiB），公开作品的 [license] 必须填写非空 assets，私有作品可省略。服务器解码后重新编码图片，去除 EXIF、XMP、ICC 等元数据。'
 for path,method,title,body,response,status,description in [
- ('/v1/community/candidate-skins','get','浏览候选窗皮肤',None,obj({'skins':{'type':'array','maxItems':20,'items':community_candidate_skin},'has_more':{'type':'boolean'}}),'200','公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，需要用户会话；只有 scope=mine 且 fields=sync 时才包含自己的私有作品。category 按图库分类筛选，未知分类返回 400 invalid_category。'),
+ ('/v1/community/candidate-skins','get','浏览候选窗皮肤',None,obj({'skins':{'type':'array','maxItems':20,'items':community_candidate_skin},'has_more':{'type':'boolean'}}),'200','公开目录，按发布时间倒序每页 20 条，不含清单和图片字节。scope=mine 只列出自己的作品，scope=saved 只列出自己收藏的作品（按收藏时间倒序），都需要用户会话；只有 scope 非空且 fields 含 sync 时才包含自己的私有作品，别人的私有作品永远不出现。category 按图库分类筛选，未知分类返回 400 invalid_category。'),
  ('/v1/community/candidate-skins','post','发布候选窗皮肤包',community_candidate_skin_publish,community_candidate_skin,'201','请求最多 3,200,000 字节（高于其他 JSON 接口的 64 KiB）。'+candidate_rules+'id 为客户端 UUID，同一请求重试返回 200；每个账号最多 100 款，其中公开最多 20 款。公开发布每小时最多 10 次，私有创建与替换共用每小时 60 次。'),
  ('/v1/community/candidate-skins/sync','get','同步自己的候选窗皮肤库',None,obj({'skins':{'type':'array','maxItems':100,'items':community_candidate_skin_sync_item}}),'200','返回自己的全部作品（含私有），按 updated_at 倒序，不分页。'),
  ('/v1/community/candidate-skins/{id}','get','候选窗皮肤详情',None,community_candidate_skin,'200','公开详情；登录时额外返回自己的评分与是否为作者。私有作品仅作者带 fields=sync 可见，其他情况返回 404。'),
@@ -262,18 +273,19 @@ for path,method,title,body,response,status,description in [
  ('/v1/community/candidate-skins/{id}','delete','作者下架候选窗皮肤',None,obj({'deleted':{'type':'boolean'}}),'200','仅作者可下架，连带删除图片、下载和评分记录。'),
  ('/v1/community/candidate-skins/{id}/preview','get','候选窗皮肤预览图',None,obj({'path':string(),'content_type':string(enum=['image/png','image/jpeg']),'data':string(format='byte')}),'200','返回重新编码后的预览图，data 为标准 base64；私有作品仅作者可取。'),
  ('/v1/community/candidate-skins/{id}/download','post','下载候选窗皮肤包并去重计数',None,community_candidate_skin_package,'200','返回原样清单和重新编码后的图片；下载人数按账号去重。私有作品仅作者可下载。'),
- ('/v1/community/candidate-skins/{id}/rating','put','为候选窗皮肤评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200','评分需先下载且不能自评，重复提交更新同一条评分；私有作品返回 404。'),
+ ('/v1/community/candidate-skins/{id}/rating','put','为候选窗皮肤评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200','登录即可评分，不需要先下载；不能给自己的作品评分（403 download_before_rating_or_own_skin），重复提交更新同一条评分；不存在、私有或已下架的作品返回 404。'),
+ ('/v1/community/candidate-skins/{id}/save','put','收藏或取消收藏候选窗皮肤',save_request,save_response,'200','请求体为 {"saved":bool}，重复提交结果相同，返回收藏状态与收藏总数。不存在、已下架（作者本人除外）或别人的私有作品收藏时返回 404 skin_not_found；取消收藏不看作品状态，总是返回 200。'),
 ]:
     parameters=[]
-    fields={'name':'fields','in':'query','schema':string(enum=['','sync','moderation','sync,moderation'],default=''),'description':'逗号分隔：sync 表示在响应中接收同步字段并可看到自己的私有作品；moderation 表示在自己的作品上接收审核状态。其他值返回 400 invalid_fields。'}
+    fields={'name':'fields','in':'query','schema':string(enum=['','sync','moderation','saved','sync,moderation','sync,saved','moderation,saved','sync,moderation,saved'],default=''),'description':'逗号分隔：sync 表示在响应中接收同步字段并可看到自己的私有作品；moderation 表示在自己的作品上接收审核状态；saved 表示每个条目带上 saved 与 saves。其他值返回 400 invalid_fields。'}
     if '{id}' in path: parameters.append({'name':'id','in':'path','required':True,'schema':string(format='uuid')})
-    elif method=='get' and path=='/v1/community/candidate-skins': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},{'name':'scope','in':'query','schema':string(enum=['','mine'],default='')},fields]
+    elif method=='get' and path=='/v1/community/candidate-skins': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},community_scope_param,fields]
     if path=='/v1/community/candidate-skins/{id}' and method=='get': parameters.append(fields)
     if method=='get' and path=='/v1/community/candidate-skins': parameters.append({'name':'category','in':'query','schema':string(enum=candidate_categories),'description':'只列出该图库分类的作品。'})
     if response is community_candidate_skin or method=='get' and path=='/v1/community/candidate-skins': parameters.append(category_include_param)
     operation={'summary':title,'tags':['皮肤社区'],'security':[] if method=='get' and not path.endswith('/sync') else [{'userSession':[]}],'parameters':parameters,
       'description':description+' 详见 docs/skin-community.md。',
-      'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数、清单或图片无效'),('401','需要用户登录'),('403','尚未下载或正在评价自己的作品'),('404','皮肤不存在、为他人的私有作品或非作者'),('409','配额已满、UUID 冲突或替换包 id 不符'),('415','需要 application/json'),('429','请求过多'),('503','服务不可用或图片处理繁忙')]}}}
+      'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数、清单或图片无效'),('401','需要用户登录'),('403','正在评价自己的作品'),('404','皮肤不存在、已下架、为他人的私有作品或非作者'),('409','配额已满、UUID 冲突或替换包 id 不符'),('415','需要 application/json'),('429','请求过多'),('503','服务不可用或图片处理繁忙')]}}}
     if body: operation['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     if path=='/v1/community/candidate-skins' and method=='post': operation['responses']['200']={'description':'同一发布请求的安全重试','content':{'application/json':{'schema':response}}}
     if (path,method) in (('/v1/community/candidate-skins','post'),('/v1/community/candidate-skins/{id}','put')): operation['responses'].update(screening_responses)
@@ -281,25 +293,26 @@ for path,method,title,body,response,status,description in [
 # 插件社区：plugin.toml 加音频与说明文本的 zip 包，服务端只校验、存储和分发原始字节，从不执行。
 plugin_kind = string(enum=['sound','music','command_table','effect'])
 plugin_id = string(pattern='^[a-z0-9][a-z0-9._-]{0,63}$')
-community_plugin = obj({'id':string(format='uuid'),'kind':plugin_kind,'plugin_id':plugin_id,'name':string(),'description':string(),'author':string(),'version':string(),'license':string(),'size':{'type':'integer','description':'zip 包字节数'},'sha256':string(pattern='^[0-9a-f]{64}$',description='zip 包的 SHA-256'),'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'created_at':string(format='date-time'),'moderation':moderation_field})
+community_plugin = obj({'id':string(format='uuid'),'kind':plugin_kind,'plugin_id':plugin_id,'name':string(),'description':string(),'author':string(),'version':string(),'license':string(),'size':{'type':'integer','description':'zip 包字节数'},'sha256':string(pattern='^[0-9a-f]{64}$',description='zip 包的 SHA-256'),'downloads':{'type':'integer'},'rating_count':{'type':'integer'},'rating_average':{'type':'number'},'owned':{'type':'boolean'},'my_rating':{'type':'integer'},'created_at':string(format='date-time'),'moderation':moderation_field,**saved_fields})
 community_plugin_publish = obj({'id':string(format='uuid'),'name':string(minLength=1,maxLength=32),'description':string(maxLength=280),'kind':plugin_kind,'plugin_id':plugin_id,'version':string(minLength=1,maxLength=32),'archive':string(format='byte',description='zip 包的标准 base64，解码后不超过 8 MiB')},['id','name','description','kind','plugin_id','version','archive'],True)
 community_plugin_package = obj({'id':string(format='uuid'),'kind':plugin_kind,'plugin_id':plugin_id,'version':string(),'size':{'type':'integer'},'sha256':string(pattern='^[0-9a-f]{64}$'),'archive':string(format='byte')})
 plugin_rules='zip 包不超过 8 MiB、最多 64 个成员和 16 个文件，解压总量不超过 24 MiB 且不超过包体 100 倍加 1 MiB；拒绝绝对路径、..、反斜杠、符号链接、加密成员和嵌套压缩包。包内恰好一个 plugin.toml（schema_version = 1，严格解析，未知键拒绝），kind 与 plugin_id、version 须与请求一致，permissions 必须为空；引用的音频须存在且为 .wav/.ogg 并匹配文件头（sound 采样只能是 .wav），effect 只含 [effect] 参数表、不带任何音频；其余文件只能是 .txt/.md 说明。'
 for path,method,title,body,response,status,description in [
- ('/v1/community/plugins','get','浏览社区插件',None,obj({'plugins':{'type':'array','maxItems':20,'items':community_plugin},'has_more':{'type':'boolean'}}),'200','按发布时间倒序每页 20 条，可按 kind 过滤、按名称搜索，不含 zip 包字节。scope=mine 只列出自己的作品（含已下架），需要用户会话。'),
+ ('/v1/community/plugins','get','浏览社区插件',None,obj({'plugins':{'type':'array','maxItems':20,'items':community_plugin},'has_more':{'type':'boolean'}}),'200','按发布时间倒序每页 20 条，可按 kind 过滤、按名称搜索，不含 zip 包字节。scope=mine 只列出自己的作品（含已下架），scope=saved 只列出自己收藏的作品（按收藏时间倒序），都需要用户会话。'),
  ('/v1/community/plugins','post','发布插件包',community_plugin_publish,community_plugin,'201','请求最多 11,300,000 字节。'+plugin_rules+'id 为客户端 UUID，同一请求重试返回 200；每个账号最多 20 个插件、包体合计不超过 32 MiB，每小时最多发布 10 次；同一账号的发布逐个处理，同一进程最多同时接收 4 个发布，排队超时返回 503 plugin_busy。'),
  ('/v1/community/plugins/{id}','get','插件详情',None,community_plugin,'200','公开详情；登录时额外返回自己的评分与是否为作者。'),
  ('/v1/community/plugins/{id}','delete','作者下架插件',None,obj({'deleted':{'type':'boolean'}}),'200','仅作者可下架，连带删除下载和评分记录。'),
  ('/v1/community/plugins/{id}/download','post','下载插件包并去重计数',None,community_plugin_package,'200','返回原样 zip 包（标准 base64）与 SHA-256，客户端安装前应校验摘要；下载人数按账号去重。每个账号每小时最多 60 次下载，同一进程最多同时发送 8 个包，排队超时返回 503 plugin_busy。'),
- ('/v1/community/plugins/{id}/rating','put','为插件评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200','评分需先下载且不能自评，重复提交更新同一条评分。'),
+ ('/v1/community/plugins/{id}/rating','put','为插件评分',obj({'stars':{'type':'integer','minimum':1,'maximum':5}},['stars'],True),obj({'stars':{'type':'integer'}}),'200','登录即可评分，不需要先下载；不能给自己的作品评分（403 download_before_rating_or_own_plugin），重复提交更新同一条评分；不存在或已下架的插件返回 404。'),
+ ('/v1/community/plugins/{id}/save','put','收藏或取消收藏插件',save_request,save_response,'200','请求体为 {"saved":bool}，重复提交结果相同，返回收藏状态与收藏总数。不存在或已下架（作者本人除外）的插件收藏时返回 404 plugin_not_found；取消收藏不看作品状态，总是返回 200。'),
 ]:
     parameters=[]
     if '{id}' in path: parameters.append({'name':'id','in':'path','required':True,'schema':string(format='uuid')})
-    elif method=='get': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'kind','in':'query','schema':string(enum=['','sound','music','command_table','effect'],default='')},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},{'name':'scope','in':'query','schema':string(enum=['','mine'],default=''),'description':'mine 只列出自己的作品（含已下架），需要用户会话，否则 401 user_session_required。'}]
-    if method=='get' and path in ('/v1/community/plugins','/v1/community/plugins/{id}'): parameters.append(moderation_param)
+    elif method=='get': parameters=[{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'kind','in':'query','schema':string(enum=['','sound','music','command_table','effect'],default='')},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':100000,'default':0}},community_scope_param]
+    if method=='get' and path in ('/v1/community/plugins','/v1/community/plugins/{id}'): parameters.append(community_fields_param)
     operation={'summary':title,'tags':['插件社区'],'security':[] if method=='get' else [{'userSession':[]}],'parameters':parameters,
       'description':description+' 详见 docs/plugin-community.md。',
-      'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数、清单或 zip 包无效'),('401','需要用户登录'),('403','尚未下载或正在评价自己的作品'),('404','插件不存在或非作者'),('409','配额已满或 UUID 冲突'),('415','需要 application/json'),('429','请求过多'),('503','服务不可用或校验繁忙')]}}}
+      'responses':{status:{'description':'成功','content':{'application/json':{'schema':response}}},**{c:{'description':m} for c,m in [('400','参数、清单或 zip 包无效'),('401','需要用户登录'),('403','正在评价自己的作品'),('404','插件不存在、已下架或非作者'),('409','配额已满或 UUID 冲突'),('415','需要 application/json'),('429','请求过多'),('503','服务不可用或校验繁忙')]}}}
     if body: operation['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     if path=='/v1/community/plugins' and method=='post':
         operation['responses']['200']={'description':'同一发布请求的安全重试','content':{'application/json':{'schema':response}}}
@@ -323,8 +336,8 @@ for path,method,title,body,response in [
     elif method=='get': parameters=[{'name':'kind','in':'query','required':True,'schema':string(enum=['dictionary','reply'])},{'name':'scope','in':'query','schema':string(enum=['','saved','mine'])},{'name':'q','in':'query','schema':string(maxLength=128)},{'name':'offset','in':'query','schema':{'type':'integer','minimum':0,'maximum':1000000}}]
     if method=='get' and path in ('/v1/community/resources','/v1/community/resources/{id}'): parameters.append(moderation_param)
     operation={'summary':title,'tags':['创作社区'],'security':[] if method=='get' else [{'userSession':[]}],'parameters':parameters,
-      'description':'发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重；收藏后可评分，不允许自评。查看版本不会自动覆盖个人词库。',
-      'responses':{'200':{'description':'成功','content':{'application/json':{'schema':response}}},**{code:{'description':message} for code,message in [('400','内容无效'),('401','需要登录'),('403','需先收藏且不能自评'),('404','作品不存在或非作者'),('409','版本冲突或达到上限'),('429','请求过多'),('503','服务不可用')]}}}
+      'description':'发现和详情公开；saved/mine 范围需要用户会话。词库仅携带显式选定的 1–128 条记录，由 Engine 校验；回复仅携带提示词（不含密钥）。每账号最多 50 份。新建 revision=0，更新携带当前 revision，冲突返回 409；相同内容重试不增加版本。收藏按账号去重。登录即可评分，不需要先收藏；不能给自己的作品评分（403 save_before_rating_or_own_resource），不存在或已下架的作品返回 404 resource_not_found。查看版本不会自动覆盖个人词库。',
+      'responses':{'200':{'description':'成功','content':{'application/json':{'schema':response}}},**{code:{'description':message} for code,message in [('400','内容无效'),('401','需要登录'),('403','正在评价自己的作品'),('404','作品不存在或非作者'),('409','版本冲突或达到上限'),('429','请求过多'),('503','服务不可用')]}}}
     if body: operation['requestBody']={'required':True,'content':{'application/json':{'schema':body}}}
     if method=='post': operation['responses']['201']=operation['responses']['200']
     if path=='/v1/community/resources' and method=='post': operation['responses'].update(screening_responses)

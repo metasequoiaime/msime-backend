@@ -38,3 +38,11 @@ CREATE TABLE IF NOT EXISTS community_plugin_ratings (
  stars integer NOT NULL CHECK(stars BETWEEN 1 AND 5),
  PRIMARY KEY(pack_id,user_id)
 );
+-- 插件的收藏，与 community_skin_saves 相同：created_at 是收藏时间，`scope=saved` 按它倒序列出。
+CREATE TABLE IF NOT EXISTS community_plugin_saves (
+ pack_id text NOT NULL REFERENCES community_plugins(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(pack_id,user_id)
+);
+CREATE INDEX IF NOT EXISTS community_plugin_saves_user ON community_plugin_saves(user_id,created_at DESC);

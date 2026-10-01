@@ -59,8 +59,9 @@ func TestCommunityPublishDownloadRatingOwnershipAndRestart(t *testing.T) {
 	if w := request("POST", "/v1/community/skins", body, user.AccessToken); w.Code != 409 {
 		t.Fatal("identity", w.Code)
 	}
-	if w := request("PUT", path+"/rating", `{"stars":5}`, user.AccessToken); w.Code != 403 {
-		t.Fatal("rating before download", w.Code)
+	// 登录即可评分，不需要先下载。
+	if w := request("PUT", path+"/rating", `{"stars":5}`, user.AccessToken); w.Code != 200 {
+		t.Fatal("rating before download", w.Code, w.Body.String())
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
