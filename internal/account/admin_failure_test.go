@@ -1,7 +1,9 @@
 package account
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -11,13 +13,17 @@ import (
 
 // consoleFailureFixture is the state every console failure case starts from; it is rebuilt before each attempt so a write that succeeded once runs against the same rows again.
 type consoleFailureFixture struct {
-	user string
+	user, token string
 }
 
 func seedConsoleFailureFixture(t *testing.T, db *Store) consoleFailureFixture {
 	t.Helper()
 	ctx := t.Context()
 	if _, err := db.pool.Exec(ctx, `TRUNCATE admin_members,admin_sessions,admin_audit,admin_tokens,admin_preferences,admin_notifications,admin_notification_reads,admin_notices,admin_crash_groups,admin_events,admin_incidents,admin_sensitive_words,admin_sensitive_hits,admin_service_daily,community_reports,site_settings,auth_users RESTART IDENTITY CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	// The permissions grant case changes the shared role matrix, which TRUNCATE does not reset.
+	if _, err := db.pool.Exec(ctx, `DELETE FROM admin_role_permissions WHERE role='readonly' AND permission='ban_users'`); err != nil {
 		t.Fatal(err)
 	}
 	user := complete(t, db, Identity{"email", randomToken() + "@example.test"})
@@ -53,12 +59,15 @@ func seedConsoleFailureFixture(t *testing.T, db *Store) consoleFailureFixture {
 		}
 	}
 	insertCandidateSkin(t, db, "fa334455-1234-4234-8234-123456789abc", uid, "Candidate")
-	return consoleFailureFixture{user: uid}
+	return consoleFailureFixture{user: uid, token: user.AccessToken}
 }
 
 // Every console endpoint answers a failed database statement with 503, or, where a statement only feeds optional context (hit counts written back, notes), with the answer it gives without it. Each statement of each request is cancelled in turn at the driver, against freshly seeded rows.
 func TestConsoleEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 	db := testStore(t)
+	t.Cleanup(func() {
+		db.pool.Exec(context.Background(), `DELETE FROM admin_role_permissions WHERE role='readonly' AND permission='ban_users'`)
+	})
 	owner := AdminAccess{Actor: "google:o:owner@example.test", Email: "owner@example.test", Role: RoleMaintainer, Permissions: AllAdminPermissions(), Owner: true}
 	cases := []struct {
 		name, method, path string
@@ -72,7 +81,9 @@ func TestConsoleEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 		{"me set pref", "POST", "/api/me", func(consoleFailureFixture) string { return `{"action":"set_pref","key":"notify_report","value":false}` }},
 		{"me regenerate token", "POST", "/api/me", func(consoleFailureFixture) string { return `{"action":"regenerate_token"}` }},
 		{"permissions", "GET", "/api/permissions", nil},
-		{"permissions grant", "POST", "/api/permissions", func(consoleFailureFixture) string { return `{"action":"grant","role":"readonly","permission":"ban_users"}` }},
+		{"permissions grant", "POST", "/api/permissions", func(consoleFailureFixture) string {
+			return `{"action":"grant","role":"readonly","permission":"ban_users"}`
+		}},
 		{"user stats", "GET", "/api/users/stats", nil},
 		{"user", "GET", "/api/users/{user}", nil},
 		{"community counts", "GET", "/api/community/counts", nil},
@@ -86,18 +97,40 @@ func TestConsoleEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 		{"notices", "GET", "/api/notices", nil},
 		{"crash groups", "GET", "/api/crash-groups", nil},
 		{"crash group", "GET", "/api/crash-groups/0123456789abcdef", nil},
-		{"ban", "POST", "/api/actions", func(f consoleFailureFixture) string { return `{"action":"ban_user","id":"` + f.user + `","reason":"广告"}` }},
-		{"approve", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"approve_content","section":"skins","id":"fail-skin"}` }},
-		{"remove", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"remove_content","section":"dictionaries","id":"fail-dict","reason":"广告"}` }},
-		{"restore", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"restore_content","section":"replies","id":"fail-reply"}` }},
-		{"restore to", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"restore_content","section":"skins","id":"fail-skin","value":{"to":"approved"}}` }},
-		{"add sensitive word", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"add_sensitive_word","value":{"pattern":"/微\\s*信/","category":"ad","level":"block"}}` }},
-		{"sensitive level", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"set_sensitive_word_level","ids":["1"],"value":"block"}` }},
+		{"ban", "POST", "/api/actions", func(f consoleFailureFixture) string {
+			return `{"action":"ban_user","id":"` + f.user + `","reason":"广告"}`
+		}},
+		{"approve", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"approve_content","section":"skins","id":"fail-skin"}`
+		}},
+		{"remove", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"remove_content","section":"dictionaries","id":"fail-dict","reason":"广告"}`
+		}},
+		{"restore", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"restore_content","section":"replies","id":"fail-reply"}`
+		}},
+		{"restore to", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"restore_content","section":"skins","id":"fail-skin","value":{"to":"approved"}}`
+		}},
+		{"add sensitive word", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"add_sensitive_word","value":{"pattern":"/微\\s*信/","category":"ad","level":"block"}}`
+		}},
+		{"sensitive level", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"set_sensitive_word_level","ids":["1"],"value":"block"}`
+		}},
 		{"delete sensitive word", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"delete_sensitive_word","ids":["1"]}` }},
-		{"save notice", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"save_notice_draft","id":"1","value":{"title":"标题","body":"正文","targets":["all"],"channels":["site"]}}` }},
-		{"publish notice", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"publish_notice","id":"1","value":{"title":"标题","body":"正文","targets":["all"],"channels":["site"]}}` }},
-		{"crash status", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"crash_group_status","id":"0123456789abcdef","value":"known"}` }},
-		{"update incident", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"update_incident","id":"1","value":{"description":"已切换备用通道"},"reason":"补充"}` }},
+		{"save notice", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"save_notice_draft","id":"1","value":{"title":"标题","body":"正文","targets":["all"],"channels":["site"]}}`
+		}},
+		{"publish notice", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"publish_notice","id":"1","value":{"title":"标题","body":"正文","targets":["all"],"channels":["site"]}}`
+		}},
+		{"crash status", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"crash_group_status","id":"0123456789abcdef","value":"known"}`
+		}},
+		{"update incident", "POST", "/api/actions", func(consoleFailureFixture) string {
+			return `{"action":"update_incident","id":"1","value":{"description":"已切换备用通道"},"reason":"补充"}`
+		}},
 		{"resolve incident", "POST", "/api/actions", func(consoleFailureFixture) string { return `{"action":"resolve_incident","id":"1"}` }},
 		{"site settings", "POST", "/api/site-settings", func(consoleFailureFixture) string { return `{"lanzou_url":"https://example.com/a"}` }},
 	}
@@ -152,6 +185,82 @@ func TestConsoleEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
 				}
 				if !json.Valid(w.Body.Bytes()) && w.Header().Get("Content-Type") != baseline.Header().Get("Content-Type") {
 					t.Fatalf("statement %d: unexpected body %q", i, w.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// The client and website endpoints the console added or changed answer a failed database statement the same way.
+func TestConsolePublicEndpointsAnswerEveryDatabaseFailure(t *testing.T) {
+	db := testStore(t)
+	cases := []struct {
+		name, method, path string
+		body               string
+		user               bool
+	}{
+		{"publish skin", "POST", "/v1/community/skins", `{"id":"fb334455-1234-4234-8234-000000000001","name":"秋色","description":"示例","design":` + communityFixture + `}`, true},
+		{"publish reply", "POST", "/v1/community/resources", `{"id":"fb334455-1234-4234-8234-000000000002","kind":"reply","name":"模板","description":"","content":{"prompt":"礼貌回复"}}`, true},
+		{"report", "POST", "/v1/community/reports", `{"kind":"skins","item_id":"fail-skin","reason":"广告"}`, true},
+		{"notices", "GET", "/v1/notices?platform=windows&channel=site", "", false},
+		{"crash telemetry", "POST", "/v1/telemetry/events", `{"id":"telemetry-failure-crash-01","kind":"crash","platform":"windows","version":"1","message":"boom","stack":"at main.go:1\nat runtime.go:2","install_id":"device-windows-0001"}`, false},
+		{"active telemetry", "POST", "/v1/telemetry/events", `{"id":"telemetry-failure-active-1","kind":"active","platform":"windows","version":"1","install_id":"device-windows-0002"}`, false},
+		{"site mirrors", "GET", "/v1/site/download-mirrors", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			trace := &statementCancellation{}
+			cfg := db.pool.Config()
+			cfg.ConnConfig.Tracer = trace
+			pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pool.Close()
+			a := &Service{store: &Store{pool: pool}}
+			mux := http.NewServeMux()
+			Mount(mux, a)
+			// The server package mounts these two next to the account routes.
+			mux.HandleFunc("POST /v1/community/reports", Route(a, "POST /v1/community/reports", (*Service).CommunityReport))
+			mux.HandleFunc("GET /v1/notices", Route(a, "GET /v1/notices", (*Service).PublicNotices))
+			call := func(f consoleFailureFixture) *httptest.ResponseRecorder {
+				token := ""
+				if tc.user {
+					token = f.token
+				}
+				r := jsonRequest(tc.method, tc.path, tc.body, token)
+				w := httptest.NewRecorder()
+				if strings.HasPrefix(tc.path, "/v1/telemetry/") {
+					a.Telemetry(w, r)
+				} else {
+					mux.ServeHTTP(w, r)
+				}
+				return w
+			}
+			trace.mu.Lock()
+			trace.statements = nil
+			trace.mu.Unlock()
+			baseline := call(seedConsoleFailureFixture(t, db))
+			if baseline.Code >= 300 {
+				t.Fatal("baseline", baseline.Code, baseline.Body.String())
+			}
+			trace.mu.Lock()
+			statements := len(trace.statements)
+			trace.mu.Unlock()
+			if statements == 0 {
+				t.Fatal("no database statement traced")
+			}
+			for i := 1; i <= statements; i++ {
+				f := seedConsoleFailureFixture(t, db)
+				trace.mu.Lock()
+				trace.at, trace.seen, trace.statements = i, 0, nil
+				trace.mu.Unlock()
+				w := call(f)
+				trace.mu.Lock()
+				trace.at = 0
+				trace.mu.Unlock()
+				if w.Code < 500 && w.Code != baseline.Code {
+					t.Fatalf("statement %d: HTTP %d %s", i, w.Code, w.Body.String())
 				}
 			}
 		})
