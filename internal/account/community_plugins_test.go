@@ -784,46 +784,65 @@ func TestCommunityPluginTransferSlots(t *testing.T) {
 }
 
 func TestCommunityPluginKindSchemaUpgrade(t *testing.T) {
-	db := testStore(t)
-	owner := complete(t, db, Identity{"email", "plugin-kind-upgrade@example.test"})
-	// Rebuild the released table shape, whose auto-named kind check predates effect packs, under the migration lock; then migrate it forward twice.
-	tx, err := db.pool.Begin(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback(context.Background())
-	for _, statement := range []string{
-		`SELECT pg_advisory_xact_lock(8372419)`,
-		`ALTER TABLE community_plugins DROP CONSTRAINT community_plugins_kind_known`,
-		`ALTER TABLE community_plugins ADD CONSTRAINT community_plugins_kind_check CHECK(kind IN ('sound','music','command_table'))`,
+	// 两种已发布过的表形状：特效包之前列上自动命名的三类型约束，以及新增四种类型之前的四类型命名约束。
+	for name, statements := range map[string][]string{
+		"before effect packs": {
+			`ALTER TABLE community_plugins DROP CONSTRAINT community_plugins_kind_known`,
+			`ALTER TABLE community_plugins ADD CONSTRAINT community_plugins_kind_check CHECK(kind IN ('sound','music','command_table'))`,
+		},
+		"before data kinds": {
+			`ALTER TABLE community_plugins DROP CONSTRAINT community_plugins_kind_known`,
+			`ALTER TABLE community_plugins ADD CONSTRAINT community_plugins_kind_known CHECK(kind IN ('sound','music','command_table','effect'))`,
+		},
 	} {
-		if _, err = tx.Exec(t.Context(), statement); err != nil {
-			t.Fatal(statement, err)
-		}
-	}
-	if err = tx.Commit(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	insert := func(id, kind string) error {
-		_, err := db.pool.Exec(t.Context(), `INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,version,license,manifest,archive,request_sha256) VALUES($1,$2,$3,'upgrade','n','1','MIT','m'::bytea,'a'::bytea,repeat('0',64))`, id, owner.User.ID, kind)
-		return err
-	}
-	if insert("ee334455-1234-4234-8234-000000000001", "effect") == nil {
-		t.Fatal("the released shape accepted an effect pack")
-	}
-	for range 2 {
-		if err = db.Migrate(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var constraints int
-	if err = db.pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_constraint WHERE conrelid='community_plugins'::regclass AND conname LIKE 'community_plugins_kind%'`).Scan(&constraints); err != nil || constraints != 1 {
-		t.Fatal("kind constraints", constraints, err)
-	}
-	if err = insert("ee334455-1234-4234-8234-000000000002", "effect"); err != nil {
-		t.Fatal("effect pack refused after the upgrade", err)
-	}
-	if insert("ee334455-1234-4234-8234-000000000003", "theme") == nil {
-		t.Fatal("unknown kind accepted after the upgrade")
+		t.Run(name, func(t *testing.T) {
+			db := testStore(t)
+			owner := complete(t, db, Identity{"email", "plugin-kind-upgrade@example.test"})
+			// 在迁移锁下重建旧形状，然后连续迁移两次。
+			tx, err := db.pool.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(context.Background())
+			for _, statement := range append([]string{`SELECT pg_advisory_xact_lock(8372419)`}, statements...) {
+				if _, err = tx.Exec(t.Context(), statement); err != nil {
+					t.Fatal(statement, err)
+				}
+			}
+			if err = tx.Commit(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			insert := func(n int, kind string) error {
+				_, err := db.pool.Exec(t.Context(), `INSERT INTO community_plugins(id,owner_id,kind,plugin_id,name,version,license,manifest,archive,request_sha256) VALUES($1,$2,$3,'upgrade','n','1','MIT','m'::bytea,'a'::bytea,repeat('0',64))`, fmt.Sprintf("ee334455-1234-4234-8234-%012d", n), owner.User.ID, kind)
+				return err
+			}
+			if insert(1, "wordbook") == nil {
+				t.Fatal("the released shape accepted a wordbook pack")
+			}
+			// 启动探测要能发现旧约束，否则已有数据库永远不会执行这次迁移。
+			if db.Ready(t.Context()) == nil {
+				t.Fatal("Ready accepted the released kind constraint")
+			}
+			for range 2 {
+				if err = db.Migrate(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = db.Ready(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			var constraints int
+			if err = db.pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_constraint WHERE conrelid='community_plugins'::regclass AND conname LIKE 'community_plugins_kind%'`).Scan(&constraints); err != nil || constraints != 1 {
+				t.Fatal("kind constraints", constraints, err)
+			}
+			for i, kind := range pluginKinds {
+				if err = insert(10+i, kind); err != nil {
+					t.Fatal(kind, "refused after the upgrade", err)
+				}
+			}
+			if insert(2, "theme") == nil {
+				t.Fatal("unknown kind accepted after the upgrade")
+			}
+		})
 	}
 }

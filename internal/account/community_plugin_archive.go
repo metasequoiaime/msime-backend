@@ -65,8 +65,37 @@ const (
 	maxEffectParticles = 64
 )
 
-// pluginKinds is the kind whitelist, the client's PluginKind::ALL.
-var pluginKinds = []string{"sound", "music", "command_table", "effect"}
+// 新类型的数据边界，与客户端 plugins/{phrase_table,helpcode_pack,wordbook_pack,symbol_set}.rs 一致。
+const (
+	// readPluginArchive 对不超过这个大小的 `.txt`/`.tsv` 成员保留完整字节，供数据文件的内容校验使用；单个数据文件的上限都不超过它，总量仍受 24 MiB 解压上限约束。
+	maxPluginDataBytes = 4 << 20
+
+	maxPhraseRows            = 2000
+	maxPhraseKey             = 32
+	maxPhraseText            = 199
+	maxHelpcodeBytes         = 1 << 20
+	maxHelpcodeEntries       = 30000
+	maxWordbookBytes         = 4 << 20
+	maxWordbookEntries       = 20000
+	maxWordbookWordChars     = 64
+	maxWordbookPhoneticChars = 64
+	maxWordbookMeaningChars  = 256
+	maxWordbookNameChars     = 64
+	// 客户端把单词本插件的书 id 记为 `pack-<id>`，书 id 最长 64 个字符，所以插件 id 最长 59 个字符。
+	maxWordbookIDChars    = 59
+	maxSymbolGroups       = 32
+	maxSymbolGroupItems   = 512
+	maxSymbolItems        = 2048
+	maxSymbolTitleBytes   = 48
+	maxSymbolKeywordBytes = 256
+	maxSymbolItemUnits    = 64
+)
+
+// pluginKinds 是可发布类型的白名单，即客户端的 PluginKind::ALL。
+var pluginKinds = []string{"sound", "music", "command_table", "effect", "helpcode", "symbol_set", "phrase_table", "wordbook"}
+
+// legacyPluginKinds 是不支持 `kinds` 声明的旧客户端能识别的全部类型，列表和详情在客户端没有声明时只返回这些类型。它是冻结的：以后新增的类型只加进 pluginKinds，不加进这里，否则旧客户端会收到不认识的类型。
+var legacyPluginKinds = []string{"sound", "music", "command_table", "effect"}
 
 // builtinPluginIDs are the ids the client bundles for a kind; it refuses to import a pack over one of them.
 var builtinPluginIDs = map[string][]string{
@@ -127,6 +156,12 @@ func pluginExtension(name string) string {
 func pluginAudio(name string) bool {
 	ext := pluginExtension(name)
 	return ext == "wav" || ext == "ogg"
+}
+
+// pluginDataExtension 报告成员是否可能是数据文件（`.txt`/`.tsv`），这类成员的完整字节会被保留下来。
+func pluginDataExtension(name string) bool {
+	ext := pluginExtension(name)
+	return ext == "txt" || ext == "tsv"
 }
 
 func pluginNotice(name string) bool {
@@ -262,7 +297,7 @@ func readPluginArchive(archive []byte) (map[string]pluginMember, string) {
 		}
 		m.head = head[:n]
 		read := int64(n)
-		if name == "plugin.toml" && m.size <= maxPluginManifestBytes {
+		if name == "plugin.toml" && m.size <= maxPluginManifestBytes || pluginDataExtension(name) && m.size <= maxPluginDataBytes {
 			rest, err := io.ReadAll(limited)
 			if err != nil {
 				r.Close()
@@ -345,6 +380,22 @@ type pluginManifest struct {
 		DurationMS *int64    `toml:"duration_ms"`
 		Particles  *int64    `toml:"particles"`
 	} `toml:"effect"`
+	Phrases *[]struct {
+		Key  *string `toml:"key"`
+		Text *string `toml:"text"`
+	} `toml:"phrases"`
+	Helpcode *struct {
+		Table *string `toml:"table"`
+	} `toml:"helpcode"`
+	Wordbook *struct {
+		File *string `toml:"file"`
+	} `toml:"wordbook"`
+	Groups *[]struct {
+		Tab      *string   `toml:"tab"`
+		Title    *string   `toml:"title"`
+		Keywords *string   `toml:"keywords"`
+		Items    *[]string `toml:"items"`
+	} `toml:"groups"`
 }
 
 var pluginCommonKeys = []string{"schema_version", "kind", "id", "name", "version", "license", "author", "description", "permissions"}
@@ -354,6 +405,10 @@ var pluginKindKeys = map[string][]string{
 	"music":         {"music"},
 	"command_table": {"commands"},
 	"effect":        {"effect"},
+	"helpcode":      {"helpcode"},
+	"symbol_set":    {"groups"},
+	"phrase_table":  {"phrases"},
+	"wordbook":      {"wordbook"},
 }
 
 // validPluginArchive runs every server-side check on an uploaded pack and returns what is stored, or the error code. It never decodes audio beyond its magic bytes and never executes anything.
@@ -405,6 +460,8 @@ func validPluginArchive(archive []byte) (pluginPack, string) {
 		return pluginPack{}, "invalid_plugin_manifest"
 	}
 	var audio []string
+	// data 是清单点名的数据文件：文件名到大小上限。
+	var data map[string]int
 	var fileLimit, totalLimit, countLimit int
 	switch kind {
 	case "sound":
@@ -417,18 +474,36 @@ func validPluginArchive(archive []byte) (pluginPack, string) {
 		ok = validPluginCommands(table, m)
 	case "effect":
 		ok = validPluginEffect(table, m)
+	case "phrase_table":
+		ok = validPluginPhrases(table, m)
+	case "helpcode":
+		data, ok = validPluginHelpcode(table, m)
+	case "wordbook":
+		data, ok = validPluginWordbook(table, m)
+	case "symbol_set":
+		ok = validPluginSymbols(table, m)
 	}
 	if !ok {
 		return pluginPack{}, "invalid_plugin_manifest"
 	}
-	if code := validPluginFiles(members, audio, fileLimit, totalLimit, countLimit); code != "" {
+	if code := validPluginFiles(members, audio, data, fileLimit, totalLimit, countLimit); code != "" {
 		return pluginPack{}, code
+	}
+	// 数据文件的存在和大小已经检查过，这里按该类型的语法校验内容。
+	switch kind {
+	case "helpcode":
+		ok = validHelpcodeTable(members[*m.Helpcode.Table].data)
+	case "wordbook":
+		ok = validWordbookEntries(members[*m.Wordbook.File].data)
+	}
+	if !ok {
+		return pluginPack{}, "invalid_plugin_manifest"
 	}
 	return pluginPack{Kind: kind, ID: *m.ID, Name: *m.Name, Version: *m.Version, License: *m.License, Manifest: raw}, ""
 }
 
-// validPluginFiles applies check_files: every named audio file is present, non-empty, within the kind's bounds and starts with its format's magic bytes; every other file is the manifest or a small notice.
-func validPluginFiles(members map[string]pluginMember, audio []string, fileLimit, totalLimit, countLimit int) string {
+// validPluginFiles 对应客户端的 check_files：清单点名的音频文件必须存在、非空、在该类型的上限内且文件头与格式相符；清单点名的数据文件（data，文件名到上限）必须存在、非空且不超过上限，内容由各类型自己校验；其余文件只能是清单或小的说明文件。
+func validPluginFiles(members map[string]pluginMember, audio []string, data map[string]int, fileLimit, totalLimit, countLimit int) string {
 	distinct := slices.Clone(audio)
 	slices.Sort(distinct)
 	distinct = slices.Compact(distinct)
@@ -461,8 +536,17 @@ func validPluginFiles(members map[string]pluginMember, audio []string, fileLimit
 	if total > totalLimit {
 		return "plugin_too_large"
 	}
+	for name, limit := range data {
+		m, ok := members[name]
+		if !ok || m.size == 0 {
+			return "invalid_plugin_manifest"
+		}
+		if m.size > limit {
+			return "plugin_too_large"
+		}
+	}
 	for name, m := range members {
-		if name == "plugin.toml" || slices.Contains(distinct, name) {
+		if _, named := data[name]; name == "plugin.toml" || named || slices.Contains(distinct, name) {
 			continue
 		}
 		if !pluginNotice(name) {
@@ -608,6 +692,182 @@ func validPluginEffect(table map[string]any, m pluginManifest) bool {
 			if !validEffectColor(c) {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// pluginLowercase 报告 s 是否只由小写 ASCII 字母组成。
+func pluginLowercase(s string) bool {
+	return !strings.ContainsFunc(s, func(c rune) bool { return c < 'a' || c > 'z' })
+}
+
+// pluginShortText 是短语文本和符号的共同规则：不是空白、不含控制字符、1 到 max 个 UTF-16 单元。
+func pluginShortText(s string, max int) bool {
+	return strings.TrimSpace(s) != "" && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl) && len(utf16.Encode([]rune(s))) <= max
+}
+
+// validPluginPhrases 对应 phrase_table.rs：1 到 2000 个 `[[phrases]]`，每行只有 `key`（1 到 32 个小写 ASCII 字母，K 模式的要求）和 `text`；(`key`,`text`) 不能重复，同一个 key 可以对应多条 text。短语表没有数据文件。
+func validPluginPhrases(table map[string]any, m pluginManifest) bool {
+	rows, _ := table["phrases"].([]any)
+	if m.Phrases == nil || len(*m.Phrases) < 1 || len(*m.Phrases) > maxPhraseRows || len(rows) != len(*m.Phrases) {
+		return false
+	}
+	seen := map[[2]string]bool{}
+	for i, row := range *m.Phrases {
+		raw, _ := rows[i].(map[string]any)
+		if !pluginKeys(raw, "key", "text") || row.Key == nil || row.Text == nil {
+			return false
+		}
+		key, text := *row.Key, *row.Text
+		if key == "" || len(key) > maxPhraseKey || !pluginLowercase(key) || !pluginShortText(text, maxPhraseText) || seen[[2]string{key, text}] {
+			return false
+		}
+		seen[[2]string{key, text}] = true
+	}
+	return true
+}
+
+// pluginDataName 报告 name 是否是可以点名的数据文件名：合法的包内文件名，扩展名（不区分大小写）为 ext。
+func pluginDataName(name *string, ext string) bool {
+	return name != nil && validPluginFileName(*name) && pluginExtension(*name) == ext
+}
+
+// validPluginHelpcode 对应 helpcode_pack.rs 的清单部分：`[helpcode]` 只有一个键 `table`，点名一个 `.txt` 数据文件，上限 1 MiB（Engine 的 MAX_HELPCODE_BYTES）。
+func validPluginHelpcode(table map[string]any, m pluginManifest) (map[string]int, bool) {
+	helpcode, _ := table["helpcode"].(map[string]any)
+	if m.Helpcode == nil || !pluginKeys(helpcode, "table") || !pluginDataName(m.Helpcode.Table, "txt") {
+		return nil, false
+	}
+	return map[string]int{*m.Helpcode.Table: maxHelpcodeBytes}, true
+}
+
+// validPluginWordbook 对应 wordbook_pack.rs 的清单部分：`[wordbook]` 只有一个键 `file`，点名一个 `.tsv` 数据文件，上限 4 MiB。插件 id 还要满足 wordbook::id_is_well_formed（只有小写字母、数字和 `-`，首尾不是 `-`）且不超过 59 个字符，名称不超过 64 个字符（MAX_NAME_CHARS）。
+func validPluginWordbook(table map[string]any, m pluginManifest) (map[string]int, bool) {
+	wordbook, _ := table["wordbook"].(map[string]any)
+	if m.Wordbook == nil || !pluginKeys(wordbook, "file") || !pluginDataName(m.Wordbook.File, "tsv") {
+		return nil, false
+	}
+	id := *m.ID
+	if len(id) > maxWordbookIDChars || strings.HasPrefix(id, "-") || strings.HasSuffix(id, "-") || strings.ContainsFunc(id, func(c rune) bool { return !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') }) {
+		return nil, false
+	}
+	if utf8.RuneCountInString(*m.Name) > maxWordbookNameChars {
+		return nil, false
+	}
+	return map[string]int{*m.Wordbook.File: maxWordbookBytes}, true
+}
+
+// pluginDataLines 把数据文件拆成行：必须是 UTF-8，可带 BOM，行尾为 LF 或 CRLF（只去掉行尾的一个 `\r`，其他位置的 `\r` 留给逐行规则当作控制字符拒绝）。
+func pluginDataLines(raw []byte) ([]string, bool) {
+	if !utf8.Valid(raw) {
+		return nil, false
+	}
+	lines := strings.Split(strings.TrimPrefix(string(raw), "\uFEFF"), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines, true
+}
+
+// validHelpcodeTable 是辅助码表的严格语法：每行为空行、`#` 开头的注释或 `<字>=<码>`。`<字>` 恰好是一个非 ASCII、非空白、非控制字符的 Unicode 标量，`<码>` 恰好是 1 到 2 个小写 ASCII 字母（更长的拒绝，不像 Engine 的宽松解析器那样截断），`=` 两侧不允许空格；1 到 30000 条，同一个字出现两次拒绝。
+func validHelpcodeTable(raw []byte) bool {
+	lines, ok := pluginDataLines(raw)
+	if !ok {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, line := range lines {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		char, code, found := strings.Cut(line, "=")
+		r, size := utf8.DecodeRuneInString(char)
+		if !found || char == "" || size != len(char) || r < utf8.RuneSelf || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+		if code == "" || len(code) > 2 || !pluginLowercase(code) || seen[char] {
+			return false
+		}
+		seen[char] = true
+		if len(seen) > maxHelpcodeEntries {
+			return false
+		}
+	}
+	return len(seen) > 0
+}
+
+// validWordbookEntries 是单词本的严格语法：跳过空行和 `#` 开头的行，其余每行是 `word\tmeaning` 或 `word\tphonetic\tmeaning`，不支持引号，列不做裁剪。每条必须满足 WordbookEntry::is_valid（单词 1 到 64 个字符、音标至多 64 个字符可为空、释义 1 到 256 个字符，都不含控制字符）；1 到 20000 条，单词不能重复；任何一行不合法都拒绝整个包。
+func validWordbookEntries(raw []byte) bool {
+	lines, ok := pluginDataLines(raw)
+	if !ok {
+		return false
+	}
+	bounded := func(s string, max int) bool {
+		return utf8.RuneCountInString(s) <= max && !strings.ContainsFunc(s, unicode.IsControl)
+	}
+	seen := map[string]bool{}
+	for _, line := range lines {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		columns := strings.Split(line, "\t")
+		var word, phonetic, meaning string
+		switch len(columns) {
+		case 2:
+			word, meaning = columns[0], columns[1]
+		case 3:
+			word, phonetic, meaning = columns[0], columns[1], columns[2]
+		default:
+			return false
+		}
+		if word == "" || !bounded(word, maxWordbookWordChars) || !bounded(phonetic, maxWordbookPhoneticChars) || meaning == "" || !bounded(meaning, maxWordbookMeaningChars) || seen[word] {
+			return false
+		}
+		seen[word] = true
+		if len(seen) > maxWordbookEntries {
+			return false
+		}
+	}
+	return len(seen) > 0
+}
+
+// validPluginSymbols 对应 symbol_set.rs：1 到 32 个 `[[groups]]`，每组 `tab`（"symbols" 或 "kaomoji"）、`title`（必填，1 到 48 字节，与 required_string 相同：非空白、无控制字符）、可选的 `keywords`（与 optional_string 相同：出现时非空白、至多 256 字节、无控制字符）和 `items`（只能是字符串，每组 1 到 512 个，每个 1 到 64 个 UTF-16 单元、非空白、无控制字符，组内不重复）；同一 `tab` 下的组 `title` 不得重复，不同 `tab` 可以同名；全部组合计至多 2048 项。符号集没有数据文件。
+func validPluginSymbols(table map[string]any, m pluginManifest) bool {
+	rows, _ := table["groups"].([]any)
+	if m.Groups == nil || len(*m.Groups) < 1 || len(*m.Groups) > maxSymbolGroups || len(rows) != len(*m.Groups) {
+		return false
+	}
+	total := 0
+	titles := make(map[[2]string]bool, len(*m.Groups))
+	for i, group := range *m.Groups {
+		raw, _ := rows[i].(map[string]any)
+		if !pluginKeys(raw, "tab", "title", "keywords", "items") || group.Tab == nil || group.Title == nil || group.Items == nil {
+			return false
+		}
+		if *group.Tab != "symbols" && *group.Tab != "kaomoji" || !pluginBoundedText(*group.Title, maxSymbolTitleBytes) {
+			return false
+		}
+		// 客户端按 (tab, title) 定位分组，同一 tab 下标题重复会让两组无法区分。
+		key := [2]string{*group.Tab, *group.Title}
+		if titles[key] {
+			return false
+		}
+		titles[key] = true
+		if group.Keywords != nil && !pluginBoundedText(*group.Keywords, maxSymbolKeywordBytes) {
+			return false
+		}
+		items := *group.Items
+		if len(items) < 1 || len(items) > maxSymbolGroupItems {
+			return false
+		}
+		for j, item := range items {
+			if !pluginShortText(item, maxSymbolItemUnits) || slices.Contains(items[:j], item) {
+				return false
+			}
+		}
+		if total += len(items); total > maxSymbolItems {
+			return false
 		}
 	}
 	return true

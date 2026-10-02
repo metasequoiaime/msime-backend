@@ -276,7 +276,7 @@ GitHub App 只安装到 msime-dictionary，仓库权限只给 Contents: Read and
 
 用户也可以分享候选窗皮肤包（skin.toml 加 PNG/JPEG，服务器重新编码图片），接口 `/v1/community/candidate-skins` 与限制见 [皮肤社区 · 候选窗皮肤包分享](docs/skin-community.md#候选窗皮肤包分享)。`auth.community.official_skin_publishers`（用户 ID 列表，64 位小写十六进制，默认为空，最多 50 个）指定官方发布账号，它们不受公开 20 款和每小时 10 次公开发布的限制，仍走审核和包校验。旧版本不认识这个配置项，会因未知字段拒绝启动：先让所有副本升级到新版本，再把它写进生产配置；回退版本前先删除它。
 
-用户还可以分享客户端插件包（按键音、背景音乐和命令表，zip 内含 plugin.toml、音频和说明），服务器只校验和原样分发、从不执行。接口 `/v1/community/plugins`、包校验规则与配额见 [插件社区](docs/plugin-community.md)。
+用户还可以分享客户端插件包（音效包、音乐包、指令表、特效包、辅助码表、符号集、短语表和单词本，zip 内含 plugin.toml、音频或数据文件和说明），服务器只校验和原样分发、从不执行。旧客户端不认识的后四种类型只返回给用 `kinds` 参数声明支持它们的客户端；升级时迁移会替换 `community_plugins` 的类型约束，上线顺序是先发容忍未知类型的客户端、再部署服务端、最后发布新类型的客户端。接口 `/v1/community/plugins`、包校验规则、配额与部署说明见 [插件社区](docs/plugin-community.md)。
 
 `GET /v1/community/stats` 公开返回社区内容总量 `{skins,skin_downloads,dictionaries,replies,resource_saves,generated_at}`，供官网服务端拉取后自行缓存。下载与收藏按账号去重，注销账号的作品和互动随之移除；不含用户数和安装包上报（这两项只在管理后台概览提供）。与其他社区接口一样免令牌、按 IP 每分钟 120 次限流、响应禁用缓存，用户体系未启用时返回 503。
 

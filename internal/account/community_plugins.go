@@ -139,6 +139,17 @@ func extendPluginTransfer(w http.ResponseWriter) {
 	_ = controller.SetWriteDeadline(time.Now().Add(pluginTransferTimeout + 5*time.Second))
 }
 
+// pluginVisibleKinds 返回本次请求能看到的类型：冻结的 legacyPluginKinds，加上客户端在 `kinds`（逗号分隔）里声明能安装的类型，再加上 `kind` 参数指定的类型。不认识的名字直接忽略而不是返回 400：声明只能放宽结果，不会让响应多出客户端不认识的类型，忽略未知值让声明了未来类型的客户端在后端认识它之前也能正常浏览。不带 `kinds` 或为空时只有旧类型，响应与引入这个参数之前逐字节相同。
+func pluginVisibleKinds(r *http.Request, kind string) []string {
+	visible := slices.Clone(legacyPluginKinds)
+	for _, name := range append(strings.Split(r.URL.Query().Get("kinds"), ","), kind) {
+		if slices.Contains(pluginKinds, name) && !slices.Contains(visible, name) {
+			visible = append(visible, name)
+		}
+	}
+	return visible
+}
+
 func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 	offset := 0
 	if raw := r.URL.Query().Get("offset"); raw != "" {
@@ -175,7 +186,7 @@ func (a *Service) communityPluginList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	join, order := communitySavedScope(scope, "community_plugin_saves", "pack_id", "p")
-	rows, e := a.store.pool.Query(r.Context(), pluginSelect+join+`WHERE strpos(lower(p.name),lower($2))>0 AND ($3='' OR p.kind=$3) AND ($5<>'mine' OR p.owner_id=$1) AND (p.moderation<>'removed' OR p.owner_id=$1) ORDER BY `+order+` LIMIT 21 OFFSET $4`, viewer, search, kind, offset, scope)
+	rows, e := a.store.pool.Query(r.Context(), pluginSelect+join+`WHERE strpos(lower(p.name),lower($2))>0 AND ($3='' OR p.kind=$3) AND ($5<>'mine' OR p.owner_id=$1) AND (p.moderation<>'removed' OR p.owner_id=$1) AND p.kind=ANY($6) ORDER BY `+order+` LIMIT 21 OFFSET $4`, viewer, search, kind, offset, scope, pluginVisibleKinds(r, kind))
 	if e != nil {
 		a.error(w, e)
 		return
@@ -209,7 +220,8 @@ func (a *Service) communityPluginDetail(w http.ResponseWriter, r *http.Request) 
 		writeError(w, 400, "invalid_fields")
 		return
 	}
-	v, e := scanCommunityPlugin(a.store.pool.QueryRow(r.Context(), pluginSelect+`WHERE p.id=$2 AND (p.moderation<>'removed' OR p.owner_id=$1)`, a.communityViewer(r), r.PathValue("id")))
+	// 客户端没有声明能安装的类型按不存在处理，与列表看不到它一致。
+	v, e := scanCommunityPlugin(a.store.pool.QueryRow(r.Context(), pluginSelect+`WHERE p.id=$2 AND (p.moderation<>'removed' OR p.owner_id=$1) AND p.kind=ANY($3)`, a.communityViewer(r), r.PathValue("id"), pluginVisibleKinds(r, "")))
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 404, "plugin_not_found")
 		return
