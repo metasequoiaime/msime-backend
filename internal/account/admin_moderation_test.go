@@ -1105,7 +1105,7 @@ func TestSkinAndPluginScopeMine(t *testing.T) {
 			t.Fatal(path, w.Body.String())
 		}
 	}
-	for _, path := range []string{"/v1/community/skins?scope=saved", "/v1/community/plugins?scope=all"} {
+	for _, path := range []string{"/v1/community/skins?scope=all", "/v1/community/plugins?scope=all"} {
 		if w := apiRequest(t, mux, "GET", path, "", owner.AccessToken, 400); !strings.Contains(w.Body.String(), "invalid_scope") {
 			t.Fatal(path, w.Body.String())
 		}

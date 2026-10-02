@@ -51,6 +51,14 @@ func TestAccountHTTPProfileRefreshLogoutDelete(t *testing.T) {
 	}
 	apiRequest(t, mux, "GET", "/v1/users/me", "", first.AccessToken, 401)
 	apiRequest(t, mux, "GET", "/v1/users/me", "", refreshed.AccessToken, 200)
+	// 轮换后 30 秒内再次提交旧令牌：409 refresh_superseded，会话保留。
+	if w = apiRequest(t, mux, "POST", "/v1/auth/refresh", string(refreshBody), "", 409); !strings.Contains(w.Body.String(), `"code":"refresh_superseded"`) {
+		t.Fatal(w.Body.String())
+	}
+	apiRequest(t, mux, "GET", "/v1/users/me", "", refreshed.AccessToken, 200)
+	if _, err := db.pool.Exec(t.Context(), "UPDATE auth_used_refresh SET used_at=now()-interval '31 seconds'"); err != nil {
+		t.Fatal(err)
+	}
 	apiRequest(t, mux, "POST", "/v1/auth/refresh", string(refreshBody), "", 401)
 	apiRequest(t, mux, "GET", "/v1/users/me", "", refreshed.AccessToken, 401)
 	second := complete(t, db, Identity{"email", "profile@example.test"})
@@ -309,8 +317,73 @@ func TestClientAddress(t *testing.T) {
 		// 配置了头但请求里没有时，退回 TCP 对端。
 		{"CF-Connecting-IP", "10.0.0.1:1", nil, "10.0.0.1"},
 	} {
-		if got := ClientAddress(request(tc.remote, tc.headers), tc.header); got != tc.want {
+		if got := ClientAddress(request(tc.remote, tc.headers), tc.header, ""); got != tc.want {
 			t.Errorf("ClientAddress(%s via %q) = %q, want %q", tc.remote, tc.header, got, tc.want)
+		}
+	}
+	// 官网代理：只有密钥相符时才采用 X-MSIME-Client-IP，其他情况两个头都被忽略。
+	secret := strings.Repeat("s", 40)
+	proxied := func(proof, visitor string) map[string][]string {
+		return map[string][]string{"CF-Connecting-IP": {"192.0.2.10"}, SiteProxyHeader: {proof}, SiteProxyClientIPHeader: {visitor}}
+	}
+	for _, tc := range []struct {
+		name, secret string
+		headers      map[string][]string
+		want         string
+	}{
+		{"密钥相符", secret, proxied(secret, "203.0.113.77"), "203.0.113.77"},
+		{"密钥相符的 IPv6 按 /64 归组", secret, proxied(secret, "2001:db8:5:6:7::1"), "2001:db8:5:6::/64"},
+		{"密钥相符但地址不合法", secret, proxied(secret, "not-an-ip"), "192.0.2.10"},
+		{"密钥相符但没带地址", secret, map[string][]string{"CF-Connecting-IP": {"192.0.2.10"}, SiteProxyHeader: {secret}}, "192.0.2.10"},
+		{"密钥不符", secret, proxied(secret+"x", "203.0.113.77"), "192.0.2.10"},
+		{"缺少密钥头", secret, map[string][]string{"CF-Connecting-IP": {"192.0.2.10"}, SiteProxyClientIPHeader: {"203.0.113.77"}}, "192.0.2.10"},
+		{"未配置密钥时空密钥头不算相符", "", proxied("", "203.0.113.77"), "192.0.2.10"},
+		{"未配置密钥", "", proxied(secret, "203.0.113.77"), "192.0.2.10"},
+	} {
+		if got := ClientAddress(request("10.0.0.1:1", tc.headers), "CF-Connecting-IP", tc.secret); got != tc.want {
+			t.Errorf("%s: ClientAddress = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	// 没有配置 client_ip_header 时，密钥相符的代理地址仍优先于 TCP 对端；密钥不符时只认 TCP 对端。
+	if got := ClientAddress(request("10.0.0.1:1", proxied(secret, "203.0.113.78")), "", secret); got != "203.0.113.78" {
+		t.Errorf("trusted proxy without client_ip_header = %q", got)
+	}
+	if got := ClientAddress(request("10.0.0.1:1", proxied("wrong", "203.0.113.78")), "", secret); got != "10.0.0.1" {
+		t.Errorf("untrusted proxy without client_ip_header = %q", got)
+	}
+}
+
+// 官网 BFF 带着正确的密钥转发时，账号接口按它报告的访客地址计额度；密钥不符的请求即使带了访客地址头，也和代理本身共用一份额度。
+func TestAccountRateLimitsTrustSiteProxyOnlyWithSecret(t *testing.T) {
+	db := testStore(t)
+	secret := strings.Repeat("s", 40)
+	a := &Service{store: db}
+	a.ConfigureClientAddress("CF-Connecting-IP", secret)
+	if _, err := db.pool.Exec(t.Context(), `DELETE FROM auth_rates WHERE key LIKE 'ip:%'`); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	Mount(mux, a)
+	providers := func(proof, visitor string) {
+		r := httptest.NewRequest("GET", "/v1/auth/providers", nil)
+		r.RemoteAddr = "10.0.0.1:443"
+		r.Header.Set("CF-Connecting-IP", "192.0.2.200")
+		r.Header.Set(SiteProxyHeader, proof)
+		r.Header.Set(SiteProxyClientIPHeader, visitor)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	providers(secret, "198.51.100.40")
+	providers(secret, "198.51.100.41")
+	providers("wrong", "198.51.100.42")
+	providers("", "198.51.100.43")
+	for address, want := range map[string]int{"198.51.100.40": 1, "198.51.100.41": 1, "198.51.100.42": 0, "198.51.100.43": 0, "192.0.2.200": 2} {
+		var count int
+		if err := db.pool.QueryRow(t.Context(), `SELECT COALESCE(sum(count),0) FROM auth_rates WHERE key=$1`, "ip:"+hash(address)).Scan(&count); err != nil || count != want {
+			t.Errorf("%s counted %d times, want %d (%v)", address, count, want, err)
 		}
 	}
 }

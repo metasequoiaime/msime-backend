@@ -347,14 +347,25 @@ func (a *Service) resourceRate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_rating")
 		return
 	}
+	// 登录即可评分，不再要求先收藏；仍然不能给自己的作品评分，已下架的作品不能评。
 	result, err := a.store.pool.Exec(r.Context(), `INSERT INTO community_resource_ratings(resource_id,user_id,stars)
- SELECT id,$2,$3 FROM community_resources WHERE id=$1 AND owner_id<>$2 AND moderation<>'removed' AND EXISTS(SELECT 1 FROM community_resource_saves WHERE resource_id=$1 AND user_id=$2)
+ SELECT id,$2,$3 FROM community_resources WHERE id=$1 AND owner_id<>$2 AND moderation<>'removed'
  ON CONFLICT(resource_id,user_id) DO UPDATE SET stars=excluded.stars`, r.PathValue("id"), p.UserID, input.Stars)
 	if err != nil {
 		a.error(w, err)
 		return
 	}
 	if result.RowsAffected() == 0 {
+		// 不存在或已下架（作者本人除外）时返回 404，与详情接口一致；剩下的只可能是自己的作品，沿用客户端已经认识的错误码。
+		var own bool
+		if err = a.store.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM community_resources WHERE id=$1 AND owner_id=$2 AND moderation<>'removed')`, r.PathValue("id"), p.UserID).Scan(&own); err != nil {
+			a.error(w, err)
+			return
+		}
+		if !own {
+			writeError(w, 404, "resource_not_found")
+			return
+		}
 		writeError(w, 403, "save_before_rating_or_own_resource")
 		return
 	}

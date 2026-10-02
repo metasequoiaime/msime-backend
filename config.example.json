@@ -107,6 +107,7 @@
   },
   "allowed_origins": [],
   "client_ip_header": "",
+  "site_proxy_secret_env": "",
   "word_submissions": {
     "turnstile": {
       "site_key": "",

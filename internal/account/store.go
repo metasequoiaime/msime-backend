@@ -52,6 +52,12 @@ var ErrInvalid = errors.New("invalid_credentials")
 var ErrLimited = errors.New("rate_limit_exceeded")
 var ErrConflict = errors.New("identity_already_linked")
 
+// ErrRefreshSuperseded 表示提交的刷新令牌在 refreshSupersededGrace 之内刚被另一次刷新轮换掉：会话没有被撤销，调用方应改用并发请求已经拿到的新令牌。它不包装 ErrInvalid，HTTP 层单独映射为 409。
+var ErrRefreshSuperseded = errors.New("refresh_superseded")
+
+// refreshSupersededGrace 是轮换后的旧刷新令牌按并发刷新处理的时长，超过后再出现才视为重放并撤销会话。官网的 BFF 和多个标签页会同时用同一个刷新令牌。
+const refreshSupersededGrace = "30 seconds"
+
 type Store struct{ pool *pgxpool.Pool }
 type User struct {
 	ID          string    `json:"id"`
@@ -192,6 +198,7 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_skins sk ON sk.owner_id=u.id
  LEFT JOIN community_skin_downloads sd ON sd.user_id=u.id
  LEFT JOIN community_skin_ratings sr ON sr.user_id=u.id
+ LEFT JOIN community_skin_saves ssv ON ssv.user_id=u.id AND ssv.created_at IS NULL
  LEFT JOIN translation_cache tc ON false
  LEFT JOIN candidate_skins ck ON false
  LEFT JOIN candidate_skin_resources ckr ON false
@@ -199,9 +206,12 @@ func (s *Store) Ready(ctx context.Context) error {
  LEFT JOIN community_candidate_skin_files ccf ON false
  LEFT JOIN community_candidate_skin_downloads ccd ON ccd.user_id=u.id
  LEFT JOIN community_candidate_skin_ratings ccr ON ccr.user_id=u.id
+ LEFT JOIN community_candidate_skin_saves ccv ON ccv.user_id=u.id AND ccv.created_at IS NULL
  LEFT JOIN community_plugins cpl ON cpl.owner_id=u.id
  LEFT JOIN community_plugin_downloads cpd ON cpd.user_id=u.id
  LEFT JOIN community_plugin_ratings cpr ON cpr.user_id=u.id
+ LEFT JOIN community_plugin_saves cpv ON cpv.user_id=u.id AND cpv.created_at IS NULL
+ LEFT JOIN auth_used_refresh ur ON false AND ur.used_at IS NULL
  LEFT JOIN site_settings ss ON false
  LEFT JOIN auth_identities ai ON false AND ai.email_verified AND ai.email||ai.name||ai.picture||u.avatar_key='' AND ai.updated_at IS NULL
  LEFT JOIN auth_challenges ch ON false AND ch.code_verifier||ch.redirect_uri=''
@@ -427,6 +437,15 @@ func (s *Store) Refresh(ctx context.Context, token string) (Tokens, error) {
 		e = pgx.ErrNoRows
 	}
 	if errors.Is(e, pgx.ErrNoRows) {
+		// 刚被轮换的令牌再次出现，多半是并发刷新（官网 BFF、多个标签页）输掉了竞争：会话仍有效时返回 ErrRefreshSuperseded，不撤销。另一次刷新持有会话行锁时，上面的查询会等它提交，所以这里能读到它写入的 used_at。
+		var superseded bool
+		e = tx.QueryRow(ctx, "SELECT COALESCE(u.used_at>now()-interval '"+refreshSupersededGrace+"',false) AND NOT s.revoked AND s.expires_at>now() FROM auth_used_refresh u JOIN auth_sessions s ON s.id=u.session_id WHERE u.hash=$1", hash(token)).Scan(&superseded)
+		if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+			return Tokens{}, e
+		}
+		if superseded {
+			return Tokens{}, ErrRefreshSuperseded
+		}
 		// 已轮换令牌被重放时撤销该会话族，已签发的新 access_token 也立即失效。
 		_, e = tx.Exec(ctx, "UPDATE auth_sessions SET revoked=true WHERE id=(SELECT session_id FROM auth_used_refresh WHERE hash=$1)", hash(token))
 		if e != nil {
@@ -441,7 +460,7 @@ func (s *Store) Refresh(ctx context.Context, token string) (Tokens, error) {
 		return Tokens{}, e
 	}
 	t := Tokens{AccessToken: randomToken(), RefreshToken: randomToken(), TokenType: "Bearer", ExpiresIn: 900}
-	if _, e = tx.Exec(ctx, "INSERT INTO auth_used_refresh(hash,session_id) VALUES($1,$2)", hash(token), sid); e != nil {
+	if _, e = tx.Exec(ctx, "INSERT INTO auth_used_refresh(hash,session_id,used_at) VALUES($1,$2,now())", hash(token), sid); e != nil {
 		return t, e
 	}
 	if _, e = tx.Exec(ctx, "UPDATE auth_sessions SET access_hash=$1,refresh_hash=$2,access_expires=least(now()+interval '15 minutes',expires_at) WHERE id=$3", hash(t.AccessToken), hash(t.RefreshToken), sid); e != nil {

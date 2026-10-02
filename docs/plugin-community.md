@@ -4,14 +4,15 @@
 
 ## 接口
 
-- `GET /v1/community/plugins?q=&kind=&kinds=&offset=0&scope=&fields=`：公开目录，按发布时间倒序每页 20 条，返回 `plugins` 和 `has_more`。只列出可见类型（见下面的「类型声明」）。`kind` 为空表示全部可见类型，否则只能是上述八种之一（指定的类型本身算作已声明）；`q` 按名称不区分大小写子串匹配，最长 128 字节；`offset` 为 0 到 100000。`scope=mine` 只列出自己的作品（含被审核员下架的），需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。目录不含 zip 字节和清单。
+- `GET /v1/community/plugins?q=&kind=&kinds=&offset=0&scope=&fields=`：公开目录，按发布时间倒序每页 20 条，返回 `plugins` 和 `has_more`。只列出可见类型（见下面的「类型声明」）。`kind` 为空表示全部可见类型，否则只能是上述八种之一（指定的类型本身算作已声明）；`q` 按名称不区分大小写子串匹配，最长 128 字节；`offset` 为 0 到 100000。`scope=mine` 只列出自己的作品（含被审核员下架的）；`scope=saved` 只列出自己收藏的作品，按收藏时间倒序，分页方式相同，别人已下架的作品不再列出。两者都需要用户会话，否则 401 `user_session_required`；其他 scope 返回 400 `invalid_scope`。目录不含 zip 字节和清单。
 - `GET /v1/community/plugins/{id}?fields=&kinds=`：公开详情；登录时额外返回 `owned`（是否为作者）和 `my_rating`（自己的评分，未评为 0）。不存在，或类型不在可见范围内，返回 404 `plugin_not_found`。
 - `POST /v1/community/plugins`：需要用户会话，提交 `{id,name,description,kind,plugin_id,version,archive}`，成功返回 201 和摘要。`archive` 为 zip 的标准 base64。`id` 为客户端生成的 UUID，用于网络失败后的安全重试：同一账号用完全相同的内容重试返回 200 和已存记录，任何字段不同或他人占用同一 id 返回 409 `plugin_id_conflict`。
 - `POST /v1/community/plugins/{id}/download`：需要用户会话，返回 `{id,kind,plugin_id,version,size,sha256,archive}`，`archive` 为原样 zip 的标准 base64。客户端安装前应核对 `sha256`。下载人数按账号去重；重复下载不计人数，但计入下面的下载频率限制。
-- `PUT /v1/community/plugins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`，返回 `{stars}`。必须已下载，作者不可自评（403 `download_before_rating_or_own_plugin`）；重复提交更新同一条评分。
-- `DELETE /v1/community/plugins/{id}`：仅作者可删除，返回 `{deleted:true}`；不是作者或不存在都返回 404。连带删除下载和评分记录，不影响其他设备已安装的本地副本。
+- `PUT /v1/community/plugins/{id}/rating`：需要用户会话，提交 `{stars:1..5}`，返回 `{stars}`。登录即可评分，不需要先下载；不能给自己的作品评分（403 `download_before_rating_or_own_plugin`，错误码沿用旧名，现在只表示「自己的作品」）；不存在或已下架的插件返回 404 `plugin_not_found`。重复提交更新同一条评分。
+- `PUT /v1/community/plugins/{id}/save`：需要用户会话，提交 `{"saved":true|false}` 收藏或取消收藏，重复提交结果相同，返回 200 `{"saved":bool,"saves":int}`（saves 为收藏总数）。不存在或已下架（作者本人除外）的插件收藏时返回 404 `plugin_not_found`；取消收藏不看作品状态，总是删除并返回 200，作品下架后用户仍能把它移出收藏。
+- `DELETE /v1/community/plugins/{id}`：仅作者可删除，返回 `{deleted:true}`；不是作者或不存在都返回 404。连带删除下载、评分和收藏记录，不影响其他设备已安装的本地副本。
 
-摘要字段：`id`、`kind`、`plugin_id`、`name`、`description`、`author`、`version`、`license`、`size`、`sha256`、`downloads`、`rating_count`、`rating_average`、`owned`、`my_rating`、`created_at`，以及仅在 `fields=moderation` 时出现在自己作品上的 `moderation`。
+摘要字段：`id`、`kind`、`plugin_id`、`name`、`description`、`author`、`version`、`license`、`size`、`sha256`、`downloads`、`rating_count`、`rating_average`、`owned`、`my_rating`、`created_at`，以及仅在 `fields=moderation` 时出现在自己作品上的 `moderation`、仅在 `fields=saved` 时出现的 `saved`（当前用户是否收藏，匿名为 false）和 `saves`（收藏总数）。`fields` 是逗号分隔的列表，可以组合，例如 `fields=moderation,saved`；不带 `saved` 时响应与加入收藏之前逐字节相同。
 
 类型声明：已发布的客户端按严格模式解析列表，遇到不认识的 `kind` 会整页失败，所以列表和详情默认只返回它们认识的 `sound`、`music`、`command_table`、`effect`（服务端冻结的 `legacyPluginKinds`，以后新增类型也不改）。客户端用 `kinds` 声明自己能安装的其他类型，逗号分隔，例如 `kinds=helpcode,symbol_set,phrase_table,wordbook`；可见类型是这四种旧类型、声明的类型和 `kind` 指定的类型的并集。不认识的名字直接忽略、不报错，这样声明了未来类型的客户端在服务端认识该类型之前也能正常浏览。不带 `kinds` 或为空时，响应与引入这个参数之前逐字节相同。`scope=mine` 同样按可见类型过滤；下载、评分、删除和发布的回显不受影响。
 
@@ -63,9 +64,9 @@ zip 层面的错误返回 400 `invalid_plugin_archive`，清单与文件规则�
 | 400 | `plugin_kind_mismatch` / `plugin_manifest_mismatch` | 清单与请求不一致 |
 | 400 | `invalid_rating` | 评分不在 1..5 |
 | 401 | `user_session_required` | 缺少用户会话 |
-| 403 | `download_before_rating_or_own_plugin` | 未下载或自评 |
+| 403 | `download_before_rating_or_own_plugin` | 给自己的作品评分 |
 | 400 | `invalid_scope` / `invalid_fields` | 列表的 `scope` 或 `fields` 不合规 |
-| 404 | `plugin_not_found` | 不存在，或非作者删除 |
+| 404 | `plugin_not_found` | 不存在、已下架（评分、收藏），或非作者删除 |
 | 409 | `plugin_id_conflict` / `plugin_publish_limit` / `plugin_storage_limit` | UUID 冲突或配额已满 |
 | 415 | `json_required` | Content-Type 不是 application/json |
 | 422 | `blocked_content` | 标题、说明或清单命中拦截级敏感词，未保存 |
@@ -75,15 +76,15 @@ zip 层面的错误返回 400 `invalid_plugin_archive`，清单与文件规则�
 
 ## 存储与部署
 
-三张表定义在 `internal/account/community_plugin_schema.sql`：`community_plugins`（zip 原样存为 bytea，`size` 和 `sha256` 是生成列，不会与下发字节不一致）、`community_plugin_downloads` 与 `community_plugin_ratings`（主键均为 `(pack_id,user_id)`，保证多副本并发去重）。外键都对账号级联删除，注销账号会移除其插件、下载和评分。
+四张表定义在 `internal/account/community_plugin_schema.sql`：`community_plugins`（zip 原样存为 bytea，`size` 和 `sha256` 是生成列，不会与下发字节不一致）、`community_plugin_downloads`、`community_plugin_ratings` 与 `community_plugin_saves`（主键均为 `(pack_id,user_id)`，保证多副本并发去重；收藏表的 `created_at` 是收藏时间，`scope=saved` 用索引 `community_plugin_saves_user (user_id, created_at DESC)` 按它倒序列出）。外键都对插件和账号级联删除，注销账号会移除其插件、下载、评分和收藏。
 
 运行角色有 DDL 权限时新版本启动会自动建表。按最小权限部署时，上线前用迁移账号执行新版本的 `-migrate-users`，或在事务中执行上述 SQL（需要 PostgreSQL 12 及以上，用到生成列），并授予运行角色权限：
 
 ```sql
-GRANT SELECT, INSERT, UPDATE, DELETE ON community_plugins, community_plugin_downloads, community_plugin_ratings TO msime_backend;
+GRANT SELECT, INSERT, UPDATE, DELETE ON community_plugins, community_plugin_downloads, community_plugin_ratings, community_plugin_saves TO msime_backend;
 ```
 
-先迁移再滚动更新，旧二进制不读这三张表。
+先迁移再滚动更新，旧二进制不读这些表。加入收藏的版本只新增 `community_plugin_saves`，启动探测会检查它，缺表时自动执行迁移；已有部署只需额外授予这一张表。
 
 `kind` 的 CHECK 约束 `community_plugins_kind_known` 一次列出客户端认识的全部类型，某个类型能否发布由服务端的 `pluginKinds` 决定。迁移在约束定义不含 `wordbook` 时删除并重建它（需要表的属主权限，最小权限部署同样要用迁移账号执行 `-migrate-users` 或配置 `migration_role`）；启动探测发现旧约束也会触发迁移，所以已有数据库升级时不需要手工操作。重建约束会短暂持有表锁并扫描现有行，旧二进制只写四种旧类型，滚动更新期间不受影响。
 
