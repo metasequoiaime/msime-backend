@@ -832,13 +832,14 @@ func validWordbookEntries(raw []byte) bool {
 	return len(seen) > 0
 }
 
-// validPluginSymbols 对应 symbol_set.rs：1 到 32 个 `[[groups]]`，每组 `tab`（"symbols" 或 "kaomoji"）、`title`（必填，1 到 48 字节，与 required_string 相同：非空白、无控制字符）、可选的 `keywords`（与 optional_string 相同：出现时非空白、至多 256 字节、无控制字符）和 `items`（只能是字符串，每组 1 到 512 个，每个 1 到 64 个 UTF-16 单元、非空白、无控制字符，组内不重复）；全部组合计至多 2048 项。符号集没有数据文件。
+// validPluginSymbols 对应 symbol_set.rs：1 到 32 个 `[[groups]]`，每组 `tab`（"symbols" 或 "kaomoji"）、`title`（必填，1 到 48 字节，与 required_string 相同：非空白、无控制字符）、可选的 `keywords`（与 optional_string 相同：出现时非空白、至多 256 字节、无控制字符）和 `items`（只能是字符串，每组 1 到 512 个，每个 1 到 64 个 UTF-16 单元、非空白、无控制字符，组内不重复）；同一 `tab` 下的组 `title` 不得重复，不同 `tab` 可以同名；全部组合计至多 2048 项。符号集没有数据文件。
 func validPluginSymbols(table map[string]any, m pluginManifest) bool {
 	rows, _ := table["groups"].([]any)
 	if m.Groups == nil || len(*m.Groups) < 1 || len(*m.Groups) > maxSymbolGroups || len(rows) != len(*m.Groups) {
 		return false
 	}
 	total := 0
+	titles := make(map[[2]string]bool, len(*m.Groups))
 	for i, group := range *m.Groups {
 		raw, _ := rows[i].(map[string]any)
 		if !pluginKeys(raw, "tab", "title", "keywords", "items") || group.Tab == nil || group.Title == nil || group.Items == nil {
@@ -847,6 +848,12 @@ func validPluginSymbols(table map[string]any, m pluginManifest) bool {
 		if *group.Tab != "symbols" && *group.Tab != "kaomoji" || !pluginBoundedText(*group.Title, maxSymbolTitleBytes) {
 			return false
 		}
+		// 客户端按 (tab, title) 定位分组，同一 tab 下标题重复会让两组无法区分。
+		key := [2]string{*group.Tab, *group.Title}
+		if titles[key] {
+			return false
+		}
+		titles[key] = true
 		if group.Keywords != nil && !pluginBoundedText(*group.Keywords, maxSymbolKeywordBytes) {
 			return false
 		}
